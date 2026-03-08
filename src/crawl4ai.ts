@@ -43,22 +43,10 @@ async function getClient(): Promise<Client> {
   return connecting;
 }
 
-export async function callCrawlTool(args: Record<string, unknown>) {
+async function call(name: string, args: Record<string, unknown>) {
   const c = await getClient();
   try {
-    return await c.callTool({ name: 'crawl', arguments: args });
-  } catch (err) {
-    // Reset on failure so next call reconnects
-    client = null;
-    connecting = null;
-    throw err;
-  }
-}
-
-export async function callMdTool(args: Record<string, unknown>) {
-  const c = await getClient();
-  try {
-    return await c.callTool({ name: 'md', arguments: args });
+    return await c.callTool({ name, arguments: args });
   } catch (err) {
     client = null;
     connecting = null;
@@ -66,35 +54,8 @@ export async function callMdTool(args: Record<string, unknown>) {
   }
 }
 
-export async function callScreenshotTool(args: Record<string, unknown>) {
-  const c = await getClient();
-  try {
-    return await c.callTool({ name: 'screenshot', arguments: args });
-  } catch (err) {
-    client = null;
-    connecting = null;
-    throw err;
-  }
-}
-
-export async function callPdfTool(args: Record<string, unknown>) {
-  const c = await getClient();
-  try {
-    return await c.callTool({ name: 'pdf', arguments: args });
-  } catch (err) {
-    client = null;
-    connecting = null;
-    throw err;
-  }
-}
-
-export async function callExecuteJsTool(args: Record<string, unknown>) {
-  const c = await getClient();
-  try {
-    return await c.callTool({ name: 'execute_js', arguments: args });
-  } catch (err) {
-    client = null;
-    connecting = null;
-    throw err;
-  }
-}
+export const callCrawlTool = (args: Record<string, unknown>) => call('crawl', args);
+export const callMdTool = (args: Record<string, unknown>) => call('md', args);
+export const callScreenshotTool = (args: Record<string, unknown>) => call('screenshot', args);
+export const callPdfTool = (args: Record<string, unknown>) => call('pdf', args);
+export const callExecuteJsTool = (args: Record<string, unknown>) => call('execute_js', args);
