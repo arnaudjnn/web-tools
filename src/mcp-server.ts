@@ -99,10 +99,16 @@ function createServer(): McpServer {
         .max(20)
         .optional()
         .describe('Max number of results (default: 10)'),
+      engines: z
+        .string()
+        .optional()
+        .describe(
+          'Comma-separated list of engines to use (e.g. "google", "google,brave"). Overrides the default engines.',
+        ),
     },
-    async ({ query, limit }) => {
+    async ({ query, limit, engines }) => {
       try {
-        const results = await searchSearXNG(query, { limit: limit ?? 10 });
+        const results = await searchSearXNG(query, { limit: limit ?? 10, engines });
         return {
           content: [
             {

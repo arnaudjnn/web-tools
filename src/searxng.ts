@@ -18,9 +18,9 @@ type SearXNGResponse = {
 
 export async function searchSearXNG(
   query: string,
-  options?: { limit?: number; timeout?: number },
+  options?: { limit?: number; timeout?: number; engines?: string },
 ): Promise<{ data: SearchResult[] }> {
-  const { url: baseUrl, engines, categories } = Config.searxng;
+  const { url: baseUrl, engines: defaultEngines, categories } = Config.searxng;
   const limit = options?.limit ?? 10;
   const timeout = options?.timeout ?? 30_000;
 
@@ -29,6 +29,8 @@ export async function searchSearXNG(
     format: 'json',
   });
 
+  // Per-request engines override the default
+  const engines = options?.engines || defaultEngines;
   if (engines) {
     params.set('engines', engines);
   }
