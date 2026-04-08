@@ -1,35 +1,23 @@
 {
-  "name": "web-tools",
-  "version": "0.0.1",
-  "main": "dist/mcp-server.js",
+  "name": "@web-tools/root",
+  "private": true,
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "format": "prettier --write \"src/**/*.{ts,tsx}\"",
-    "tsx": "tsx --env-file=.env.local",
-    "start": "tsx --env-file=.env.local src/mcp-server.ts",
-    "build": "tsc",
-    "build:watch": "tsc --watch",
-    "serve": "node --env-file=.env.local dist/mcp-server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "devDependencies": {
-    "@ianvs/prettier-plugin-sort-imports": "^4.4.1",
-    "@types/express": "^5.0.2",
-    "@types/node": "^22.13.0",
-    "prettier": "^3.4.2",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.3"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "dotenv": "^16.4.7",
-    "express": "^5.1.0",
-    "zod": "^3.24.1"
+    "build": "pnpm --filter @web-tools/toolkit run build && pnpm --filter @web-tools/api run build && pnpm --filter @web-tools/cli run build",
+    "start": "pnpm --filter @web-tools/api run start",
+    "serve": "pnpm --filter @web-tools/api run serve",
+    "clean": "pnpm -r run clean",
+    "typecheck": "pnpm -r run typecheck",
+    "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\""
   },
   "engines": {
     "node": "22.x"
+  },
+  "devDependencies": {
+    "@ianvs/prettier-plugin-sort-imports": "^4.4.1",
+    "@types/node": "^22.13.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3"
   }
 }

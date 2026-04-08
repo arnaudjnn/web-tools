@@ -1,15 +1,5 @@
-import { resolve } from 'path';
-import { fileURLToPath } from 'url';
-import { config } from 'dotenv';
 import { z } from 'zod';
 
-// Get the directory name of the current module
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
-
-// Load environment variables from .env.local
-config({ path: resolve(__dirname, '../.env.local') });
-
-// Define and validate the environment schema
 const envSchema = z.object({
   SEARXNG_URL: z.string().default('http://searxng.railway.internal:8080'),
   SEARXNG_ENGINES: z.string().optional(),
@@ -19,10 +9,8 @@ const envSchema = z.object({
   CRAWL4AI_API_TOKEN: z.string().optional(),
 });
 
-// Parse and validate environment variables
 const env = envSchema.parse(process.env);
 
-// Export the validated config
 export const Config = {
   apiKey: env.API_KEY,
   searxng: {
@@ -34,4 +22,6 @@ export const Config = {
     url: env.CRAWL4AI_URL,
     apiToken: env.CRAWL4AI_API_TOKEN,
   },
+  parallelRequests: 3,
+  requestTimeout: 15,
 } as const;

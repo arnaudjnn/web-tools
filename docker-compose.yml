@@ -5,14 +5,13 @@ services:
       - "6379:6379"
 
   searxng:
-    image: searxng/searxng:latest
+    build: ./services/searxng
     ports:
       - "8080:8080"
-    volumes:
-      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
     environment:
       - SEARXNG_SECRET_KEY=dev-secret-key
       - SEARXNG_REDIS_URL=redis://redis:6379/0
+      - PROXY_URL=${PROXY_URL:-}
     depends_on:
       - redis
 
@@ -23,8 +22,10 @@ services:
     environment:
       - CRAWL4AI_API_TOKEN=${CRAWL4AI_API_TOKEN:-}
 
-  web_search:
-    build: .
+  web_tools:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
     ports:
       - "3000:3000"
     environment:

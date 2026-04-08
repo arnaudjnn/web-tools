@@ -7,13 +7,28 @@ settings:
 importers:
 
   .:
+    devDependencies:
+      '@ianvs/prettier-plugin-sort-imports':
+        specifier: ^4.4.1
+        version: 4.7.1(prettier@3.8.1)
+      '@types/node':
+        specifier: ^22.13.0
+        version: 22.19.10
+      prettier:
+        specifier: ^3.4.2
+        version: 3.8.1
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/api:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1.12.1
         version: 1.26.0(zod@3.25.76)
-      dotenv:
-        specifier: ^16.4.7
-        version: 16.6.1
+      '@web-tools/toolkit':
+        specifier: workspace:*
+        version: link:../toolkit
       express:
         specifier: ^5.1.0
         version: 5.2.1
@@ -21,21 +36,41 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
     devDependencies:
-      '@ianvs/prettier-plugin-sort-imports':
-        specifier: ^4.4.1
-        version: 4.7.1(prettier@3.8.1)
       '@types/express':
         specifier: ^5.0.2
         version: 5.0.6
-      '@types/node':
-        specifier: ^22.13.0
-        version: 22.19.10
-      prettier:
-        specifier: ^3.4.2
-        version: 3.8.1
       tsx:
         specifier: ^4.19.2
         version: 4.21.0
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/cli:
+    dependencies:
+      '@web-tools/toolkit':
+        specifier: workspace:*
+        version: link:../toolkit
+      commander:
+        specifier: ^13.1.0
+        version: 13.1.0
+    devDependencies:
+      tsx:
+        specifier: ^4.19.2
+        version: 4.21.0
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
+  packages/toolkit:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.12.1
+        version: 1.26.0(zod@3.25.76)
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
@@ -343,6 +378,10 @@ packages:
     resolution: {integrity: sha512-+ys997U96po4Kx/ABpBCqhA9EuxJaQWDQg7295H4hBphv3IZg0boBKuwYpt4YXp6MZ5AmZQnU/tyMTlRpaSejg==}
     engines: {node: '>= 0.4'}
 
+  commander@13.1.0:
+    resolution: {integrity: sha512-/rFeCpNJQbhSZjGVwO9RFV3xPqbnERS8MmIQzCtD/zl6gpJuV/bMLuN92oG3F7d8oDEHHRrujSXNUr8fpjntKw==}
+    engines: {node: '>=18'}
+
   content-disposition@1.0.1:
     resolution: {integrity: sha512-oIXISMynqSqm241k6kcQ5UwttDILMK4BiurCfGEREw6+X9jkkpEe5T9FZaApyLGGOnFuyMWZpdolTXMtvEJ08Q==}
     engines: {node: '>=18'}
@@ -379,10 +418,6 @@ packages:
   depd@2.0.0:
     resolution: {integrity: sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw==}
     engines: {node: '>= 0.8'}
-
-  dotenv@16.6.1:
-    resolution: {integrity: sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==}
-    engines: {node: '>=12'}
 
   dunder-proto@1.0.1:
     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
@@ -977,6 +1012,8 @@ snapshots:
       call-bind-apply-helpers: 1.0.2
       get-intrinsic: 1.3.0
 
+  commander@13.1.0: {}
+
   content-disposition@1.0.1: {}
 
   content-type@1.0.5: {}
@@ -1001,8 +1038,6 @@ snapshots:
       ms: 2.1.3
 
   depd@2.0.0: {}
-
-  dotenv@16.6.1: {}
 
   dunder-proto@1.0.1:
     dependencies:

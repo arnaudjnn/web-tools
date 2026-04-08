@@ -1,0 +1,25 @@
+{
+  "name": "@web-tools/api",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx --env-file=../../.env.local src/index.ts",
+    "serve": "node --env-file=../../.env.local dist/index.js",
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@web-tools/toolkit": "workspace:*",
+    "express": "^5.1.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

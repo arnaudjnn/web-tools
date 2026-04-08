@@ -1,41 +1,42 @@
 # Web Tools
 
-An [MCP](https://modelcontextprotocol.io/) server that provides eight tools: a fast **web search** powered by [SearXNG](https://github.com/searxng/searxng), five [Crawl4AI](https://github.com/unclecode/crawl4ai)-powered tools (**web_fetch**, **web_screenshot**, **web_pdf**, **web_execute_js**, **web_crawl**), and two [Wayback Machine](https://web.archive.org/) tools (**web_snapshots**, **web_archive**).
+A self-hosted web toolkit providing eight tools for search, content extraction, and archival. Available as an [MCP](https://modelcontextprotocol.io/) server, REST API, and CLI — powered by [SearXNG](https://github.com/searxng/searxng), [Crawl4AI](https://github.com/unclecode/crawl4ai), and the [Wayback Machine](https://web.archive.org/).
 
 ## Architecture
 
 ```mermaid
 graph LR
-    Client["MCP Client<br/>(Claude, Cursor, etc.)"] -->|web_search| Server["MCP Server"]
-    Client -->|web_fetch| Server
-    Client -->|web_screenshot| Server
-    Client -->|web_pdf| Server
-    Client -->|web_execute_js| Server
-    Client -->|web_crawl| Server
-    Client -->|web_snapshots| Server
-    Client -->|web_archive| Server
-    Server --> SearXNG
+    MCP["MCP Client<br/>(Claude, Cursor, etc.)"] -->|POST /mcp| Server["Web Tools Server"]
+    API["REST Client"] -->|POST /api/v0/*| Server
+    CLI["CLI"] -->|direct call| Toolkit["@web-tools/toolkit"]
+    Server --> Toolkit
+    Toolkit --> SearXNG
     SearXNG --> Redis
-    Server --> Crawl4AI
-    Server --> Wayback["Wayback Machine"]
+    Toolkit --> Crawl4AI
+    Toolkit --> Wayback["Wayback Machine"]
 ```
 
-The `web_search` tool queries SearXNG for search results. The Crawl4AI tools handle content extraction, screenshots, PDFs, JS execution, and multi-URL crawling. The Wayback Machine tools list and retrieve archived pages.
+The project is structured as a **monorepo** with three packages:
 
-The full stack deploys as **4 services**: Redis, SearXNG, Crawl4AI, and this MCP server.
+- **`packages/toolkit`** — Core business logic: Zod schemas, tool definitions, SearXNG/Crawl4AI/Wayback clients. Framework-agnostic.
+- **`packages/api`** — Express HTTP server exposing MCP (`POST /mcp`) and REST (`POST /api/v0/{tool_name}`) endpoints.
+- **`packages/cli`** — Commander.js CLI for terminal usage.
+
+The full stack deploys as **4 services**: Redis, SearXNG, Crawl4AI, and the Web Tools server.
 
 ## Tools
 
-The server exposes eight MCP tools:
+The server exposes eight tools:
 
 ### `web_search`
 
-Lightweight web search via SearXNG. Returns structured results.
+Lightweight web search via SearXNG with parallel request strategy for reliability.
 
 | Parameter | Type              | Description                                  |
 | --------- | ----------------- | -------------------------------------------- |
 | `query`   | string (required) | The search query                             |
 | `limit`   | number (optional) | Max results to return (default: 10, max: 20) |
+| `engines` | string (optional) | Comma-separated engines (e.g. "google,brave") |
 
 Returns a JSON array of `{ url, title, description }` results.
 
@@ -122,9 +123,11 @@ Retrieve an archived page from the Wayback Machine.
 
 Returns the archived page content.
 
-### Connecting to the Server
+## Interfaces
 
-All examples below assume your server is running at `https://your-server.up.railway.app/mcp` with an API key. Replace the URL and key with your own values.
+### MCP
+
+All MCP-compatible clients can connect via HTTP:
 
 #### Claude Code (CLI)
 
@@ -136,8 +139,6 @@ claude mcp add web_tools \
 ```
 
 #### Project-level config (`.mcp.json`)
-
-Add to `.mcp.json` at the root of any project to make the tool available to all collaborators:
 
 ```json
 {
@@ -169,9 +170,49 @@ Add to `.mcp.json` at the root of any project to make the tool available to all 
 }
 ```
 
-### Replace Claude Code's Built-in Web Search & Web Fetch (Optional)
+### REST API
 
-By default, Claude Code uses its own `WebSearch` and `WebFetch` tools. You can replace them with this server's `web_search` and `web_fetch` tools for privacy-respecting, self-hosted results.
+Every tool is also available as a REST endpoint:
+
+```bash
+# Discovery — list all tools
+curl https://your-server.up.railway.app/api/v0 \
+  -H "Authorization: Bearer your-api-key"
+
+# Search
+curl -X POST https://your-server.up.railway.app/api/v0/web_search \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "railway deployment"}'
+
+# Fetch
+curl -X POST https://your-server.up.railway.app/api/v0/web_fetch \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+```
+
+### CLI
+
+```bash
+# Search
+web-tools search "railway deployment" --limit 5
+
+# Fetch page as markdown
+web-tools fetch https://example.com
+
+# Screenshot
+web-tools screenshot https://example.com
+
+# Crawl multiple URLs
+web-tools crawl https://a.com https://b.com --magic
+
+# Wayback Machine
+web-tools snapshots https://example.com --from 20200101
+web-tools archive https://example.com --timestamp 20200101120000
+```
+
+### Replace Claude Code's Built-in Web Search & Web Fetch (Optional)
 
 **1. Add the MCP server globally:**
 
@@ -202,15 +243,24 @@ claude mcp add web_tools --scope user \
 - Do not attempt to use the built-in WebSearch or WebFetch tools
 ```
 
-**4. Verify** by running `/mcp` inside Claude Code to check the server is connected, then ask Claude to search for something or fetch a URL.
-
 ## Deployment (Railway)
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/web-tools?referralCode=zMTz_F&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
-- Click **Deploy on Railway**: you'll see all 4 services listed (Redis, SearXNG, Crawl4AI, MCP Server)
+- Click **Deploy on Railway**: you'll see all 4 services listed (Redis, SearXNG, Crawl4AI, Web Tools Server)
 - Click **Deploy**: Railway provisions everything and wires the services together automatically
-- An `API_KEY` is **auto-generated** during deployment. Find it in your MCP Server service's **Variables** tab and use it as your Bearer token
+- An `API_KEY` is **auto-generated** during deployment. Find it in your Web Tools service's **Variables** tab and use it as your Bearer token
+
+### Railway Configuration
+
+The **Web Tools Server** service builds from the repo with:
+- **Dockerfile path**: `packages/api/Dockerfile`
+- **Root Directory**: (empty — repo root)
+
+The **SearXNG** service builds from the repo with:
+- **Dockerfile path**: `services/searxng/Dockerfile`
+- **Root Directory**: `services/searxng`
+- **Optional env var**: `PROXY_URL` — proxy for outgoing search requests (e.g. `socks5://user:pass@host:port`)
 
 ## Quick Start (Local)
 
@@ -234,13 +284,13 @@ cp .env.example .env.local
 docker compose up -d redis searxng crawl4ai
 ```
 
-This starts Redis, SearXNG, and Crawl4AI. Then run the MCP server:
+This starts Redis, SearXNG, and Crawl4AI. Then run the server:
 
 ```bash
 SEARXNG_URL=http://localhost:8080 CRAWL4AI_URL=http://localhost:11235 pnpm run start
 ```
 
-The server is available at `http://localhost:3000/mcp`.
+The server is available at `http://localhost:3000`.
 
 ### 4. Or run everything in Docker
 
@@ -248,13 +298,24 @@ The server is available at `http://localhost:3000/mcp`.
 docker compose up
 ```
 
+## Environment Variables
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `API_KEY` | Yes | Bearer token for authentication (auto-generated on Railway) |
+| `SEARXNG_URL` | No | SearXNG URL (default: `http://searxng.railway.internal:8080`) |
+| `CRAWL4AI_URL` | No | Crawl4AI URL (default: `http://crawl4ai.railway.internal:11235`) |
+| `CRAWL4AI_API_TOKEN` | No | API token for Crawl4AI authentication |
+| `SEARXNG_ENGINES` | No | Default engines (e.g. `"google,brave,duckduckgo"`) |
+| `PROXY_URL` | No | Proxy for SearXNG outgoing requests (set on SearXNG service) |
+
 ## Authentication
 
 The `API_KEY` environment variable is **required**.
 
 On Railway, the key is auto-generated at deploy time (via `${{secret()}}`). For local development, set it in your `.env.local` file.
 
-Clients provide the key as a `Bearer` token in the `Authorization` header (shown in the examples above) or as an `?api_key=` query parameter. The `/health` endpoint is unauthenticated.
+Clients provide the key as a `Bearer` token in the `Authorization` header or as an `?api_key=` query parameter. The `/health` endpoint is unauthenticated.
 
 ## License
 

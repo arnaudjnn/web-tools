@@ -1,18 +1,8 @@
 import { callMdTool } from './crawl4ai.js';
+import type { SnapshotInfo, ToolResult } from './types.js';
 
 const CDX_API_URL = 'https://web.archive.org/cdx/search/cdx';
 const WAYBACK_BASE_URL = 'https://web.archive.org/web';
-
-export interface SnapshotInfo {
-  timestamp: string;
-  original: string;
-  mimetype: string;
-  statusCode: string;
-  digest: string;
-  length: string;
-  archiveUrl: string;
-  formattedDate: string;
-}
 
 function formatTimestamp(ts: string): string {
   if (ts.length !== 14) return ts;
@@ -78,10 +68,8 @@ export async function getArchivedPage(params: {
   const prefix = original ? 'id_' : '';
   const waybackUrl = `${WAYBACK_BASE_URL}/${prefix}${timestamp}/${url}`;
 
-  // Use Crawl4AI with a fresh browser context to avoid cookie/session issues
-  // (e.g. Instagram sets cookies on first load that redirect subsequent requests)
   const result = await callMdTool({ url: waybackUrl, f: 'raw' });
-  const content = (result as { content: { type: string; text: string }[] }).content
+  const content = (result as ToolResult).content
     .filter((c) => c.type === 'text')
     .map((c) => c.text)
     .join('\n');

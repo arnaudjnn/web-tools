@@ -1,0 +1,74 @@
+use_default_settings: true
+
+server:
+  secret_key: "${SEARXNG_SECRET_KEY:-default_secret_key}"
+  limiter: false
+
+redis:
+  url: "${SEARXNG_REDIS_URL:-redis://redis:6379/0}"
+
+search:
+  formats:
+    - json
+  safe_search: 0
+  default_lang: en
+  # Never suspend engines — retry immediately (useful with rotating proxies)
+  suspended_times:
+    SearxEngineAccessDenied: 0
+    SearxEngineCaptcha: 0
+    SearxEngineTooManyRequests: 0
+    cf_SearxEngineCaptcha: 0
+    cf_SearxEngineAccessDenied: 0
+    recaptcha_SearxEngineCaptcha: 0
+  ban_time_on_fail: 0
+  max_ban_time_on_fail: 0
+
+outgoing:
+  request_timeout: 15.0
+  max_request_timeout: 20.0
+  retries: 2
+  pool_connections: 20
+  pool_maxsize: 20
+  proxies:
+    all://:
+      - ${PROXY_URL}
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+    use_mobile_ui: false
+    disabled: false
+
+  - name: brave
+    engine: brave
+    shortcut: b
+    use_mobile_ui: false
+    disabled: false
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: d
+    use_mobile_ui: false
+    disabled: false
+
+  - name: bing
+    engine: bing
+    shortcut: bi
+    disabled: false
+
+  - name: qwant
+    engine: qwant
+    shortcut: qw
+    disabled: false
+
+  - name: mojeek
+    engine: mojeek
+    shortcut: mj
+    disabled: false
+
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: w
+    use_mobile_ui: false
+    disabled: false
