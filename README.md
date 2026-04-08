@@ -253,12 +253,10 @@ claude mcp add web_tools --scope user \
 
 ### Railway Configuration
 
-The **Web Tools Server** service builds from the repo with:
-- **Dockerfile path**: `packages/api/Dockerfile`
-- **Root Directory**: (empty — repo root)
+The **Web Tools Server** service uses the root `Dockerfile` — no config changes needed.
 
-The **SearXNG** service builds from the repo with:
-- **Dockerfile path**: `services/searxng/Dockerfile`
+The **SearXNG** service should build from the repo instead of a Docker image:
+- **Source**: same GitHub repo
 - **Root Directory**: `services/searxng`
 - **Optional env var**: `PROXY_URL` — proxy for outgoing search requests (e.g. `socks5://user:pass@host:port`)
 

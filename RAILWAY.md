@@ -60,12 +60,12 @@ The eight tools available are: `web_search`, `web_fetch`, `web_screenshot`, `web
 
 ### Railway Service Configuration
 
-| Service | Source | Dockerfile Path | Root Directory | Notes |
-| --- | --- | --- | --- | --- |
-| Web Tools Server | GitHub repo | `packages/api/Dockerfile` | (repo root) | Main entry point, exposes MCP + REST API |
-| SearXNG | GitHub repo | `services/searxng/Dockerfile` | `services/searxng` | Optional `PROXY_URL` env var |
-| Crawl4AI | Docker image | `unclecode/crawl4ai:latest` | — | |
-| Redis | Docker image | `redis:7-alpine` | — | |
+| Service | Source | Root Directory | Notes |
+| --- | --- | --- | --- |
+| Web Tools Server | GitHub repo | (repo root) | Uses root `Dockerfile`, exposes MCP + REST API |
+| SearXNG | GitHub repo | `services/searxng` | Optional `PROXY_URL` env var |
+| Crawl4AI | Docker image (`unclecode/crawl4ai:latest`) | — | |
+| Redis | Docker image (`redis:7-alpine`) | — | |
 
 ## Why Deploy Web Tools on Railway?
 
