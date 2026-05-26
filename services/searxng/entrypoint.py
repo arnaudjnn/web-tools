@@ -95,7 +95,14 @@ def render(template: str, pool: list[str]) -> str:
     return "\n".join(rendered)
 
 
+def log(msg: str) -> None:
+    """Print and flush so Railway's log aggregator captures it before exec."""
+    sys.stdout.write(f"[searxng-entrypoint] {msg}\n")
+    sys.stdout.flush()
+
+
 def main() -> None:
+    log(f"booting; WEBSHARE_API_KEY={'set' if API_KEY else 'unset'} PROXY_URL={'set' if SINGLE_PROXY else 'unset'}")
     with open(TEMPLATE) as f:
         template = f.read()
 
@@ -103,18 +110,19 @@ def main() -> None:
     if API_KEY:
         try:
             pool = fetch_webshare_pool()
-            print(f"webshare: loaded {len(pool)} proxies", file=sys.stderr)
+            log(f"webshare: loaded {len(pool)} proxies into outgoing.proxies.all://")
         except Exception as e:  # noqa: BLE001
-            print(f"webshare fetch failed: {e}", file=sys.stderr)
+            log(f"webshare fetch failed: {e}")
     elif SINGLE_PROXY:
         pool = [SINGLE_PROXY]
-        print(f"using single PROXY_URL: {SINGLE_PROXY.split('@')[-1]}", file=sys.stderr)
+        log(f"using single PROXY_URL ({SINGLE_PROXY.split('@')[-1]})")
     else:
-        print("no proxies configured; SearXNG will go direct", file=sys.stderr)
+        log("no proxies configured; SearXNG will go direct")
 
     rendered = render(template, pool)
     with open(OUTPUT, "w") as f:
         f.write(rendered)
+    log(f"wrote {OUTPUT} ({len(rendered)} bytes); exec'ing granian")
 
     # Exec granian — same args as the old entrypoint.
     os.execvp(

@@ -42,4 +42,4 @@ yarn-error.log*
 bun.lockb
 
 # Benchmarks
-/benchmarks
+/benchmarksservices/searxng/__pycache__/
