@@ -35,7 +35,11 @@ outgoing:
   # proxying is pointless (the exit IP is the proxy's) and degrades requests.
   retries: 3
   pool_connections: 20
-  pool_maxsize: 20
+  # pool_maxsize -> httpx max_keepalive_connections. MUST be 0: with keep-alive,
+  # a retry reuses the same proxy tunnel = same (possibly burned) exit IP, so
+  # retry-on-/sorry/ never escapes a bad IP. 0 forces a fresh connection — and
+  # the rotating proxy a fresh exit IP — on every request AND every retry.
+  pool_maxsize: 0
   verify: false
   proxies:
     all://:
