@@ -27,14 +27,24 @@ outgoing:
   request_timeout: 15.0
   max_request_timeout: 20.0
   enable_http2: false
-  retries: 2
+  # Google /sorry/-blocks a fraction of the rotating residential exit IPs.
+  # google_sorry_fix.py turns a 302/sorry into an immediate-retry captcha
+  # (suspended_times: 0 below), so each retry rotates to a fresh IP. With the
+  # US-geo pool ~2/3 of IPs are clean, so 4 attempts (retries: 3) ≈ 99% hit a
+  # working IP. Do NOT set source_ips here — binding the local socket while
+  # proxying is pointless (the exit IP is the proxy's) and degrades requests.
+  retries: 3
   pool_connections: 20
   pool_maxsize: 20
-  source_ips:
-    - 0.0.0.0
   verify: false
   proxies:
     all://:
+      # PROXY_URL MUST geo-target US — the EU residential pool is broadly
+      # /sorry/-blocked by Google, US is mostly clean. Evomi format appends
+      # params to the PASSWORD, e.g.
+      #   http://user:PASS_country-US@core-residential.evomi.com:1000
+      # Keep it ROTATING (no _session-…): a sticky IP that lands on a burned
+      # one stays burned for the whole session.
       - ${PROXY_URL}
 
 engines:
