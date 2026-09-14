@@ -181,14 +181,32 @@ _page = None      # the persistent warmed page
 _warmed = None    # (base_url, warm_path) the current page is warmed for
 
 
-def _close_in_worker() -> None:
-    global _cm, _browser, _page, _warmed
+def _close_cm(cm, label: str) -> None:
+    """Close a SNAPSHOT of a context manager, never the live global.
+
+    THE HANDLES ARE CLEARED BY THE CALLER, SYNCHRONOUSLY, BEFORE THIS RUNS.
+    Reading the globals here is a race with a rebuild: /recycle hands the close
+    to a worker thread and returns, the next /spa-fetch builds a fresh browser on
+    the new thread, and then this — still running on the old one — reaches for
+    `_cm` and tears down the browser that just replaced it. What the caller sees
+    is `Browser.new_page: Target page, context or browser has been closed`,
+    answered as 502, on a service whose own logs say it recycled cleanly.
+    Observed 2026-09-14 against the tributario sweep, which recycles before every
+    single POST and so hits this window on every target.
+    """
     try:
-        if _cm is not None:
-            _cm.__exit__(None, None, None)
+        if cm is not None:
+            cm.__exit__(None, None, None)
     except Exception:
-        log.exception("error closing camoufox session")
+        log.exception("error closing %s", label)
+
+
+def _close_in_worker() -> None:
+    """Kept for the keepalive/error paths that still close in place."""
+    global _cm, _browser, _page, _warmed
+    cm = _cm
     _cm = _browser = _page = _warmed = None
+    _close_cm(cm, "camoufox session")
 
 
 def _abck_validated(page) -> bool:
@@ -398,12 +416,9 @@ def _ensure_render_browser():
 
 def _close_render_in_worker() -> None:
     global _render_cm, _render_browser
-    try:
-        if _render_cm is not None:
-            _render_cm.__exit__(None, None, None)
-    except Exception:
-        log.exception("error closing render browser")
+    cm = _render_cm
     _render_cm = _render_browser = None
+    _close_cm(cm, "render browser")
 
 
 def _do_render(url, wait_until, wait_ms, timeout_ms, click_all, settle_ms) -> dict:
@@ -792,13 +807,16 @@ async def _close_or_abandon(executor, fn, label: str) -> bool:
 
 @app.post("/recycle")
 async def recycle():
-    global _cm, _browser, _page, _warmed
-    akamai = await _close_or_abandon(_executor, _close_in_worker, "akamai session")
-    render = await _close_or_abandon(_render_executor, _close_render_in_worker, "render browser")
-    # Drop the handles ourselves when the close was abandoned: _close_in_worker
-    # nulls them on its way out, and it never ran.
-    if not akamai:
-        _cm = _browser = _page = _warmed = None
+    global _cm, _browser, _page, _warmed, _render_cm, _render_browser
+    # SNAPSHOT AND CLEAR FIRST, on the event loop, before any thread work. From
+    # this line on the service has no session, so a /spa-fetch arriving while the
+    # old browser is still closing builds a fresh one instead of racing the
+    # teardown for the same globals.
+    cm, render_cm = _cm, _render_cm
+    _cm = _browser = _page = _warmed = None
+    _render_cm = _render_browser = None
+    akamai = await _close_or_abandon(_executor, lambda: _close_cm(cm, "akamai session"), "akamai session")
+    render = await _close_or_abandon(_render_executor, lambda: _close_cm(render_cm, "render browser"), "render browser")
     _reset_executor()
     _reset_render_executor()
     return {"ok": True, "akamai_closed": akamai, "render_closed": render}
