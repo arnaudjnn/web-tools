@@ -609,11 +609,22 @@ class SpaFetchResponse(BaseModel):
 
 
 @app.get("/healthz")
-def healthz():
+async def healthz():
+    # Whether the AKAMAI worker can still take work, which `session_ready` cannot
+    # tell you: a wedged thread keeps `_page` set while every /spa-fetch times
+    # out. One trivial task with a short deadline separates "busy" from "stuck",
+    # and it queues behind real work rather than pre-empting it.
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(loop.run_in_executor(_executor, lambda: None), 5)
+        akamai_responsive = True
+    except asyncio.TimeoutError:
+        akamai_responsive = False
     return {
         "ok": True,
         "pid": os.getpid(),
         "session_ready": _page is not None,
+        "akamai_worker_responsive": akamai_responsive,
         "proxy_configured": bool(PROXY_URL),
         "warmed_for": list(_warmed) if _warmed else None,
     }
@@ -749,11 +760,45 @@ async def bytes_(req: BytesRequest):
     return BytesResponse(**data)
 
 
+# How long /recycle waits for a browser to close before abandoning its thread.
+RECYCLE_CLOSE_TIMEOUT_S = float(os.getenv("RECYCLE_CLOSE_TIMEOUT_S", "20"))
+
+
+async def _close_or_abandon(executor, fn, label: str) -> bool:
+    """Close on the worker thread, or give up on that thread entirely.
+
+    RECYCLE IS THE ESCAPE HATCH AND IT WAS BEHIND THE LOCK. Both executors are
+    single-slot, and this endpoint used to `await run_in_executor(...)` on them —
+    so a worker parked inside Playwright (a navigation that never settles, a
+    proxy black-hole during warm) made /recycle queue behind the very task it
+    exists to clear. Observed 2026-09-14: /spa-fetch and /recycle both timing out
+    for hours while /render, which has its own executor, answered 200 throughout.
+    The in-page fetch already guards itself with an AbortController; warming does
+    not, and that is the gap.
+
+    So: wait a bounded time for a clean close, and if it does not come, abandon
+    the thread and swap in a fresh executor. The old thread and its browser leak
+    until the process restarts, which is the right trade — a leaked browser costs
+    memory, a wedged service costs every caller.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        await asyncio.wait_for(loop.run_in_executor(executor, fn), RECYCLE_CLOSE_TIMEOUT_S)
+        return True
+    except asyncio.TimeoutError:
+        log.warning("%s did not close in %.0fs — abandoning that worker thread", label, RECYCLE_CLOSE_TIMEOUT_S)
+        return False
+
+
 @app.post("/recycle")
 async def recycle():
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(_executor, _close_in_worker)
-    await loop.run_in_executor(_render_executor, _close_render_in_worker)
+    global _cm, _browser, _page, _warmed
+    akamai = await _close_or_abandon(_executor, _close_in_worker, "akamai session")
+    render = await _close_or_abandon(_render_executor, _close_render_in_worker, "render browser")
+    # Drop the handles ourselves when the close was abandoned: _close_in_worker
+    # nulls them on its way out, and it never ran.
+    if not akamai:
+        _cm = _browser = _page = _warmed = None
     _reset_executor()
     _reset_render_executor()
-    return {"ok": True}
+    return {"ok": True, "akamai_closed": akamai, "render_closed": render}
