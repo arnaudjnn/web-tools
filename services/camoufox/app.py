@@ -455,7 +455,7 @@ def _do_render(url, wait_until, wait_ms, timeout_ms, click_all, settle_ms) -> di
             pass
 
 
-def _fresh_page(browser, viewport):
+def _fresh_page(browser, viewport, exit_session: str | None = None):
     """A page on a NEW browser context bound to a NEW exit IP.
 
     The render browser pins one exit for its lifetime, so the only way to get a
@@ -465,14 +465,22 @@ def _fresh_page(browser, viewport):
     restriction). A context carries its own proxy AND its own cookie jar, so this
     gives the same clean slate for the price of a context (~1s).
 
+     PINS the exit: Evomi derives the IP from the session token, so
+    passing the same token again lands on the SAME exit. That matters because a
+    scoring anti-bot's verdict on an exit is binary and stable — once one passes,
+    reusing it turns a ~12-attempt search into one attempt per later request,
+    which is the whole difference between viable and not. Omit it for a random
+    exit (the right default for per-IP-metered reads).
+
     Returns (page, context) — the caller must close the context.
     Falls back to (page, None) on the shared context if per-context proxying is
     unavailable, so existing consumers can never be broken by this path.
     geoip stays coherent because the pool is single-country (_country-IT).
     """
     try:
-        ctx = browser.new_context(proxy=parse_proxy(PROXY_URL, new_proxy_session()),
-                                  viewport=viewport)
+        ctx = browser.new_context(
+            proxy=parse_proxy(PROXY_URL, exit_session or new_proxy_session()),
+            viewport=viewport)
         return ctx.new_page(), ctx
     except Exception as e:
         log.warning("fresh_ip context failed (%s) — falling back to the shared exit", e)
@@ -546,7 +554,7 @@ def _do_eval(url, wait_until, wait_ms, timeout_ms, js, fresh_ip=False) -> dict:
 
 
 def _do_form_submit(url, fields, submit, dismiss, success_url, wait_until, wait_ms,
-                    settle_ms, timeout_ms, fresh_ip=True) -> dict:
+                    settle_ms, timeout_ms, fresh_ip=True, exit_session=None) -> dict:
     """Fill and submit a form the way a person does, then return where we landed.
 
     WHY A DEDICATED ENDPOINT rather than /eval. Scoring anti-bot (reCAPTCHA v3
@@ -565,7 +573,8 @@ def _do_form_submit(url, fields, submit, dismiss, success_url, wait_until, wait_
     """
     browser = _ensure_render_browser()
     viewport = {"width": 1440, "height": 900}
-    page, ctx = _fresh_page(browser, viewport) if fresh_ip else (browser.new_page(viewport=viewport), None)
+    page, ctx = (_fresh_page(browser, viewport, exit_session) if fresh_ip
+                 else (browser.new_page(viewport=viewport), None))
     try:
         resp = page.goto(url, wait_until=wait_until, timeout=timeout_ms)
         if wait_ms:
@@ -623,6 +632,7 @@ def _do_form_submit(url, fields, submit, dismiss, success_url, wait_until, wait_
             "url": final,
             "html": page.content(),
             "ok": bool(success_url and re.search(success_url, final)),
+            "exit_session": exit_session or "",
         }
     finally:
         try:
@@ -898,6 +908,7 @@ class FormSubmitRequest(BaseModel):
     settle_ms: int = Field(20_000, ge=1000, le=120_000)
     timeout_ms: int = Field(120_000, ge=1000, le=180_000)
     fresh_ip: bool = Field(True, description="new context + new exit IP (scoring anti-bot is per-IP)")
+    exit_session: str | None = Field(None, description="pin the exit: same token = same IP, so a passing exit can be REUSED instead of re-searched")
 
 
 class FormSubmitResponse(BaseModel):
@@ -905,6 +916,7 @@ class FormSubmitResponse(BaseModel):
     url: str
     html: str
     ok: bool
+    exit_session: str = ""
 
 
 @app.post("/form-submit", response_model=FormSubmitResponse)
@@ -915,6 +927,7 @@ async def form_submit(req: FormSubmitRequest):
             _do_form_submit, req.url,
             [f.model_dump() for f in req.fields], req.submit, req.dismiss, req.success_url,
             req.wait_until, req.wait_ms, req.settle_ms, req.timeout_ms, req.fresh_ip,
+            req.exit_session,
         )
     except Exception as e:
         log.exception("form-submit failed url=%s", req.url)

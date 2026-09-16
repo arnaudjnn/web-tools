@@ -52,7 +52,7 @@ export type CamoufoxRender = { status: number; url: string; html: string };
 export type CamoufoxScreenshot = { status: number; url: string; b64: string };
 export type CamoufoxEval = { status: number; url: string; result: unknown };
 export type CamoufoxBytes = { status: number; b64: string };
-export type CamoufoxFormSubmit = { status: number; url: string; html: string; ok: boolean };
+export type CamoufoxFormSubmit = { status: number; url: string; html: string; ok: boolean; exit_session: string };
 export type CamoufoxSpaFetch = { status: number; text: string };
 
 /** Fully-rendered DOM through the Italian residential exit. */
@@ -151,6 +151,9 @@ export function camoufoxFormSubmit(params: {
   settleMs?: number;
   timeoutMs?: number;
   freshIp?: boolean;
+  /** Pin the exit: the same token lands on the same IP, so a passing exit is
+   *  reused instead of re-searched (the verdict is binary and stable). */
+  exitSession?: string;
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 120_000;
   return call<CamoufoxFormSubmit>(
@@ -166,6 +169,7 @@ export function camoufoxFormSubmit(params: {
       ...(params.settleMs !== undefined ? { settle_ms: params.settleMs } : {}),
       timeout_ms: timeoutMs,
       fresh_ip: params.freshIp !== false,
+      ...(params.exitSession ? { exit_session: params.exitSession } : {}),
     },
     timeoutMs + 60_000,
   );

@@ -246,6 +246,10 @@ export const WebFormSubmitInput = z.object({
   settle_ms: z.number().min(1000).max(120000).optional().describe('Wait for the outcome (default: 20000)'),
   timeout_ms: z.number().min(1000).max(180000).optional(),
   fresh_ip: z.boolean().optional().describe('New context + exit IP (default: true)'),
+  exit_session: z
+    .string()
+    .optional()
+    .describe('Pin the exit: same token = same IP, so a passing exit can be reused instead of re-searched'),
 });
 
 export const WebEvalInput = z.object({

@@ -649,9 +649,15 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       settleMs: typeof params.settle_ms === 'number' ? params.settle_ms : undefined,
       timeoutMs: typeof params.timeout_ms === 'number' ? params.timeout_ms : undefined,
       freshIp: params.fresh_ip !== false,
+      exitSession: params.exit_session as string | undefined,
     });
     return trace('web_form_submit', {
-      content: [{ type: 'text', text: JSON.stringify({ status: r.status, url: r.url, ok: r.ok, html: r.html }) }],
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ status: r.status, url: r.url, ok: r.ok, exit_session: r.exit_session, html: r.html }),
+        },
+      ],
       isError: false,
     });
   } catch (err) {
