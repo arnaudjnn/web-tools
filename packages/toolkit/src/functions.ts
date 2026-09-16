@@ -776,6 +776,7 @@ export const functionMap: Record<string, (params: any) => Promise<any>> = {
   web_usage_stats,
   web_bytes,
   web_eval,
+  web_form_submit,
   web_spa_fetch,
   web_recycle,
 };
