@@ -417,11 +417,13 @@ def _ensure_render_browser():
                 return _render_browser
         except Exception:
             pass
+        # Drop the handles and fall through to a fresh launch. Deliberately NOT
+        # a teardown: the process is already gone, so cm.__exit__ has nothing to
+        # close, and calling it here raised "Sync API inside the asyncio loop"
+        # whenever this ran off the executor thread — turning a self-heal into a
+        # second failure mode.
         log.warning("render browser is dead — relaunching")
-        try:
-            _close_render_in_worker()
-        except Exception:
-            _render_cm = _render_browser = None
+        _render_cm = _render_browser = None
     # Sticky for this browser's lifetime as well. A page load is many requests,
     # and with geoip=True the fingerprint (locale/timezone) is derived from the
     # exit IP — so letting the exit rotate MID-LOAD advertises one identity while
