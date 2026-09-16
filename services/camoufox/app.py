@@ -401,9 +401,27 @@ _render_browser = None
 
 
 def _ensure_render_browser():
+    """The shared render browser, relaunched if it died.
+
+    LIVENESS IS CHECKED, and it must be: a Camoufox process can crash (OOM, a
+    segfault in the bundled Firefox) while this module still holds the handle,
+    and every later call then raises "Target page, context or browser has been
+    closed" — a wedge that only a recycle or a redeploy cleared, because nothing
+    ever asked whether the cached browser was still alive. Same failure the
+    health skill records for the Crawl4AI pool. Checking is one cheap call.
+    """
     global _render_cm, _render_browser
     if _render_browser is not None:
-        return _render_browser
+        try:
+            if _render_browser.is_connected():
+                return _render_browser
+        except Exception:
+            pass
+        log.warning("render browser is dead — relaunching")
+        try:
+            _close_render_in_worker()
+        except Exception:
+            _render_cm = _render_browser = None
     # Sticky for this browser's lifetime as well. A page load is many requests,
     # and with geoip=True the fingerprint (locale/timezone) is derived from the
     # exit IP — so letting the exit rotate MID-LOAD advertises one identity while
