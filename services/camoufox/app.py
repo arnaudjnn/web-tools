@@ -698,6 +698,38 @@ async def _start_keepalive():
     log.info("keepalive started (every %.1fs)", KEEPALIVE_SEC)
 
 
+# A dead render browser, and the ONE safe way to come back from it.
+#
+# The Camoufox process can die mid-life — sustained /form-submit load did it
+# repeatedly — and nothing noticed: the cached handle then failed every later
+# request with "Target … closed" until a human redeployed. The obvious fix,
+# relaunching from _ensure_render_browser, is the WRONG one and was tried: the
+# worker thread has already hosted a Playwright instance, so building a second
+# one on it raises "Sync API inside the asyncio loop" (the same constraint that
+# _reset_render_executor exists for). Recovery therefore belongs on the event
+# loop, which can drop the handles, swap in a FRESH thread, and retry — exactly
+# what /recycle does, minus the teardown a dead process does not need.
+_DEAD_BROWSER = re.compile(
+    r"Target (?:page, context or browser|closed)|browser has been closed|Browser\.new_page|Connection closed",
+    re.I,
+)
+
+
+async def _run_render(fn, *args):
+    """Run a render-browser job, recovering ONCE from a browser that has died."""
+    global _render_cm, _render_browser
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(_render_executor, fn, *args)
+    except Exception as e:
+        if not _DEAD_BROWSER.search(str(e)):
+            raise
+        log.warning("render browser is dead (%s) — fresh thread, retrying once", str(e)[:120])
+        _render_cm = _render_browser = None
+        _reset_render_executor()
+        return await loop.run_in_executor(_render_executor, fn, *args)
+
+
 class SpaFetchRequest(BaseModel):
     base_url: str = Field(..., description="Origin to warm + fetch against")
     warm_path: str = Field("/", description="Path to navigate for the sensor warmup")
@@ -776,8 +808,8 @@ class RenderResponse(BaseModel):
 async def render(req: RenderRequest):
     loop = asyncio.get_running_loop()
     try:
-        data = await loop.run_in_executor(
-            _render_executor, _do_render, req.url, req.wait_until, req.wait_ms, req.timeout_ms,
+        data = await _run_render(
+            _do_render, req.url, req.wait_until, req.wait_ms, req.timeout_ms,
             req.click_all, req.settle_ms,
         )
     except Exception as e:
@@ -809,8 +841,8 @@ class ScreenshotResponse(BaseModel):
 async def screenshot(req: ScreenshotRequest):
     loop = asyncio.get_running_loop()
     try:
-        data = await loop.run_in_executor(
-            _render_executor, _do_screenshot, req.url, req.wait_until, req.wait_ms,
+        data = await _run_render(
+            _do_screenshot, req.url, req.wait_until, req.wait_ms,
             req.timeout_ms, req.full_page, req.width, req.height, req.click_all, req.settle_ms,
             req.fresh_ip,
         )
@@ -839,8 +871,8 @@ class EvalResponse(BaseModel):
 async def eval_(req: EvalRequest):
     loop = asyncio.get_running_loop()
     try:
-        data = await loop.run_in_executor(
-            _render_executor, _do_eval, req.url, req.wait_until, req.wait_ms, req.timeout_ms, req.js,
+        data = await _run_render(
+            _do_eval, req.url, req.wait_until, req.wait_ms, req.timeout_ms, req.js,
             req.fresh_ip,
         )
     except Exception as e:
@@ -879,8 +911,8 @@ class FormSubmitResponse(BaseModel):
 async def form_submit(req: FormSubmitRequest):
     loop = asyncio.get_running_loop()
     try:
-        data = await loop.run_in_executor(
-            _render_executor, _do_form_submit, req.url,
+        data = await _run_render(
+            _do_form_submit, req.url,
             [f.model_dump() for f in req.fields], req.submit, req.dismiss, req.success_url,
             req.wait_until, req.wait_ms, req.settle_ms, req.timeout_ms, req.fresh_ip,
         )
@@ -904,8 +936,8 @@ class BytesResponse(BaseModel):
 async def bytes_(req: BytesRequest):
     loop = asyncio.get_running_loop()
     try:
-        data = await loop.run_in_executor(
-            _render_executor, _do_bytes, req.url, req.timeout_ms)
+        data = await _run_render(
+            _do_bytes, req.url, req.timeout_ms)
     except Exception as e:
         log.exception("bytes failed url=%s", req.url)
         raise HTTPException(status_code=502, detail=str(e))
