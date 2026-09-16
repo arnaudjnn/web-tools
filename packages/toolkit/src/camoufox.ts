@@ -52,6 +52,7 @@ export type CamoufoxRender = { status: number; url: string; html: string };
 export type CamoufoxScreenshot = { status: number; url: string; b64: string };
 export type CamoufoxEval = { status: number; url: string; result: unknown };
 export type CamoufoxBytes = { status: number; b64: string };
+export type CamoufoxFormSubmit = { status: number; url: string; html: string; ok: boolean };
 export type CamoufoxSpaFetch = { status: number; text: string };
 
 /** Fully-rendered DOM through the Italian residential exit. */
@@ -131,6 +132,42 @@ export function camoufoxEval(params: {
       ...(params.freshIp ? { fresh_ip: true } : {}),
     },
     timeoutMs + 30_000,
+  );
+}
+
+export type FormFieldSpec = { selector: string; value?: string; action?: 'type' | 'check' | 'select' };
+
+/** Fill and submit a form with HUMAN interaction on the residential exit.
+ *  Scoring anti-bot grades behaviour as well as IP, so this clicks and types
+ *  rather than setting values — see the sidecar's /form-submit docstring. */
+export function camoufoxFormSubmit(params: {
+  url: string;
+  fields: FormFieldSpec[];
+  submit: string;
+  dismiss?: string[];
+  successUrl?: string;
+  waitUntil?: string;
+  waitMs?: number;
+  settleMs?: number;
+  timeoutMs?: number;
+  freshIp?: boolean;
+}): Promise<CamoufoxFormSubmit> {
+  const timeoutMs = params.timeoutMs ?? 120_000;
+  return call<CamoufoxFormSubmit>(
+    '/form-submit',
+    {
+      url: params.url,
+      fields: params.fields,
+      submit: params.submit,
+      ...(params.dismiss ? { dismiss: params.dismiss } : {}),
+      ...(params.successUrl ? { success_url: params.successUrl } : {}),
+      ...(params.waitUntil ? { wait_until: params.waitUntil } : {}),
+      ...(params.waitMs !== undefined ? { wait_ms: params.waitMs } : {}),
+      ...(params.settleMs !== undefined ? { settle_ms: params.settleMs } : {}),
+      timeout_ms: timeoutMs,
+      fresh_ip: params.freshIp !== false,
+    },
+    timeoutMs + 60_000,
   );
 }
 

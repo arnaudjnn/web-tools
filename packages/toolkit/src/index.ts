@@ -30,6 +30,7 @@ export {
   web_usage_stats,
   web_bytes,
   web_eval,
+  web_form_submit,
   web_spa_fetch,
   web_recycle,
   functionMap,

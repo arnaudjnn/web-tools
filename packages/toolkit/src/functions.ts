@@ -12,6 +12,7 @@ import {
   camoufoxRender,
   camoufoxScreenshot,
   camoufoxSpaFetch,
+  camoufoxFormSubmit,
 } from './camoufox.js';
 import { isItalianSource, prefersCrawl4ai } from './routing.js';
 import { scraplingFetch } from './scrapling.js';
@@ -626,6 +627,43 @@ export async function web_bytes(params: Record<string, unknown>): Promise<ToolRe
  * idea from an Italian residential Firefox, for driving/inspecting JS SPAs
  * (open a facet dropdown, read the codes behind it).
  */
+export async function web_form_submit(params: Record<string, unknown>): Promise<ToolResult> {
+  const url = params.url as string | undefined;
+  const submit = params.submit as string | undefined;
+  const fields = params.fields as Array<Record<string, unknown>> | undefined;
+  if (!url || !submit || !Array.isArray(fields)) {
+    return {
+      content: [{ type: 'text', text: 'web_form_submit error: `url`, `fields` and `submit` are required' }],
+      isError: true,
+    };
+  }
+  try {
+    const r = await camoufoxFormSubmit({
+      url,
+      submit,
+      fields: fields as never,
+      dismiss: params.dismiss as string[] | undefined,
+      successUrl: params.success_url as string | undefined,
+      waitUntil: params.wait_until as string | undefined,
+      waitMs: typeof params.wait_ms === 'number' ? params.wait_ms : undefined,
+      settleMs: typeof params.settle_ms === 'number' ? params.settle_ms : undefined,
+      timeoutMs: typeof params.timeout_ms === 'number' ? params.timeout_ms : undefined,
+      freshIp: params.fresh_ip !== false,
+    });
+    return trace('web_form_submit', {
+      content: [{ type: 'text', text: JSON.stringify({ status: r.status, url: r.url, ok: r.ok, html: r.html }) }],
+      isError: false,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log('web_form_submit failed:', msg);
+    return trace('web_form_submit', {
+      content: [{ type: 'text', text: `web_form_submit error: ${msg}` }],
+      isError: true,
+    });
+  }
+}
+
 export async function web_eval(params: Record<string, unknown>): Promise<ToolResult> {
   const url = params.url as string | undefined;
   const js = params.js as string | undefined;

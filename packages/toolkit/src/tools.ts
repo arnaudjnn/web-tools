@@ -13,6 +13,7 @@ import {
   WebSpaFetchInput,
   WebRecycleInput,
   WebUsageStatsInput,
+  WebFormSubmitInput,
 } from './schemas.js';
 import type { ToolDefinition } from './types.js';
 
@@ -132,6 +133,21 @@ export const tools: ToolDefinition[] = [
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'web_form_submit',
+    description:
+      'Fill and submit a form in a residential browser with HUMAN interaction (pointer movement, ' +
+      'per-character typing, a real click on the submit control), then return the resulting page. ' +
+      'Use for forms behind SCORING anti-bot (reCAPTCHA v3 and friends), which grade behaviour as ' +
+      'well as exit IP — web_eval drives the same form from a page nobody touched and scores near zero.',
+    parameters: WebFormSubmitInput,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
       openWorldHint: true,
     },
   },

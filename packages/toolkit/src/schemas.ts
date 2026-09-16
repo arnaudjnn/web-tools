@@ -227,6 +227,27 @@ export const WebBytesInput = z.object({
   timeout_ms: z.number().min(1000).max(180000).optional().describe('Fetch timeout (default: 60000)'),
 });
 
+export const WebFormSubmitInput = z.object({
+  url: z.string().url().describe('URL of the page holding the form'),
+  fields: z
+    .array(
+      z.object({
+        selector: z.string().describe('CSS selector of the control'),
+        value: z.string().optional().describe('text to type, or option value for action=select'),
+        action: z.enum(['type', 'check', 'select']).optional().describe('default: type'),
+      }),
+    )
+    .describe('Controls to fill, in order'),
+  submit: z.string().describe('CSS selector of the submit control'),
+  dismiss: z.array(z.string()).optional().describe('Selectors clicked first (cookie walls)'),
+  success_url: z.string().optional().describe('Regex; a final URL matching it means success'),
+  wait_until: z.enum(['load', 'domcontentloaded', 'networkidle', 'commit']).optional(),
+  wait_ms: z.number().min(0).max(60000).optional().describe('Settle after load (default: 4000)'),
+  settle_ms: z.number().min(1000).max(120000).optional().describe('Wait for the outcome (default: 20000)'),
+  timeout_ms: z.number().min(1000).max(180000).optional(),
+  fresh_ip: z.boolean().optional().describe('New context + exit IP (default: true)'),
+});
+
 export const WebEvalInput = z.object({
   url: z.string().url().describe('URL to open'),
   js: z

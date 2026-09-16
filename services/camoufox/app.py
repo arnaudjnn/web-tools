@@ -34,6 +34,10 @@ POST /screenshot { url, wait_until?, wait_ms?, full_page?, width?, height?, clic
 POST /eval { url, js, wait_ms?, fresh_ip? }
     → { status, url, result } # run arbitrary JS in the residential page and
                             # return its JSON result (drive/inspect JS SPAs)
+POST /form-submit { url, fields[], submit, dismiss?, success_url?, fresh_ip? }
+    → { status, url, html, ok }  # fill + submit a form with HUMAN interaction
+                            # (pointer, per-char typing, real click) so scoring
+                            # anti-bot sees behaviour, not just a good exit IP
 POST /bytes { url, timeout_ms? }
     → { status, b64 }       # residential binary fetch (PDFs) through the same exit
 POST /recycle {}           # drop both the Akamai warmed session and the render browser
@@ -60,6 +64,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import secrets
 import time
@@ -540,6 +545,97 @@ def _do_eval(url, wait_until, wait_ms, timeout_ms, js, fresh_ip=False) -> dict:
                 pass
 
 
+def _do_form_submit(url, fields, submit, dismiss, success_url, wait_until, wait_ms,
+                    settle_ms, timeout_ms, fresh_ip=True) -> dict:
+    """Fill and submit a form the way a person does, then return where we landed.
+
+    WHY A DEDICATED ENDPOINT rather than /eval. Scoring anti-bot (reCAPTCHA v3
+    and friends) grades BEHAVIOUR as well as IP: pointer movement, per-character
+    typing with human cadence, dwell between fields, and a real click on the
+    site's own submit control — which lets the PAGE's handler mint its token in
+    the main world, with the interaction history behind it. Driving the same form
+    from /eval scores near zero however good the exit is, because the token is
+    minted on a page nobody touched, and an in-page fetch() never clicks
+    anything. (Measured on atoka's trial form: /eval + injected grecaptcha =
+    "Error verifying reCAPTCHA" every time on a clean Italian residential exit.)
+
+    Generic on purpose — `fields` is a list of {selector, value, action} — so any
+    gated form is a config, not a new endpoint. `action`: "type" (default),
+    "check", or "select".
+    """
+    browser = _ensure_render_browser()
+    viewport = {"width": 1440, "height": 900}
+    page, ctx = _fresh_page(browser, viewport) if fresh_ip else (browser.new_page(viewport=viewport), None)
+    try:
+        resp = page.goto(url, wait_until=wait_until, timeout=timeout_ms)
+        if wait_ms:
+            page.wait_for_timeout(wait_ms)
+
+        # Cookie walls overlay the submit control; a click that lands on the
+        # overlay silently does nothing.
+        for sel in dismiss or []:
+            try:
+                page.click(sel, timeout=4000)
+                page.wait_for_timeout(random.randint(300, 900))
+            except Exception:
+                pass
+
+        # Arrive like a reader before touching anything.
+        page.mouse.move(random.randint(200, 1200), random.randint(150, 700))
+        page.wait_for_timeout(random.randint(600, 1600))
+        page.mouse.wheel(0, random.randint(150, 500))
+        page.wait_for_timeout(random.randint(400, 1000))
+
+        for f in fields or []:
+            sel = f.get("selector")
+            action = (f.get("action") or "type").lower()
+            val = f.get("value")
+            try:
+                if action == "check":
+                    page.check(sel, timeout=8000)
+                elif action == "select":
+                    page.select_option(sel, val, timeout=8000)
+                else:
+                    page.click(sel, timeout=8000)
+                    page.keyboard.type(val or "", delay=random.randint(45, 120))
+                page.wait_for_timeout(random.randint(150, 500))
+            except Exception as e:
+                log.warning("form field %s (%s) failed: %s", sel, action, e)
+
+        page.wait_for_timeout(random.randint(500, 1500))
+        page.click(submit, timeout=15_000)
+
+        # Race the two real outcomes: the success navigation, or the form coming
+        # back with errors. Never just sleep — the old document carries no errors
+        # and scores as a false success.
+        try:
+            if success_url:
+                page.wait_for_url(re.compile(success_url), timeout=settle_ms)
+            else:
+                page.wait_for_load_state("networkidle", timeout=settle_ms)
+        except Exception:
+            pass
+        page.wait_for_timeout(1200)
+
+        final = page.url
+        return {
+            "status": resp.status if resp else 200,
+            "url": final,
+            "html": page.content(),
+            "ok": bool(success_url and re.search(success_url, final)),
+        }
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+        if ctx is not None:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+
+
 def _do_bytes(url, timeout_ms) -> dict:
     browser = _ensure_render_browser()
     page = browser.new_page()
@@ -751,6 +847,47 @@ async def eval_(req: EvalRequest):
         log.exception("eval failed url=%s", req.url)
         raise HTTPException(status_code=502, detail=str(e))
     return EvalResponse(**data)
+
+
+class FormField(BaseModel):
+    selector: str
+    value: str | None = None
+    action: str = Field("type", description="type | check | select")
+
+
+class FormSubmitRequest(BaseModel):
+    url: str
+    fields: list[FormField] = Field(default_factory=list)
+    submit: str = Field(..., description="CSS selector of the submit control")
+    dismiss: list[str] = Field(default_factory=list, description="selectors clicked first (cookie walls)")
+    success_url: str | None = Field(None, description="regex; matching final URL means success")
+    wait_until: str = Field("domcontentloaded")
+    wait_ms: int = Field(4000, ge=0, le=60_000)
+    settle_ms: int = Field(20_000, ge=1000, le=120_000)
+    timeout_ms: int = Field(120_000, ge=1000, le=180_000)
+    fresh_ip: bool = Field(True, description="new context + new exit IP (scoring anti-bot is per-IP)")
+
+
+class FormSubmitResponse(BaseModel):
+    status: int
+    url: str
+    html: str
+    ok: bool
+
+
+@app.post("/form-submit", response_model=FormSubmitResponse)
+async def form_submit(req: FormSubmitRequest):
+    loop = asyncio.get_running_loop()
+    try:
+        data = await loop.run_in_executor(
+            _render_executor, _do_form_submit, req.url,
+            [f.model_dump() for f in req.fields], req.submit, req.dismiss, req.success_url,
+            req.wait_until, req.wait_ms, req.settle_ms, req.timeout_ms, req.fresh_ip,
+        )
+    except Exception as e:
+        log.exception("form-submit failed url=%s", req.url)
+        raise HTTPException(status_code=502, detail=str(e))
+    return FormSubmitResponse(**data)
 
 
 class BytesRequest(BaseModel):
