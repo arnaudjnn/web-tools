@@ -57,6 +57,8 @@ Env
 - PROXY_URL        http://user:pass@host:port  (Evomi; _country-IT in the
                    password for the Italian exit Akamai expects).
 - NAV_TIMEOUT_MS   navigation timeout (default 60000).
+- CAMOUFOX_LOW_SHM cap content processes so a 62 MB /dev/shm cannot segfault
+                   the browser at launch (default 1; set 0 to A/B the fingerprint).
 """
 from __future__ import annotations
 
@@ -313,6 +315,29 @@ def _inpage_fetch(page, method, path, body, accept) -> dict:
     return {"status": int(result["status"]), "text": result["text"]}
 
 
+def _low_shm_prefs() -> dict:
+    """Firefox prefs that keep this container's tiny /dev/shm from killing the browser.
+
+    MEASURED: /dev/shm here is 62 MB — the Docker default, and Railway exposes no
+    way to raise it. Firefox puts its cross-process shared memory there, so under
+    sustained load it exhausts and the browser SEGFAULTS AT LAUNCH
+    ("BrowserType.launch: Failed to launch the browser process", signal=SIGSEGV,
+    with a glxtest spawn failure beside it). Every other gauge reads clean — 35%
+    disk, no profile-dir build-up, 3.9 GB peak against a 32 GB limit — which is
+    what made it hard to find. A relaunch does not help: it hits the same wall,
+    which is why the dead-browser recovery above could not save a loaded sidecar.
+
+    Content processes are what consume that memory, so cap them. Fission
+    (site isolation) spawns one per site and is pure cost for a one-page-at-a-time
+    renderer. This is a FINGERPRINT-VISIBLE change — process count is observable —
+    so it is behind CAMOUFOX_LOW_SHM (default on) to keep an A/B one variable away
+    rather than a redeploy away.
+    """
+    if os.environ.get("CAMOUFOX_LOW_SHM", "1") != "1":
+        return {}
+    return {"fission.autostart": False, "dom.ipc.processCount": 1}
+
+
 def _ensure_page(base_url, warm_path, sensor_wait_ms, mature_probe, mature_max_tries):
     """Return a page warmed for (base_url, warm_path), creating/re-warming
     it if needed. On (re)warm we interact to seed the sensor, then — if the
@@ -329,7 +354,8 @@ def _ensure_page(base_url, warm_path, sensor_wait_ms, mature_probe, mature_max_t
         raise RuntimeError("PROXY_URL must be set as http://user:pass@host:port")
     # geoip=True matches locale/timezone to the proxy's exit IP (an Italian
     # user signal Akamai expects); humanize adds human-like cursor motion.
-    cm = Camoufox(headless=True, geoip=True, humanize=True, proxy=proxy)
+    cm = Camoufox(headless=True, geoip=True, humanize=True, proxy=proxy,
+                  firefox_user_prefs=_low_shm_prefs())
     browser = cm.__enter__()
     page = browser.new_page()
     page.goto(f"{base_url}{warm_path}", wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -412,7 +438,8 @@ def _ensure_render_browser():
     proxy = parse_proxy(PROXY_URL, new_proxy_session())
     if proxy is None:
         raise RuntimeError("PROXY_URL must be set as http://user:pass@host:port")
-    cm = Camoufox(headless=True, geoip=True, humanize=True, proxy=proxy)
+    cm = Camoufox(headless=True, geoip=True, humanize=True, proxy=proxy,
+                  firefox_user_prefs=_low_shm_prefs())
     browser = cm.__enter__()
     _render_cm, _render_browser = cm, browser
     log.info("render browser ready (residential)")
