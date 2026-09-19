@@ -41,8 +41,11 @@ CDP binds only to loopback and is never exposed by Railway.
 ## Railway
 
 Deploy a separate **Obscura** service in the **web-tools** project, root directory
-`/services/obscura`, config path `/services/obscura/railway.json`, branch `main`.
-Use narrow watch paths `/services/obscura/**`. Required variables:
+`/services/obscura`, Dockerfile path `Dockerfile`, branch `main`.
+Use narrow watch paths `/services/obscura/**`, health check `/healthz` with a
+60-second timeout, and restart on failure with at most three retries. These
+are service settings: Railway rejected new `railway.json` configuration on
+2026-09-19 as deprecated. Required variables:
 
 ```
 PORT=8000
