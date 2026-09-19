@@ -81,6 +81,11 @@ The project is structured as a **monorepo** with three packages:
 
 The full stack deploys as **6 services**: Redis, SearXNG, Crawl4AI, Scrapling, Camoufox, and the Web Tools server.
 
+An isolated [Obscura evaluation service](services/obscura/README.md) can be
+deployed alongside them. It is not yet a Camoufox replacement: v0.2.2 misreports
+native form POSTs through CDP, so its form-submission endpoint fails closed.
+Existing browser routing is unchanged.
+
 ## Tools
 
 The server exposes fourteen tools:

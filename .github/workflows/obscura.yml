@@ -1,0 +1,30 @@
+name: Obscura adapter
+on:
+  push:
+    branches: [main]
+    paths: ['services/obscura/**', '.github/workflows/obscura.yml']
+  pull_request:
+    paths: ['services/obscura/**', '.github/workflows/obscura.yml']
+jobs:
+  adapter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test services/obscura/server.test.mjs services/obscura/compatibility.test.mjs
+      - name: Verify the pinned engine and reproduce its form limitation
+        shell: bash
+        run: |
+          curl --fail --location --retry 2 --max-time 120 -o /tmp/obscura.tar.gz https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.2/obscura-x86_64-linux.tar.gz
+          echo '9e5d9d081909ea983bc8c94999bb3d411fd6b74a9788504295b7e25f84310505  /tmp/obscura.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/obscura.tar.gz -C /tmp obscura
+          /tmp/obscura serve --port 19222 --allow-private-network --quiet &
+          browser_pid=$!
+          trap 'kill "$browser_pid"' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:19222/json/version; then break; fi
+            sleep 1
+          done
+          OBSCURA_TEST_CDP=ws://127.0.0.1:19222/devtools/browser node --test services/obscura/compatibility.test.mjs
