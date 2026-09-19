@@ -147,6 +147,8 @@ export function camoufoxFormSubmit(params: {
   successUrl?: string;
   submissionUrls?: string[];
   captchaField?: string;
+  requireCaptchaToken?: boolean;
+  readyExpression?: string;
   inspectOnly?: boolean;
   waitUntil?: string;
   waitMs?: number;
@@ -168,6 +170,8 @@ export function camoufoxFormSubmit(params: {
       ...(params.successUrl ? { success_url: params.successUrl } : {}),
       ...(params.submissionUrls ? { submission_urls: params.submissionUrls } : {}),
       ...(params.captchaField ? { captcha_field: params.captchaField } : {}),
+      ...(params.requireCaptchaToken ? { require_captcha_token: true } : {}),
+      ...(params.readyExpression ? { ready_expression: params.readyExpression } : {}),
       ...(params.inspectOnly ? { inspect_only: true } : {}),
       ...(params.waitUntil ? { wait_until: params.waitUntil } : {}),
       ...(params.waitMs !== undefined ? { wait_ms: params.waitMs } : {}),

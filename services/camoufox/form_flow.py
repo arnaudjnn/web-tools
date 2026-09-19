@@ -25,7 +25,8 @@ def validate_form(url, submission_urls, success_url):
 
 def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              submission_urls=None, wait_until="domcontentloaded", wait_ms=0,
-             settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False):
+             settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
+             require_captcha_token=False, ready_expression=None):
     targets = validate_form(url, submission_urls, success_url)
     deadline = time.monotonic() + timeout_ms / 1000
     result = {"contract_version": 2, "status": 0, "url": url, "html": "",
@@ -34,7 +35,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                    "captcha_script_responses": 0, "captcha_script_http_errors": [],
                    "captcha_network_failures": 0, "submit_click_attempted": False,
                    "token_present": None, "blocked_mutations": 0, "page_script_errors": 0,
-                   "navigation_status": None}
+                   "navigation_status": None, "captcha_guard_blocked": False,
+                   "ready_condition_met": None}
     result["diagnostics"] = diagnostics
     page = None
     phase = "navigation"
@@ -58,17 +60,25 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             route.abort("blockedbyclient")
             return
         if is_submission(route.request):
-            if result["form_submissions"]:
+            if result["form_submissions"] or diagnostics["captcha_guard_blocked"]:
                 route.abort("blockedbyclient")
                 return
-            result["form_submissions"] = 1
             # Observe presence only. Never retain, log or return the token/body.
             try:
                 values = parse_qs(route.request.post_data or "")
                 names = [captcha_field] if captcha_field else ["g-recaptcha-response"]
-                diagnostics["token_present"] = any(bool(values.get(name, [""])[0].strip()) for name in names)
+                diagnostics["token_present"] = any(
+                    len(values.get(name, [])) == 1 and
+                    values[name][0].strip().lower() not in ("", "null", "undefined", "false")
+                    for name in names)
             except Exception:
                 diagnostics["token_present"] = None
+            if require_captcha_token and diagnostics["token_present"] is not True:
+                diagnostics["captcha_guard_blocked"] = True
+                result["error"] = "captcha_token_missing"
+                route.abort("blockedbyclient")
+                return
+            result["form_submissions"] = 1
         route.continue_()
 
     def captcha_request(request):
@@ -127,6 +137,14 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 control.fill(field.get("value") or "", timeout=remaining())
             else:
                 raise ValueError("Unknown field action")
+        if ready_expression:
+            phase = "readiness"
+            diagnostics["ready_condition_met"] = False
+            # Camoufox isolates ordinary evaluation from the page's globals.
+            # The prefix opts into its main world (a JS label in other engines).
+            while page.evaluate("mw:(" + ready_expression + ")") is not True:
+                page.wait_for_timeout(remaining(100))
+            diagnostics["ready_condition_met"] = True
         phase = "submit"
         # Exactly one click. The site's own handler supplies any CAPTCHA token.
         diagnostics["submit_click_attempted"] = True
@@ -144,11 +162,11 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         result["ok"] = bool(result["form_submissions"] == 1 and
                             200 <= result["status"] < 400 and success_url and
                             re.search(success_url, result["url"]))
-        if not result["form_submissions"]:
+        if not result["form_submissions"] and not result["error"]:
             result["error"] = "no_submission"
-        elif not result["status"]:
+        elif result["form_submissions"] and not result["status"]:
             result["error"] = "outcome_unknown"
     except Exception:
         # Never expose field values, page exception text or proxy credentials.
-        result["error"] = "outcome_unknown" if result["form_submissions"] else f"{phase}_failed"
+        result["error"] = result["error"] or ("outcome_unknown" if result["form_submissions"] else f"{phase}_failed")
     return result

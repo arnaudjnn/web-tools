@@ -14,7 +14,7 @@ from form_worker import run_isolated_form
 def browser_engine():
     if os.environ.get("FORM_BROWSER_TEST") == "camoufox":
         from camoufox.sync_api import Camoufox
-        with Camoufox(headless=True) as browser:
+        with Camoufox(headless=True, main_world_eval=True) as browser:
             yield browser
     else:
         from playwright.sync_api import sync_playwright
@@ -37,12 +37,15 @@ class BrowserTests(unittest.TestCase):
     def test_inspection_performs_no_form_post(self):
         self.exercise(False, inspect_only=True)
 
+    def test_missing_required_token_never_reaches_server(self):
+        self.exercise(False, missing_token=True)
+
     def test_repeated_isolated_browser_lifetimes(self):
         for attempt in range(5):
             with self.subTest(attempt=attempt):
                 self.exercise(False, isolated=True)
 
-    def exercise(self, duplicate, inspect_only=False, isolated=False):
+    def exercise(self, duplicate, inspect_only=False, isolated=False, missing_token=False):
         posts = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -53,11 +56,14 @@ class BrowserTests(unittest.TestCase):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
-                self.wfile.write(b'''<form method="post" action="/form">
+                html = b'''<script>setTimeout(()=>{window.formReady=true},250)</script><form method="post" action="/form">
                   <input id="name" name="name" required><input id="agree" name="agree" type="checkbox">
                   <input type="hidden" name="g-recaptcha-response" value="fixture-token-not-a-real-captcha">
                   <select id="country" name="country"><option value="IT">Italy</option></select>
-                  <button id="submit">Submit</button></form>''')
+                  <button id="submit">Submit</button></form>'''
+                if missing_token:
+                    html = html.replace(b"fixture-token-not-a-real-captcha", b"")
+                self.wfile.write(html)
                 if duplicate:
                     self.wfile.write(b'''<script>document.querySelector('form').addEventListener('submit',async event=>{
                     event.preventDefault();
@@ -82,7 +88,8 @@ class BrowserTests(unittest.TestCase):
                     {"selector": "#agree", "action": "check"},
                     {"selector": "#country", "action": "select", "value": "IT"},
                 ], submit="#submit", settle_ms=1000, timeout_ms=10000,
-                    success_url=r"/done$", inspect_only=inspect_only)
+                    success_url=r"/done$", inspect_only=inspect_only,
+                    ready_expression="window.formReady === true", require_captcha_token=not duplicate)
             if isolated:
                 params.pop("timeout_ms")
                 result = run_isolated_form(browser_engine, deadline=time.monotonic() + 30, **params)
@@ -96,6 +103,13 @@ class BrowserTests(unittest.TestCase):
                 self.assertEqual(result["form_submissions"], 0)
                 self.assertFalse(result["diagnostics"]["submit_click_attempted"])
                 return
+            if missing_token:
+                self.assertEqual(len(posts), 0)
+                self.assertEqual(result["form_submissions"], 0)
+                self.assertEqual(result["error"], "captcha_token_missing")
+                self.assertTrue(result["diagnostics"]["captcha_guard_blocked"])
+                return
+            self.assertTrue(result["diagnostics"]["ready_condition_met"])
             self.assertEqual(result["form_submissions"], 1)
             self.assertEqual(len(posts), 1)
             self.assertEqual(result["status"], 303)

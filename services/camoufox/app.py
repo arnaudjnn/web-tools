@@ -570,11 +570,12 @@ _form_worker = FormWorker()
 _form_proxy_session = secrets.token_hex(6)
 
 
-def _form_browser(session):
+def _form_browser(session, main_world_eval=False):
     proxy = parse_proxy(PROXY_URL, session)
     if proxy is None:
         raise RuntimeError("PROXY_URL is required")
-    return Camoufox(headless=True, geoip=True, humanize=True, proxy=proxy, timeout=30000)
+    return Camoufox(headless=True, geoip=True, humanize=True, proxy=proxy, timeout=30000,
+                    main_world_eval=main_world_eval)
 
 
 def _do_bytes(url, timeout_ms) -> dict:
@@ -837,6 +838,8 @@ class FormField(BaseModel):
 
 
 class FormSubmitRequest(BaseModel):
+    ready_expression: str | None = Field(None, max_length=2000, description="Main-world boolean expression required before clicking submit")
+    require_captcha_token: bool = Field(False, description="Abort the form POST if its CAPTCHA field is empty/unreadable; never retry")
     captcha_field: str | None = Field(None, max_length=100, description="POST field checked for token presence only; value is never returned")
     inspect_only: bool = Field(False, description="Navigate without filling/clicking; block same-origin mutating requests")
     url: str
@@ -872,12 +875,13 @@ async def form_submit(req: FormSubmitRequest):
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
         data = await _form_worker.run(partial(run_isolated_form,
-            partial(_form_browser, session), deadline=deadline, url=req.url,
+            partial(_form_browser, session, bool(req.ready_expression)), deadline=deadline, url=req.url,
             fields=[f.model_dump() for f in req.fields], submit=req.submit,
             dismiss=req.dismiss, success_url=req.success_url,
             wait_until=req.wait_until, wait_ms=req.wait_ms, settle_ms=req.settle_ms,
             submission_urls=req.submission_urls, captcha_field=req.captcha_field,
-            inspect_only=req.inspect_only), url=req.url, deadline=deadline)
+            inspect_only=req.inspect_only, require_captcha_token=req.require_captcha_token,
+            ready_expression=req.ready_expression), url=req.url, deadline=deadline)
     except Exception as e:
         log.warning("form-submit unavailable (%s); not retried", type(e).__name__)
         raise HTTPException(status_code=502, detail="Form outcome unavailable; do not automatically retry")

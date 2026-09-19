@@ -44,6 +44,18 @@ never include tokens, request bodies, query strings or exception messages.
 A token's presence does NOT prove validity, action, score or server acceptance.
 Likewise, a loaded script does not prove its handler ran. No solver is installed.
 
+`ready_expression` optionally waits for a caller-supplied boolean expression in
+the page's main world before the single submit click. This is important with
+Camoufox: ordinary evaluation cannot see the page's globals. The condition uses
+the operation's existing deadline; a failure never clicks submit.
+
+`require_captcha_token: true` prevents a matching POST from leaving the browser
+when its configured CAPTCHA field is missing, empty, ambiguous, or unreadable.
+The result is `captcha_token_missing`, `form_submissions: 0`, and
+`diagnostics.captcha_guard_blocked: true`. Further matching POSTs are blocked too;
+there is no delayed retry after an empty token. This guard prevents a known-bad
+submission, but cannot determine whether a populated token will be accepted.
+
 `inspect_only: true` navigates without filling or clicking and blocks same-origin
 mutating requests. It returns no HTML and never reports form success. Use this
 to check script delivery without consuming a mailbox or creating an account.

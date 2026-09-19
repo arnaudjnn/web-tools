@@ -83,6 +83,47 @@ class FormTests(unittest.TestCase):
         result = run_form(self.context, **self.params, captcha_field="0-captcha")
         self.assertIs(result["diagnostics"]["token_present"], False)
 
+    def test_required_missing_token_blocks_every_attempt_without_sending(self):
+        self.request.post_data = "email=private-email"
+        result = run_form(self.context, **self.params, captcha_field="0-captcha", require_captcha_token=True)
+        self.assertEqual(result["form_submissions"], 0)
+        self.assertEqual(result["error"], "captcha_token_missing")
+        self.assertTrue(result["diagnostics"]["captcha_guard_blocked"])
+        self.route.continue_.assert_not_called()
+        self.assertEqual(self.route.abort.call_count, 2)
+
+    def test_present_required_token_can_be_submitted_once(self):
+        self.request.post_data = "0-captcha=fixture-only-token"
+        result = run_form(self.context, **self.params, captcha_field="0-captcha", require_captcha_token=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["form_submissions"], 1)
+        self.route.continue_.assert_called_once()
+
+    def test_placeholder_or_ambiguous_tokens_fail_closed(self):
+        for body in ["0-captcha=undefined", "0-captcha=null", "0-captcha=false",
+                     "0-captcha=one&0-captcha=two"]:
+            with self.subTest(body=body):
+                self.request.post_data = body
+                result = run_form(self.context, **self.params, captcha_field="0-captcha", require_captcha_token=True)
+                self.assertEqual(result["form_submissions"], 0)
+                self.assertEqual(result["error"], "captcha_token_missing")
+        self.route.continue_.assert_not_called()
+
+    def test_waits_for_main_world_readiness_before_click(self):
+        self.page.evaluate.side_effect = [False, False, True]
+        result = run_form(self.context, **self.params, ready_expression="window.formReady === true")
+        self.assertTrue(result["diagnostics"]["ready_condition_met"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.page.evaluate.call_count, 3)
+        self.page.evaluate.assert_called_with("mw:(window.formReady === true)")
+
+    def test_readiness_failure_never_clicks(self):
+        self.page.evaluate.side_effect = RuntimeError("page is gone")
+        result = run_form(self.context, **self.params, ready_expression="window.formReady === true")
+        self.assertEqual(result["form_submissions"], 0)
+        self.assertEqual(result["error"], "readiness_failed")
+        self.page.locator.return_value.click.assert_not_called()
+
     def test_inspection_never_fills_clicks_or_allows_same_origin_mutation(self):
         self.page.goto.side_effect = lambda *args, **kwargs: self.context.route.call_args.args[1](self.route)
         result = run_form(self.context, **self.params, inspect_only=True)
