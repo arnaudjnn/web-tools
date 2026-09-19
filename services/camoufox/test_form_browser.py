@@ -1,11 +1,13 @@
 """Opt-in real-browser test; submits only to a loopback fixture we own."""
 import os
 import threading
+import time
 import unittest
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from form_flow import run_form
+from form_worker import run_isolated_form
 
 
 @contextmanager
@@ -35,7 +37,12 @@ class BrowserTests(unittest.TestCase):
     def test_inspection_performs_no_form_post(self):
         self.exercise(False, inspect_only=True)
 
-    def exercise(self, duplicate, inspect_only=False):
+    def test_repeated_isolated_browser_lifetimes(self):
+        for attempt in range(5):
+            with self.subTest(attempt=attempt):
+                self.exercise(False, isolated=True)
+
+    def exercise(self, duplicate, inspect_only=False, isolated=False):
         posts = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -52,8 +59,11 @@ class BrowserTests(unittest.TestCase):
                   <select id="country" name="country"><option value="IT">Italy</option></select>
                   <button id="submit">Submit</button></form>''')
                 if duplicate:
-                    self.wfile.write(b'''<script>document.querySelector('form').addEventListener('submit',()=>{
-                    fetch('/form',{method:'POST',body:'duplicate=1'}).catch(()=>{});
+                    self.wfile.write(b'''<script>document.querySelector('form').addEventListener('submit',async event=>{
+                    event.preventDefault();
+                    const accepted=await fetch('/form',{method:'POST',body:'first=1'});
+                    await fetch('/form',{method:'POST',body:'duplicate=1'}).catch(()=>{});
+                    location.href=accepted.url;
                   });</script>''')
 
             def do_POST(self):
@@ -66,33 +76,38 @@ class BrowserTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            with browser_engine() as browser:
-                context = browser.new_context(service_workers="block")
-                url = f"http://127.0.0.1:{server.server_port}/form"
-                result = run_form(context, url=url, fields=[
+            url = f"http://127.0.0.1:{server.server_port}/form"
+            params = dict(url=url, fields=[
                     {"selector": "#name", "value": "Test"},
                     {"selector": "#agree", "action": "check"},
                     {"selector": "#country", "action": "select", "value": "IT"},
                 ], submit="#submit", settle_ms=1000, timeout_ms=10000,
                     success_url=r"/done$", inspect_only=inspect_only)
-                context.close()
-                if inspect_only:
-                    self.assertEqual(len(posts), 0)
-                    self.assertEqual(result["form_submissions"], 0)
-                    self.assertFalse(result["diagnostics"]["submit_click_attempted"])
-                    return
-                self.assertEqual(result["form_submissions"], 1)
-                self.assertEqual(len(posts), 1)
-                self.assertEqual(result["status"], 303)
-                if not duplicate:
-                    self.assertTrue(result["ok"])
-                    self.assertTrue(result["diagnostics"]["token_present"])
-                    self.assertIn(b"name=Test", posts[0])
-                    self.assertIn(b"agree=on", posts[0])
-                    self.assertIn(b"country=IT", posts[0])
-                # Either competing POST may win. A blocked native navigation
-                # must not be reported as success just because fetch redirected.
-                self.assertEqual(result["ok"], result["url"].endswith("/done"))
+            if isolated:
+                params.pop("timeout_ms")
+                result = run_isolated_form(browser_engine, deadline=time.monotonic() + 30, **params)
+            else:
+                with browser_engine() as browser:
+                    context = browser.new_context(service_workers="block")
+                    result = run_form(context, **params)
+                    context.close()
+            if inspect_only:
+                self.assertEqual(len(posts), 0)
+                self.assertEqual(result["form_submissions"], 0)
+                self.assertFalse(result["diagnostics"]["submit_click_attempted"])
+                return
+            self.assertEqual(result["form_submissions"], 1)
+            self.assertEqual(len(posts), 1)
+            self.assertEqual(result["status"], 303)
+            if not duplicate:
+                self.assertTrue(result["ok"])
+                self.assertTrue(result["diagnostics"]["token_present"])
+                self.assertIn(b"name=Test", posts[0])
+                self.assertIn(b"agree=on", posts[0])
+                self.assertIn(b"country=IT", posts[0])
+            # The site's handler tries a second POST before navigating. It must
+            # be blocked, with only the accepted first response counted.
+            self.assertEqual(result["ok"], result["url"].endswith("/done"))
         finally:
             server.shutdown()
             server.server_close()

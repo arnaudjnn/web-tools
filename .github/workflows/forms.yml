@@ -6,6 +6,16 @@ on:
   pull_request:
     paths: ['services/camoufox/**', 'packages/**', '.github/workflows/forms.yml']
 jobs:
+  camoufox-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t web-tools-camoufox services/camoufox
+      # Test the actual Linux browser/image, not only a Chromium substitute.
+      - run: >-
+          docker run --rm -e FORM_BROWSER_TEST=camoufox
+          -v "$PWD/services/camoufox/test_form_browser.py:/app/test_form_browser.py:ro"
+          web-tools-camoufox python -m unittest -v test_form_browser
   forms:
     runs-on: ubuntu-latest
     steps:

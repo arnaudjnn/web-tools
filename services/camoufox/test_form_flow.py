@@ -117,17 +117,14 @@ class FormTests(unittest.TestCase):
         handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "form_submit")
         self.assertNotIn("_run_render", ast.unparse(handler))
 
-    def test_expired_queued_form_never_launches_browser(self):
+    def test_forms_are_independent_of_shared_browser_recycling(self):
         tree = ast.parse(pathlib.Path(__file__).with_name("app.py").read_text())
-        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_do_form_submit")
-        launch = Mock()
-        namespace = {"validate_form": validate_form, "time": SimpleNamespace(monotonic=lambda: 10),
-                     "_ensure_render_browser": launch}
-        exec(compile(ast.Module(body=[function], type_ignores=[]), "app.py", "exec"), namespace)
-        with self.assertRaises(TimeoutError):
-            namespace["_do_form_submit"](self.request.url, [], "button", [], None,
-                                         "load", 0, 1000, 1000, expires_at=9)
-        launch.assert_not_called()
+        handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "form_submit")
+        recycle = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "recycle")
+        self.assertIn("_form_worker.run", ast.unparse(handler))
+        self.assertNotIn("_render_executor", ast.unparse(handler))
+        self.assertNotIn("_ensure_render_browser", ast.unparse(handler))
+        self.assertNotIn("_form_worker", ast.unparse(recycle))
 
 
 if __name__ == "__main__":

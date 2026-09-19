@@ -19,9 +19,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 # Download the Camoufox Firefox build + the GeoIP database into the image
 # so the runtime container starts fast and offline.
-RUN python -m camoufox fetch
+ARG CAMOUFOX_BROWSER=official/stable/152.0.4-beta.30
+RUN python -m camoufox set "$CAMOUFOX_BROWSER" && python -m camoufox fetch
 
-COPY app.py form_flow.py .
+COPY app.py form_flow.py form_worker.py .
 
 # ONE warmed Camoufox page per container (WORKERS=1) — the persistent SPA
 # session + its sensor cookie can't be shared across processes, and a

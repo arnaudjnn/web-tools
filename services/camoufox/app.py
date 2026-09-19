@@ -68,13 +68,14 @@ import re
 import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from camoufox.sync_api import Camoufox
-from form_flow import run_form, validate_form
+from form_worker import FormWorker, run_isolated_form
 
 
 PROXY_URL = os.environ.get("PROXY_URL", "")
@@ -565,35 +566,15 @@ def _do_eval(url, wait_until, wait_ms, timeout_ms, js, fresh_ip=False) -> dict:
                 pass
 
 
-def _do_form_submit(url, fields, submit, dismiss, success_url, wait_until, wait_ms,
-                    settle_ms, timeout_ms, fresh_ip=True, exit_session=None,
-                    submission_urls=None, expires_at=None, captcha_field=None,
-                    inspect_only=False) -> dict:
-    """Single attempt, isolated cookies, no browser fallback or replay."""
-    validate_form(url, submission_urls, success_url)
-    expires_at = expires_at or (time.monotonic() + timeout_ms / 1000)
-    if time.monotonic() >= expires_at:
-        raise TimeoutError("Queued form expired before browser execution")
-    browser = _ensure_render_browser()
-    options = {"viewport": {"width": 1440, "height": 900}, "service_workers": "block"}
-    if fresh_ip:
-        options["proxy"] = parse_proxy(PROXY_URL, exit_session or secrets.token_hex(6))
-    context = browser.new_context(**options)
-    try:
-        budget = int((expires_at - time.monotonic()) * 1000)
-        if budget <= 0:
-            raise TimeoutError("Form expired before navigation")
-        result = run_form(context, url=url, fields=fields, submit=submit,
-                          dismiss=dismiss, success_url=success_url,
-                          submission_urls=submission_urls, wait_until=wait_until,
-                          wait_ms=wait_ms, settle_ms=settle_ms, timeout_ms=budget,
-                          captcha_field=captcha_field, inspect_only=inspect_only)
-        return {**result, "exit_session": exit_session or ""}
-    finally:
-        try:
-            context.close()
-        except Exception:
-            pass  # Cleanup cannot erase submission evidence.
+_form_worker = FormWorker()
+_form_proxy_session = secrets.token_hex(6)
+
+
+def _form_browser(session):
+    proxy = parse_proxy(PROXY_URL, session)
+    if proxy is None:
+        raise RuntimeError("PROXY_URL is required")
+    return Camoufox(headless=True, geoip=True, humanize=True, proxy=proxy, timeout=30000)
 
 
 def _do_bytes(url, timeout_ms) -> dict:
@@ -886,20 +867,21 @@ class FormSubmitResponse(BaseModel):
 
 @app.post("/form-submit", response_model=FormSubmitResponse)
 async def form_submit(req: FormSubmitRequest):
-    loop = asyncio.get_running_loop()
+    deadline = time.monotonic() + req.timeout_ms / 1000
+    session = req.exit_session or (secrets.token_hex(6) if req.fresh_ip else _form_proxy_session)
     try:
-        # Never use _run_render: its browser-crash retry is safe for reads only.
-        data = await loop.run_in_executor(
-            _render_executor, _do_form_submit, req.url,
-            [f.model_dump() for f in req.fields], req.submit, req.dismiss, req.success_url,
-            req.wait_until, req.wait_ms, req.settle_ms, req.timeout_ms, req.fresh_ip,
-            req.exit_session, req.submission_urls, time.monotonic() + req.timeout_ms / 1000,
-            req.captcha_field, req.inspect_only,
-        )
+        # Neither /recycle nor read-job recovery owns this browser. Never retry.
+        data = await _form_worker.run(partial(run_isolated_form,
+            partial(_form_browser, session), deadline=deadline, url=req.url,
+            fields=[f.model_dump() for f in req.fields], submit=req.submit,
+            dismiss=req.dismiss, success_url=req.success_url,
+            wait_until=req.wait_until, wait_ms=req.wait_ms, settle_ms=req.settle_ms,
+            submission_urls=req.submission_urls, captcha_field=req.captcha_field,
+            inspect_only=req.inspect_only), url=req.url, deadline=deadline)
     except Exception as e:
-        log.warning("form-submit unavailable; not retried")
+        log.warning("form-submit unavailable (%s); not retried", type(e).__name__)
         raise HTTPException(status_code=502, detail="Form outcome unavailable; do not automatically retry")
-    return FormSubmitResponse(**data)
+    return FormSubmitResponse(**data, exit_session=req.exit_session or "")
 
 
 class BytesRequest(BaseModel):
