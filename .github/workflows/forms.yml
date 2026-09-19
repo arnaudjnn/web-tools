@@ -22,4 +22,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: pnpm install --frozen-lockfile && pnpm typecheck && pnpm build
+      # API/CLI resolve toolkit's emitted declarations on a clean checkout.
+      - run: pnpm install --frozen-lockfile && pnpm build && pnpm typecheck
