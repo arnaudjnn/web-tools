@@ -24,6 +24,19 @@ generic HTTP retry policy to this endpoint. Site rejections are returned as
 page content for the caller to interpret. Neither fields nor exception payloads
 are logged by the form runner.
 
+`diagnostics` contains passive CAPTCHA script request/response counts, failing
+HTTP statuses, network/page-script error counts, whether the submit click was
+attempted, and nullable `token_present`. Token presence inspects only the first
+outgoing form POST (`captcha_field`, default `g-recaptcha-response`); diagnostics
+never include tokens, request bodies, query strings or exception messages.
+A token's presence does NOT prove validity, action, score or server acceptance.
+Likewise, a loaded script does not prove its handler ran. No solver is installed.
+
+`inspect_only: true` navigates without filling or clicking and blocks same-origin
+mutating requests. It returns no HTML and never reports form success. Use this
+to check script delivery without consuming a mailbox or creating an account.
+It cannot measure a token generated only on submit: `token_present` stays null.
+
 Tests (only our loopback fixture receives submissions):
 
 ```

@@ -32,7 +32,10 @@ class BrowserTests(unittest.TestCase):
     def test_native_form_and_duplicate_post_guard(self):
         self.exercise(True)
 
-    def exercise(self, duplicate):
+    def test_inspection_performs_no_form_post(self):
+        self.exercise(False, inspect_only=True)
+
+    def exercise(self, duplicate, inspect_only=False):
         posts = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -45,6 +48,7 @@ class BrowserTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(b'''<form method="post" action="/form">
                   <input id="name" name="name" required><input id="agree" name="agree" type="checkbox">
+                  <input type="hidden" name="g-recaptcha-response" value="fixture-token-not-a-real-captcha">
                   <select id="country" name="country"><option value="IT">Italy</option></select>
                   <button id="submit">Submit</button></form>''')
                 if duplicate:
@@ -70,13 +74,19 @@ class BrowserTests(unittest.TestCase):
                     {"selector": "#agree", "action": "check"},
                     {"selector": "#country", "action": "select", "value": "IT"},
                 ], submit="#submit", settle_ms=1000, timeout_ms=10000,
-                    success_url=r"/done$")
+                    success_url=r"/done$", inspect_only=inspect_only)
                 context.close()
+                if inspect_only:
+                    self.assertEqual(len(posts), 0)
+                    self.assertEqual(result["form_submissions"], 0)
+                    self.assertFalse(result["diagnostics"]["submit_click_attempted"])
+                    return
                 self.assertEqual(result["form_submissions"], 1)
                 self.assertEqual(len(posts), 1)
                 self.assertEqual(result["status"], 303)
                 if not duplicate:
                     self.assertTrue(result["ok"])
+                    self.assertTrue(result["diagnostics"]["token_present"])
                     self.assertIn(b"name=Test", posts[0])
                     self.assertIn(b"agree=on", posts[0])
                     self.assertIn(b"country=IT", posts[0])

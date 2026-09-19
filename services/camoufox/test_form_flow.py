@@ -71,6 +71,47 @@ class FormTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_form(self.request.url, [target], None)
 
+    def test_token_presence_without_disclosing_token(self):
+        self.request.post_data = "0-captcha=private-token&email=private-email"
+        result = run_form(self.context, **self.params, captcha_field="0-captcha")
+        self.assertTrue(result["diagnostics"]["token_present"])
+        self.assertNotIn("private-token", str(result))
+        self.assertNotIn("private-email", str(result))
+
+    def test_missing_token_is_distinct_from_unknown(self):
+        self.request.post_data = "email=private-email"
+        result = run_form(self.context, **self.params, captcha_field="0-captcha")
+        self.assertIs(result["diagnostics"]["token_present"], False)
+
+    def test_inspection_never_fills_clicks_or_allows_same_origin_mutation(self):
+        self.page.goto.side_effect = lambda *args, **kwargs: self.context.route.call_args.args[1](self.route)
+        result = run_form(self.context, **self.params, inspect_only=True)
+        self.assertEqual(result["form_submissions"], 0)
+        self.assertEqual(result["diagnostics"]["blocked_mutations"], 1)
+        self.assertIsNone(result["diagnostics"]["token_present"])
+        self.assertFalse(result["diagnostics"]["submit_click_attempted"])
+        self.assertEqual(result["html"], "")
+        self.page.locator.assert_not_called()
+        self.route.continue_.assert_not_called()
+
+    def test_captcha_network_and_script_errors_are_counts_not_payloads(self):
+        def navigate(*args, **kwargs):
+            events = {call.args[0]: call.args[1] for call in self.page.on.call_args_list}
+            req = SimpleNamespace(url="https://www.google.com/recaptcha/api.js?secret=private", resource_type="script", method="GET")
+            events["request"](req)
+            events["response"](SimpleNamespace(request=req, status=403))
+            events["requestfailed"](req)
+            events["pageerror"](RuntimeError("private exception"))
+        self.page.goto.side_effect = navigate
+        result = run_form(self.context, **self.params, inspect_only=True)
+        d = result["diagnostics"]
+        self.assertEqual(d["captcha_script_requests"], 1)
+        self.assertEqual(d["captcha_script_responses"], 1)
+        self.assertEqual(d["captcha_script_http_errors"], [403])
+        self.assertEqual(d["captcha_network_failures"], 1)
+        self.assertEqual(d["page_script_errors"], 1)
+        self.assertNotIn("private", str(result))
+
     def test_forms_do_not_use_read_retry_wrapper(self):
         tree = ast.parse(pathlib.Path(__file__).with_name("app.py").read_text())
         handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "form_submit")

@@ -242,6 +242,8 @@ export const WebFormSubmitInput = z.object({
   dismiss: z.array(z.string()).optional().describe('Selectors clicked first (cookie walls)'),
   success_url: z.string().optional().describe('Regex; a final URL matching it means success'),
   submission_urls: z.array(z.string().url()).min(1).max(10).optional().describe('Same-origin form POST URLs sharing one submission budget; defaults to url'),
+  captcha_field: z.string().min(1).max(100).optional().describe('POST field to check for token presence, never its value'),
+  inspect_only: z.boolean().optional().describe('Navigate without filling/clicking; block same-origin mutating requests'),
   wait_until: z.enum(['load', 'domcontentloaded', 'networkidle', 'commit']).optional(),
   wait_ms: z.number().min(0).max(60000).optional().describe('Settle after load (default: 4000)'),
   settle_ms: z.number().min(1000).max(120000).optional().describe('Wait for the outcome (default: 20000)'),

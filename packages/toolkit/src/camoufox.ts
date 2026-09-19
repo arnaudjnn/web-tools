@@ -52,7 +52,7 @@ export type CamoufoxRender = { status: number; url: string; html: string };
 export type CamoufoxScreenshot = { status: number; url: string; b64: string };
 export type CamoufoxEval = { status: number; url: string; result: unknown };
 export type CamoufoxBytes = { status: number; b64: string };
-export type CamoufoxFormSubmit = { contract_version: number; form_submissions: number; error: string | null; status: number; url: string; html: string; ok: boolean; exit_session: string };
+export type CamoufoxFormSubmit = { contract_version: number; form_submissions: number; error: string | null; status: number; url: string; html: string; ok: boolean; exit_session: string; diagnostics: Record<string, unknown> };
 export type CamoufoxSpaFetch = { status: number; text: string };
 
 /** Fully-rendered DOM through the Italian residential exit. */
@@ -146,6 +146,8 @@ export function camoufoxFormSubmit(params: {
   dismiss?: string[];
   successUrl?: string;
   submissionUrls?: string[];
+  captchaField?: string;
+  inspectOnly?: boolean;
   waitUntil?: string;
   waitMs?: number;
   settleMs?: number;
@@ -165,6 +167,8 @@ export function camoufoxFormSubmit(params: {
       ...(params.dismiss ? { dismiss: params.dismiss } : {}),
       ...(params.successUrl ? { success_url: params.successUrl } : {}),
       ...(params.submissionUrls ? { submission_urls: params.submissionUrls } : {}),
+      ...(params.captchaField ? { captcha_field: params.captchaField } : {}),
+      ...(params.inspectOnly ? { inspect_only: true } : {}),
       ...(params.waitUntil ? { wait_until: params.waitUntil } : {}),
       ...(params.waitMs !== undefined ? { wait_ms: params.waitMs } : {}),
       ...(params.settleMs !== undefined ? { settle_ms: params.settleMs } : {}),

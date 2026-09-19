@@ -645,6 +645,8 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       dismiss: params.dismiss as string[] | undefined,
       successUrl: params.success_url as string | undefined,
       submissionUrls: params.submission_urls as string[] | undefined,
+      captchaField: params.captcha_field as string | undefined,
+      inspectOnly: params.inspect_only === true,
       waitUntil: params.wait_until as string | undefined,
       waitMs: typeof params.wait_ms === 'number' ? params.wait_ms : undefined,
       settleMs: typeof params.settle_ms === 'number' ? params.settle_ms : undefined,

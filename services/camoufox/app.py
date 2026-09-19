@@ -567,7 +567,8 @@ def _do_eval(url, wait_until, wait_ms, timeout_ms, js, fresh_ip=False) -> dict:
 
 def _do_form_submit(url, fields, submit, dismiss, success_url, wait_until, wait_ms,
                     settle_ms, timeout_ms, fresh_ip=True, exit_session=None,
-                    submission_urls=None, expires_at=None) -> dict:
+                    submission_urls=None, expires_at=None, captcha_field=None,
+                    inspect_only=False) -> dict:
     """Single attempt, isolated cookies, no browser fallback or replay."""
     validate_form(url, submission_urls, success_url)
     expires_at = expires_at or (time.monotonic() + timeout_ms / 1000)
@@ -585,7 +586,8 @@ def _do_form_submit(url, fields, submit, dismiss, success_url, wait_until, wait_
         result = run_form(context, url=url, fields=fields, submit=submit,
                           dismiss=dismiss, success_url=success_url,
                           submission_urls=submission_urls, wait_until=wait_until,
-                          wait_ms=wait_ms, settle_ms=settle_ms, timeout_ms=budget)
+                          wait_ms=wait_ms, settle_ms=settle_ms, timeout_ms=budget,
+                          captcha_field=captcha_field, inspect_only=inspect_only)
         return {**result, "exit_session": exit_session or ""}
     finally:
         try:
@@ -854,6 +856,8 @@ class FormField(BaseModel):
 
 
 class FormSubmitRequest(BaseModel):
+    captcha_field: str | None = Field(None, max_length=100, description="POST field checked for token presence only; value is never returned")
+    inspect_only: bool = Field(False, description="Navigate without filling/clicking; block same-origin mutating requests")
     url: str
     fields: list[FormField] = Field(default_factory=list)
     submit: str = Field(..., description="CSS selector of the submit control")
@@ -869,6 +873,7 @@ class FormSubmitRequest(BaseModel):
 
 
 class FormSubmitResponse(BaseModel):
+    diagnostics: dict = Field(default_factory=dict)
     contract_version: int = 2
     form_submissions: int
     error: str | None = None
@@ -889,6 +894,7 @@ async def form_submit(req: FormSubmitRequest):
             [f.model_dump() for f in req.fields], req.submit, req.dismiss, req.success_url,
             req.wait_until, req.wait_ms, req.settle_ms, req.timeout_ms, req.fresh_ip,
             req.exit_session, req.submission_urls, time.monotonic() + req.timeout_ms / 1000,
+            req.captcha_field, req.inspect_only,
         )
     except Exception as e:
         log.warning("form-submit unavailable; not retried")
