@@ -52,7 +52,7 @@ export type CamoufoxRender = { status: number; url: string; html: string };
 export type CamoufoxScreenshot = { status: number; url: string; b64: string };
 export type CamoufoxEval = { status: number; url: string; result: unknown };
 export type CamoufoxBytes = { status: number; b64: string };
-export type CamoufoxFormSubmit = { status: number; url: string; html: string; ok: boolean; exit_session: string };
+export type CamoufoxFormSubmit = { contract_version: number; form_submissions: number; error: string | null; status: number; url: string; html: string; ok: boolean; exit_session: string };
 export type CamoufoxSpaFetch = { status: number; text: string };
 
 /** Fully-rendered DOM through the Italian residential exit. */
@@ -137,15 +137,15 @@ export function camoufoxEval(params: {
 
 export type FormFieldSpec = { selector: string; value?: string; action?: 'type' | 'check' | 'select' };
 
-/** Fill and submit a form with HUMAN interaction on the residential exit.
- *  Scoring anti-bot grades behaviour as well as IP, so this clicks and types
- *  rather than setting values — see the sidecar's /form-submit docstring. */
+/** Single-attempt form execution; the caller owns durable reservations.
+ * No retries: a lost response may conceal a successful submission. */
 export function camoufoxFormSubmit(params: {
   url: string;
   fields: FormFieldSpec[];
   submit: string;
   dismiss?: string[];
   successUrl?: string;
+  submissionUrls?: string[];
   waitUntil?: string;
   waitMs?: number;
   settleMs?: number;
@@ -164,6 +164,7 @@ export function camoufoxFormSubmit(params: {
       submit: params.submit,
       ...(params.dismiss ? { dismiss: params.dismiss } : {}),
       ...(params.successUrl ? { success_url: params.successUrl } : {}),
+      ...(params.submissionUrls ? { submission_urls: params.submissionUrls } : {}),
       ...(params.waitUntil ? { wait_until: params.waitUntil } : {}),
       ...(params.waitMs !== undefined ? { wait_ms: params.waitMs } : {}),
       ...(params.settleMs !== undefined ? { settle_ms: params.settleMs } : {}),

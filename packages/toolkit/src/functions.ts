@@ -644,6 +644,7 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       fields: fields as never,
       dismiss: params.dismiss as string[] | undefined,
       successUrl: params.success_url as string | undefined,
+      submissionUrls: params.submission_urls as string[] | undefined,
       waitUntil: params.wait_until as string | undefined,
       waitMs: typeof params.wait_ms === 'number' ? params.wait_ms : undefined,
       settleMs: typeof params.settle_ms === 'number' ? params.settle_ms : undefined,
@@ -655,7 +656,7 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       content: [
         {
           type: 'text',
-          text: JSON.stringify({ status: r.status, url: r.url, ok: r.ok, exit_session: r.exit_session, html: r.html }),
+          text: JSON.stringify(r),
         },
       ],
       isError: false,

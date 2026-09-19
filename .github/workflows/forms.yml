@@ -1,0 +1,25 @@
+name: Browser forms
+on:
+  push:
+    branches: [main]
+    paths: ['services/camoufox/**', 'packages/**', '.github/workflows/forms.yml']
+  pull_request:
+    paths: ['services/camoufox/**', 'packages/**', '.github/workflows/forms.yml']
+jobs:
+  forms:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install playwright==1.58.0
+      - run: python -m playwright install --with-deps chromium
+      - run: FORM_BROWSER_TEST=chromium python -m unittest discover -s services/camoufox -p 'test_form*.py' -v
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile && pnpm typecheck && pnpm build

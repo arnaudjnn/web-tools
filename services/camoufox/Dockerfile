@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # so the runtime container starts fast and offline.
 RUN python -m camoufox fetch
 
-COPY app.py .
+COPY app.py form_flow.py .
 
 # ONE warmed Camoufox page per container (WORKERS=1) — the persistent SPA
 # session + its sensor cookie can't be shared across processes, and a

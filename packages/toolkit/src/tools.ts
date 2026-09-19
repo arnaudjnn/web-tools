@@ -139,10 +139,10 @@ export const tools: ToolDefinition[] = [
   {
     name: 'web_form_submit',
     description:
-      'Fill and submit a form in a residential browser with HUMAN interaction (pointer movement, ' +
-      'per-character typing, a real click on the submit control), then return the resulting page. ' +
-      'Use for forms behind SCORING anti-bot (reCAPTCHA v3 and friends), which grade behaviour as ' +
-      'well as exit IP — web_eval drives the same form from a page nobody touched and scores near zero.',
+      'Fill required fields and click submit once in an isolated browser context. ' +
+      'Returns the outgoing form POST count, its HTTP status and resulting page. ' +
+      'Duplicate matching POSTs are blocked; browser failures are never retried. ' +
+      'A lost response means unknown outcome, not permission to retry. The caller owns durable reservations.',
     parameters: WebFormSubmitInput,
     annotations: {
       readOnlyHint: false,

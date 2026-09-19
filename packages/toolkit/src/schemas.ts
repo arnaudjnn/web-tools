@@ -241,6 +241,7 @@ export const WebFormSubmitInput = z.object({
   submit: z.string().describe('CSS selector of the submit control'),
   dismiss: z.array(z.string()).optional().describe('Selectors clicked first (cookie walls)'),
   success_url: z.string().optional().describe('Regex; a final URL matching it means success'),
+  submission_urls: z.array(z.string().url()).min(1).max(10).optional().describe('Same-origin form POST URLs sharing one submission budget; defaults to url'),
   wait_until: z.enum(['load', 'domcontentloaded', 'networkidle', 'commit']).optional(),
   wait_ms: z.number().min(0).max(60000).optional().describe('Settle after load (default: 4000)'),
   settle_ms: z.number().min(1000).max(120000).optional().describe('Wait for the outcome (default: 20000)'),
