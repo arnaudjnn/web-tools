@@ -37,10 +37,23 @@ def validate_form(url, submission_urls, success_url):
 
 
 def human_click(page, control, remaining) -> None:
-    """Click a control the way a pointer does: approach in steps, land
-    off-centre, press and release. An identical dead-centre click on every
-    control is its own pattern; a synthetic .click() with no pointer ever
-    moving is a bigger one."""
+    """Click a control the way a pointer does: bring it into view instantly,
+    approach in steps, land off-centre, press and release. An identical
+    dead-centre click on every control is its own pattern; a synthetic .click()
+    with no pointer ever moving is a bigger one.
+
+    The scroll is instant and settled before geometry is read: with smooth
+    scrolling a rect read mid-animation points where the element was, the
+    click lands on whatever is there instead, and — because mouse.click never
+    fails on an overlay the way locator.click does — the miss is silent
+    (measured 2026-09-26: every field typed into the void, HTML5 validation
+    then blocked the submit with no POST and no error).
+    """
+    control.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
+    # Instant scrolls do not animate, but layout may need a beat before the
+    # rect is readable. Fixed margin, not a scrollY poll: polling would spend
+    # page.evaluate calls that belong to the readiness gate.
+    page.wait_for_timeout(300)
     box = control.bounding_box(timeout=remaining())
     if not box:
         control.click(timeout=remaining())
@@ -183,9 +196,14 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 control.select_option(field.get("value"), timeout=remaining())
             elif action == "type":
                 human_click(page, control, remaining)
-                page.keyboard.type(field.get("value") or "",
-                                   delay=random.randint(45, 120))
+                value = field.get("value") or ""
+                page.keyboard.type(value, delay=random.randint(45, 120))
                 page.wait_for_timeout(min(random.randint(120, 420), remaining()))
+                # Typed into the void is the silent killer (empty fields trip
+                # HTML5 validation, which blocks the submit with no POST and
+                # no error). Read back what landed and fail loud on a miss.
+                if value and control.input_value(timeout=remaining()) != value:
+                    raise ValueError("typed text did not land in the field")
             else:
                 raise ValueError("Unknown field action")
         if ready_expression:

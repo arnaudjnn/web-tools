@@ -19,8 +19,10 @@ class FormTests(unittest.TestCase):
         self.params = dict(url=self.request.url, fields=[{"selector": "#name", "value": "private-value"}],
                            submit="#submit", success_url=r"^https://example\.test/done$")
         self.page.locator.return_value.click.side_effect = self.submit
-        # Human input reads geometry before moving the pointer.
+        # Human input reads geometry before moving the pointer, and reads back
+        # what it typed (a miss fails loud instead of submitting empty).
         self.page.locator.return_value.bounding_box.return_value = {"x": 10, "y": 10, "width": 100, "height": 20}
+        self.page.locator.return_value.input_value.return_value = "private-value"
 
     def submit(self, **kwargs):
         guard = self.context.route.call_args.args[1]
@@ -177,6 +179,15 @@ class FormTests(unittest.TestCase):
         src = pathlib.Path(__file__).with_name("form_flow.py").read_text()
         self.assertNotIn(".fill(", src)
         self.assertIn("keyboard.type", src)
+
+    def test_typing_into_the_void_fails_loud(self):
+        # Empty fields trip HTML5 validation, which blocks the submit with no
+        # POST and no error — so a miss must surface as fields_failed here,
+        # not as a silent no_submission downstream.
+        self.page.locator.return_value.input_value.return_value = ""
+        result = run_form(self.context, **self.params)
+        self.assertEqual(result["form_submissions"], 0)
+        self.assertEqual(result["error"], "fields_failed")
 
 
 if __name__ == "__main__":
