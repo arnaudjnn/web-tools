@@ -19,6 +19,8 @@ class FormTests(unittest.TestCase):
         self.params = dict(url=self.request.url, fields=[{"selector": "#name", "value": "private-value"}],
                            submit="#submit", success_url=r"^https://example\.test/done$")
         self.page.locator.return_value.click.side_effect = self.submit
+        # Human input reads geometry before moving the pointer.
+        self.page.locator.return_value.bounding_box.return_value = {"x": 10, "y": 10, "width": 100, "height": 20}
 
     def submit(self, **kwargs):
         guard = self.context.route.call_args.args[1]
@@ -35,7 +37,7 @@ class FormTests(unittest.TestCase):
         self.route.abort.assert_called_once_with("blockedbyclient")
 
     def test_required_field_failure_never_clicks_submit(self):
-        self.page.locator.return_value.fill.side_effect = RuntimeError("private-value")
+        self.page.keyboard.type.side_effect = RuntimeError("private-value")
         result = run_form(self.context, **self.params)
         self.assertEqual(result["form_submissions"], 0)
         self.assertEqual(result["error"], "fields_failed")
@@ -166,6 +168,15 @@ class FormTests(unittest.TestCase):
         self.assertNotIn("_render_executor", ast.unparse(handler))
         self.assertNotIn("_ensure_render_browser", ast.unparse(handler))
         self.assertNotIn("_form_worker", ast.unparse(recycle))
+
+    def test_text_fields_are_typed_not_filled(self):
+        # fill() sets the value in one assignment — no pointer, no keystrokes,
+        # no dwell — which reCAPTCHA v3 scores as automation (measured 0 passes
+        # 2026-09-26 across headless and headed fleets). Text entry must stay
+        # keystroke-by-keystroke with trusted events.
+        src = pathlib.Path(__file__).with_name("form_flow.py").read_text()
+        self.assertNotIn(".fill(", src)
+        self.assertIn("keyboard.type", src)
 
 
 if __name__ == "__main__":
