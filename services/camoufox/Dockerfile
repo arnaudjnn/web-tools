@@ -5,7 +5,7 @@ FROM python:3.13-slim
 # headless fingerprint, so /form-submit takes an opt-in `headed` browser that
 # needs a display even in a container.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget gnupg curl ca-certificates xvfb \
+    wget gnupg curl ca-certificates xvfb xauth \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdbus-1-3 \
     libdrm2 libgbm1 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
     libxrandr2 libgtk-3-0 libpangocairo-1.0-0 libpango-1.0-0 libcairo2 \
