@@ -24,7 +24,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 ARG CAMOUFOX_BROWSER=official/stable/152.0.4-beta.30
 RUN python -m camoufox set "$CAMOUFOX_BROWSER" && python -m camoufox fetch
 
-COPY app.py form_flow.py form_worker.py .
+COPY app.py form_flow.py form_worker.py entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 # ONE warmed Camoufox page per container (WORKERS=1) — the persistent SPA
 # session + its sensor cookie can't be shared across processes, and a
@@ -36,6 +37,6 @@ COPY app.py form_flow.py form_worker.py .
 ENV WORKERS=1
 EXPOSE 8000
 # Bind 0.0.0.0 (Railway's edge talks IPv4; an IPv6-only bind 502s).
-# Everything runs under xvfb-run so opt-in headed browsers have a display;
-# headless ones ignore it for the price of one Xvfb process.
-CMD ["sh", "-c", ": \"${PORT:?PORT must be set — this image has no default, so a missing Railway variable fails here instead of silently handing callers a portless URL}\" && exec xvfb-run -a -s \"-screen 0 1440x900x24\" uvicorn app:app --host 0.0.0.0 --port ${PORT} --workers ${WORKERS}"]
+# The entrypoint starts Xvfb (for opt-in headed browsers) and execs uvicorn;
+# see it for why this is a script and not an xvfb-run one-liner.
+CMD ["./entrypoint.sh"]
