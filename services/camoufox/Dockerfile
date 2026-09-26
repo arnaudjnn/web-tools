@@ -34,6 +34,14 @@ RUN chmod +x entrypoint.sh
 # No PORT default on purpose — see the note in services/scrapling/Dockerfile. The
 # Railway variable is the single source of truth for both the bind and the URL
 # that reaches it, so a missing one must fail loudly rather than diverge.
+# Firefox's content sandbox needs user namespaces, which the container host
+# sometimes takes away — measured twice on 2026-09-26: every launch in every
+# mode died with `CanCreateUserNamespace() clone() failure: EACCES` + SIGSEGV
+# until a restart landed the container on a host that still has them. A
+# restart is not a fix for a fleet, so the content sandbox stays off here:
+# sites cannot see it (it is OS isolation, not a fingerprint surface), while
+# a fleet that cannot launch is down for every consumer at once.
+ENV MOZ_DISABLE_CONTENT_SANDBOX=1
 ENV WORKERS=1
 EXPOSE 8000
 # Bind 0.0.0.0 (Railway's edge talks IPv4; an IPv6-only bind 502s).
