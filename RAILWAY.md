@@ -99,6 +99,16 @@ warmed anti-bot session cannot be shared across processes. Use
 existing regions, so pass `us-east=0` to move rather than spread. Otherwise you get
 replicas on two continents and a transatlantic round trip per request.
 
+**When every browser launch 502s with `CanCreateUserNamespace() clone() failure:
+EACCES`, restart the Camoufox service.** The Firefox sandbox needs user
+namespaces, which the container sometimes loses (observed 2026-09-26: all of
+/render, /eval, /spa-fetch and /form-submit failing at launch for hours, fixed
+by a restart that cleared it). `railway restart --service Camoufox --yes`, then
+confirm `/healthz` reports `render_browser_ok: true`. If a restart stops curing
+it, the escape hatch is `MOZ_DISABLE_CONTENT_SANDBOX=1` on the Camoufox service —
+deliberately not the default, because disabling the content sandbox weakens the
+fingerprint this browser exists for.
+
 **Give only the Web Tools Server a public domain.** It is the authenticated front
 door; the other five talk over Railway's private network and should have no domain
 at all. SearXNG in particular has no authentication of its own, so a public domain

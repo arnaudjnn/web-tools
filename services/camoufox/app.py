@@ -652,7 +652,15 @@ async def _start_keepalive():
 # loop, which can drop the handles, swap in a FRESH thread, and retry — exactly
 # what /recycle does, minus the teardown a dead process does not need.
 _DEAD_BROWSER = re.compile(
-    r"Target (?:page, context or browser|closed)|browser has been closed|Browser\.new_page|Connection closed",
+    r"Target (?:page, context or browser|closed)|browser has been closed|Browser\.new_page|Connection closed"
+    # A worker thread that already hosted a Playwright instance is poisoned for
+    # every later launch on it. The launch itself then raises this instead of a
+    # browser error (observed 2026-09-26: a post-restart /eval failed this way on
+    # the prewarmed thread, and the next launch on a fresh thread succeeded) —
+    # so it is the same dead-thread recovery, not a caller bug, and retrying it
+    # on a fresh thread is correct. If the fresh thread raises it too, the retry
+    # propagates, so a genuinely broken Playwright still surfaces.
+    r"|Sync API inside the asyncio loop",
     re.I,
 )
 
