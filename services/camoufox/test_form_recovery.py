@@ -54,15 +54,9 @@ def _install_stubs():
     camoufox = _stub_module("camoufox")
     sync_api = _stub_module("camoufox.sync_api")
     sync_api.Camoufox = object
-
-    form_worker = _stub_module("form_worker")
-
-    class _FormWorker:
-        async def run(self, *args, **kwargs):
-            raise AssertionError("must not run in this test")
-
-    form_worker.FormWorker = _FormWorker
-    form_worker.run_isolated_form = lambda *args, **kwargs: None
+    # form_worker is NOT stubbed: it imports nothing beyond stdlib + form_flow,
+    # so the real module loads and stays importable for the other test files
+    # sharing this unittest process.
 
 
 _install_stubs()

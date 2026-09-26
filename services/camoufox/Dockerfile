@@ -1,9 +1,11 @@
 FROM python:3.13-slim
 
 # Camoufox (the stealth Firefox build) needs the standard Playwright/
-# Firefox system deps.
+# Firefox system deps, plus xvfb: score-gated forms (reCAPTCHA v3) refuse the
+# headless fingerprint, so /form-submit takes an opt-in `headed` browser that
+# needs a display even in a container.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget gnupg curl ca-certificates \
+    wget gnupg curl ca-certificates xvfb \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdbus-1-3 \
     libdrm2 libgbm1 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
     libxrandr2 libgtk-3-0 libpangocairo-1.0-0 libpango-1.0-0 libcairo2 \
@@ -34,4 +36,6 @@ COPY app.py form_flow.py form_worker.py .
 ENV WORKERS=1
 EXPOSE 8000
 # Bind 0.0.0.0 (Railway's edge talks IPv4; an IPv6-only bind 502s).
-CMD ["sh", "-c", ": \"${PORT:?PORT must be set — this image has no default, so a missing Railway variable fails here instead of silently handing callers a portless URL}\" && exec uvicorn app:app --host 0.0.0.0 --port ${PORT} --workers ${WORKERS}"]
+# Everything runs under xvfb-run so opt-in headed browsers have a display;
+# headless ones ignore it for the price of one Xvfb process.
+CMD ["sh", "-c", ": \"${PORT:?PORT must be set — this image has no default, so a missing Railway variable fails here instead of silently handing callers a portless URL}\" && exec xvfb-run -a -s \"-screen 0 1440x900x24\" uvicorn app:app --host 0.0.0.0 --port ${PORT} --workers ${WORKERS}"]

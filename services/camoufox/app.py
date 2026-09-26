@@ -570,11 +570,15 @@ _form_worker = FormWorker()
 _form_proxy_session = secrets.token_hex(6)
 
 
-def _form_browser(session, main_world_eval=False):
+def _form_browser(session, main_world_eval=False, headed=False):
     proxy = parse_proxy(PROXY_URL, session)
     if proxy is None:
         raise RuntimeError("PROXY_URL is required")
-    return Camoufox(headless=True, geoip=True, humanize=True, proxy=proxy, timeout=30000,
+    # Headed is opt-in per request: score-gated forms (reCAPTCHA v3) refuse the
+    # headless fingerprint while the isolated per-submit browser keeps it from
+    # disturbing the shared headless readers. Needs a display — the image runs
+    # under xvfb-run (see Dockerfile), so :99 is always there.
+    return Camoufox(headless=not headed, geoip=True, humanize=True, proxy=proxy, timeout=30000,
                     main_world_eval=main_world_eval)
 
 
@@ -850,6 +854,7 @@ class FormSubmitRequest(BaseModel):
     require_captcha_token: bool = Field(False, description="Abort the form POST if its CAPTCHA field is empty/unreadable; never retry")
     captcha_field: str | None = Field(None, max_length=100, description="POST field checked for token presence only; value is never returned")
     inspect_only: bool = Field(False, description="Navigate without filling/clicking; block same-origin mutating requests")
+    headed: bool = Field(False, description="headed browser (under xvfb) for score-gated forms; headless fleets score 0 on reCAPTCHA v3")
     url: str
     fields: list[FormField] = Field(default_factory=list)
     submit: str = Field(..., description="CSS selector of the submit control")
@@ -883,7 +888,7 @@ async def form_submit(req: FormSubmitRequest):
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
         data = await _form_worker.run(partial(run_isolated_form,
-            partial(_form_browser, session, bool(req.ready_expression)), deadline=deadline, url=req.url,
+            partial(_form_browser, session, bool(req.ready_expression), req.headed), deadline=deadline, url=req.url,
             fields=[f.model_dump() for f in req.fields], submit=req.submit,
             dismiss=req.dismiss, success_url=req.success_url,
             wait_until=req.wait_until, wait_ms=req.wait_ms, settle_ms=req.settle_ms,

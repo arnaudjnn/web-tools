@@ -255,6 +255,10 @@ export const WebFormSubmitInput = z.object({
     .string()
     .optional()
     .describe('Pin the exit: same token = same IP, so a passing exit can be reused instead of re-searched'),
+  headed: z
+    .boolean()
+    .optional()
+    .describe('Headed browser under xvfb for score-gated forms; headless fleets score 0 on reCAPTCHA v3'),
 });
 
 export const WebEvalInput = z.object({

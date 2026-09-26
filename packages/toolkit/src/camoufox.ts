@@ -158,6 +158,9 @@ export function camoufoxFormSubmit(params: {
   /** Pin the exit: the same token lands on the same IP, so a passing exit is
    *  reused instead of re-searched (the verdict is binary and stable). */
   exitSession?: string;
+  /** Headed browser under xvfb for score-gated forms (reCAPTCHA v3 refuses
+   *  the headless fingerprint). Default headless; other readers unaffected. */
+  headed?: boolean;
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 120_000;
   return call<CamoufoxFormSubmit>(
@@ -179,6 +182,7 @@ export function camoufoxFormSubmit(params: {
       timeout_ms: timeoutMs,
       fresh_ip: params.freshIp !== false,
       ...(params.exitSession ? { exit_session: params.exitSession } : {}),
+      ...(params.headed ? { headed: true } : {}),
     },
     timeoutMs + 60_000,
   );

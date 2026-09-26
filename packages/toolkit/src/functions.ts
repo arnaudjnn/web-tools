@@ -655,6 +655,7 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       timeoutMs: typeof params.timeout_ms === 'number' ? params.timeout_ms : undefined,
       freshIp: params.fresh_ip !== false,
       exitSession: params.exit_session as string | undefined,
+      headed: params.headed === true,
     });
     return trace('web_form_submit', {
       content: [
