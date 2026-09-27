@@ -71,6 +71,24 @@ Endpoints: `/fetch` (with `wait_ms`), `/markdown` (`raw|fit`), `/raw`,
   costs the worker. `SOLVE_HOSTS` is empty on purpose; a host only enters it when
   SOLVE is proven to *clear* the challenge, not merely when FAST is refused.
 
+## Camoufox sidecar (`services/camoufox/app.py`)
+
+The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
+(Akamai), forms (`FORMS.md`). Traps:
+
+- **Playwright handles are thread-bound.** `/recycle` and dead-browser recovery
+  swap the executor thread; `_ensure_page` / `_ensure_render_browser` record the
+  owning thread and rebuild a foreign handle locally, and `_DEAD_BROWSER` also
+  matches `cannot switch to a different thread` (fresh thread + one retry).
+  Without that, every later render 502s and the toolkit silently falls back to
+  the wrong-country exit — observed live 2026-09-27.
+- **Forms are single-attempt and solver-gated**: `captcha` {sitekey, action?,
+  version?} mints the token via CapSolver (`CAPSOLVER_API_KEY` on this service
+  only) and fails closed (`captcha_solver_*`, zero submissions) before the click
+  when the key or provider is missing. Text is typed keystroke-by-keystroke —
+  reCAPTCHA v3 scores behaviour — so never reintroduce `.fill(`: `test_form_flow.py`
+  greps for it.
+
 ## Deploy lore (Railway, project `3375ebc9…`)
 
 - **Tools does not auto-deploy on push.** After a commit, run

@@ -34,9 +34,11 @@ POST /screenshot { url, wait_until?, wait_ms?, full_page?, width?, height?, clic
 POST /eval { url, js, wait_ms?, fresh_ip? }
     → { status, url, result } # run arbitrary JS in the residential page and
                             # return its JSON result (drive/inspect JS SPAs)
-POST /form-submit { url, fields[], submit, dismiss?, success_url?, fresh_ip? }
+POST /form-submit { url, fields[], submit, dismiss?, success_url?, fresh_ip?, captcha? }
     → { contract_version, form_submissions, status, url, html, ok, error }
                             # isolated, single attempt; never replayed on failure
+                            # captcha: { sitekey, action?, version? } → solve via
+                            # CapSolver before the one click (CAPSOLVER_API_KEY)
 POST /bytes { url, timeout_ms? }
     → { status, b64 }       # residential binary fetch (PDFs) through the same exit
 POST /recycle {}           # drop both the Akamai warmed session and the render browser
@@ -890,10 +892,20 @@ class FormField(BaseModel):
     action: str = Field("type", description="type | check | select")
 
 
+class CaptchaSpec(BaseModel):
+    sitekey: str = Field(..., max_length=256, description="reCAPTCHA site key (the widget's data-sitekey)")
+    action: str | None = Field(None, max_length=64, description="reCAPTCHA v3 action (the value passed to grecaptcha.execute)")
+    version: str = Field("v3", pattern="^v[23]$", description="v3 (default) or v2")
+
+
 class FormSubmitRequest(BaseModel):
     ready_expression: str | None = Field(None, max_length=2000, description="Main-world boolean expression required before clicking submit")
     require_captcha_token: bool = Field(False, description="Abort the form POST if its CAPTCHA field is empty/unreadable; never retry")
     captcha_field: str | None = Field(None, max_length=100, description="POST field checked for token presence only; value is never returned")
+    captcha: CaptchaSpec | None = Field(
+        None,
+        description="Solve the CAPTCHA via CapSolver before the single submit; needs CAPSOLVER_API_KEY "
+                    "on this service, else the form fails closed with captcha_solver_unavailable and zero submissions")
     inspect_only: bool = Field(False, description="Navigate without filling/clicking; block same-origin mutating requests")
     headed: bool = Field(False, description="headed browser (under xvfb) for score-gated forms; headless fleets score 0 on reCAPTCHA v3")
     url: str
@@ -935,7 +947,8 @@ async def form_submit(req: FormSubmitRequest):
             wait_until=req.wait_until, wait_ms=req.wait_ms, settle_ms=req.settle_ms,
             submission_urls=req.submission_urls, captcha_field=req.captcha_field,
             inspect_only=req.inspect_only, require_captcha_token=req.require_captcha_token,
-            ready_expression=req.ready_expression), url=req.url, deadline=deadline)
+            ready_expression=req.ready_expression,
+            captcha=req.captcha.model_dump() if req.captcha else None), url=req.url, deadline=deadline)
     except Exception as e:
         log.warning("form-submit unavailable (%s); not retried", type(e).__name__)
         raise HTTPException(status_code=502, detail="Form outcome unavailable; do not automatically retry")

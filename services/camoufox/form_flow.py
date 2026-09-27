@@ -1,4 +1,10 @@
-"""Generic single-attempt form execution. No target-specific or CAPTCHA logic.
+"""Generic single-attempt form execution. No target-specific logic.
+
+CAPTCHA solving happens only when the caller passes `captcha` AND the
+Camoufox service holds CAPSOLVER_API_KEY (see captcha_solver); a solver
+failure returns structured with zero submissions BEFORE the submit click.
+Without an explicit `captcha` the site's own handler supplies any token,
+exactly as before.
 
 The caller owns durable reservations. A lost HTTP response is UNKNOWN and must
 not be retried automatically. The context guard only prevents duplicate POSTs
@@ -20,6 +26,8 @@ import random
 import re
 import time
 from urllib.parse import urlsplit, parse_qs
+
+import captcha_solver
 
 
 def validate_form(url, submission_urls, success_url):
@@ -71,7 +79,7 @@ def human_click(page, control, remaining) -> None:
 def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              submission_urls=None, wait_until="domcontentloaded", wait_ms=0,
              settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
-             require_captcha_token=False, ready_expression=None):
+             require_captcha_token=False, ready_expression=None, captcha=None):
     targets = validate_form(url, submission_urls, success_url)
     deadline = time.monotonic() + timeout_ms / 1000
     result = {"contract_version": 2, "status": 0, "url": url, "html": "",
@@ -81,7 +89,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                    "captcha_network_failures": 0, "submit_click_attempted": False,
                    "token_present": None, "blocked_mutations": 0, "page_script_errors": 0,
                    "navigation_status": None, "captcha_guard_blocked": False,
-                   "ready_condition_met": None}
+                   "ready_condition_met": None, "solver_attempts": 0,
+                   "solver_status": None}
     result["diagnostics"] = diagnostics
     page = None
     phase = "navigation"
@@ -214,10 +223,48 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             while page.evaluate("mw:(" + ready_expression + ")") is not True:
                 page.wait_for_timeout(remaining(100))
             diagnostics["ready_condition_met"] = True
+        if captcha:
+            # Mint the token AFTER the human interaction and BEFORE the submit
+            # dwell: the site reads the field on click, and a solver failure
+            # must return structured and zero — the click never happens, so a
+            # solver outage cannot become a half-submitted form.
+            phase = "captcha"
+            diagnostics["solver_attempts"] += 1
+            try:
+                token = captcha_solver.solve(
+                    sitekey=captcha["sitekey"],
+                    page_url=page.url,
+                    action=captcha.get("action"),
+                    version=captcha.get("version") or "v3",
+                    remaining=remaining,
+                )
+            except captcha_solver.SolverError as error:
+                diagnostics["solver_status"] = error.kind
+                result["error"] = f"captcha_solver_{error.kind}"
+                return result
+            diagnostics["solver_status"] = "solved"
+            try:
+                # The standard hidden textarea the recaptcha widget renders;
+                # set its value directly (it is not a field a person types
+                # into — the keystroke rule governs TEXT fields). Events let
+                # page listeners see the new value; the DOM is shared with the
+                # page even where Camoufox isolates JS globals.
+                page.locator(f'textarea[name="{captcha_field or "g-recaptcha-response"}"]').first.evaluate(
+                    "(el, token) => { el.value = token;"
+                    " el.dispatchEvent(new Event('input', {bubbles: true}));"
+                    " el.dispatchEvent(new Event('change', {bubbles: true})); }",
+                    token)
+            except Exception:
+                diagnostics["solver_status"] = "field_missing"
+                result["error"] = "captcha_field_missing"
+                return result
+            token = None  # never hold it longer than the injection
         phase = "submit"
-        # Exactly one click. The site's own handler supplies any CAPTCHA token.
-        # Dwell first: a submit the instant the last field fills in is machine
-        # timing, and the token must be minted after the interaction anyway.
+        # Exactly one click. Any CAPTCHA token was minted and injected above
+        # when the caller asked for it; otherwise the site's own handler
+        # supplies it. Dwell first: a submit the instant the last field fills
+        # in is machine timing, and the token must be minted after the
+        # interaction anyway.
         page.wait_for_timeout(min(random.randint(800, 2400), remaining()))
         diagnostics["submit_click_attempted"] = True
         page.locator(submit).click(timeout=remaining())

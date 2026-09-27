@@ -3,8 +3,9 @@
 `web_form_submit` (Tools API) delegates to Camoufox `/form-submit`. Domain
 selectors and business validation stay with the consumer. The browser service
 owns navigation, required-field filling, isolated cookies, cleanup and a
-context-wide one-POST guard. It lets the page's own submit handler run; it does
-not supply CAPTCHA answers or promise provider acceptance.
+context-wide one-POST guard. It lets the page's own submit handler run; unless
+the caller passes `captcha` (below) it supplies no CAPTCHA answer, and it never
+promises provider acceptance.
 
 Version 2 adds `contract_version: 2`, `form_submissions: 0 | 1`, and nullable
 `error`. `status` is the actual matching POST response, not the initial GET.
@@ -38,11 +39,28 @@ are logged by the form runner.
 
 `diagnostics` contains passive CAPTCHA script request/response counts, failing
 HTTP statuses, network/page-script error counts, whether the submit click was
-attempted, and nullable `token_present`. Token presence inspects only the first
+attempted, nullable `token_present`, and the solver's `solver_attempts` /
+`solver_status` enum (`solved | unavailable | failed | field_missing`, null when
+`captcha` was not requested). Token presence inspects only the first
 outgoing form POST (`captcha_field`, default `g-recaptcha-response`); diagnostics
 never include tokens, request bodies, query strings or exception messages.
 A token's presence does NOT prove validity, action, score or server acceptance.
-Likewise, a loaded script does not prove its handler ran. No solver is installed.
+Likewise, a loaded script does not prove its handler ran. The solver below is
+the only way this service mints a token.
+
+`captcha: { sitekey, action?, version? }` mints the token via CapSolver AFTER
+the human interaction and BEFORE the single click, and only when the Camoufox
+service holds `CAPSOLVER_API_KEY`. Without the key the result is
+`captcha_solver_unavailable`; a provider error, stall, empty token or deadline
+is `captcha_solver_failed`; a page with no matching token textarea is
+`captcha_field_missing`. All three are zero submissions and no click — a solver
+outage cannot become a half-submitted form. The token is written only into the
+CAPTCHA field (`captcha_field`, default `g-recaptcha-response`) and is never
+logged, stored or returned. The solve consumes the operation's own deadline and
+is part of the one attempt; there is no solver retry. `version` picks the task
+family (default `v3`); `v2` maps to the proxyless v2 task but does not tick a
+visible checkbox — a site whose gate is the widget still needs its own handler.
+Pair with `require_captcha_token` so the outgoing POST is checked for presence.
 
 `ready_expression` optionally waits for a caller-supplied boolean expression in
 the page's main world before the single submit click. This is important with

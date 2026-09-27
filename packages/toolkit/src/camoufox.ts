@@ -137,6 +137,11 @@ export function camoufoxEval(params: {
 
 export type FormFieldSpec = { selector: string; value?: string; action?: 'type' | 'check' | 'select' };
 
+/** Optional CapSolver solving before the single submit. Env-gated on the
+ *  Camoufox service (CAPSOLVER_API_KEY); without it the form fails closed
+ *  with `captcha_solver_unavailable` and zero submissions. */
+export type FormCaptchaSpec = { sitekey: string; action?: string; version?: 'v3' | 'v2' };
+
 /** Single-attempt form execution; the caller owns durable reservations.
  * No retries: a lost response may conceal a successful submission. */
 export function camoufoxFormSubmit(params: {
@@ -147,6 +152,7 @@ export function camoufoxFormSubmit(params: {
   successUrl?: string;
   submissionUrls?: string[];
   captchaField?: string;
+  captcha?: FormCaptchaSpec;
   requireCaptchaToken?: boolean;
   readyExpression?: string;
   inspectOnly?: boolean;
@@ -173,6 +179,7 @@ export function camoufoxFormSubmit(params: {
       ...(params.successUrl ? { success_url: params.successUrl } : {}),
       ...(params.submissionUrls ? { submission_urls: params.submissionUrls } : {}),
       ...(params.captchaField ? { captcha_field: params.captchaField } : {}),
+      ...(params.captcha ? { captcha: params.captcha } : {}),
       ...(params.requireCaptchaToken ? { require_captcha_token: true } : {}),
       ...(params.readyExpression ? { ready_expression: params.readyExpression } : {}),
       ...(params.inspectOnly ? { inspect_only: true } : {}),
