@@ -27,7 +27,7 @@ function registerTool(server: McpServer, tool: ToolDefinition): void {
       try {
         const result = await handler(params);
 
-        // If the function already returns a ToolResult (crawl4ai tools), pass through
+        // If the function already returns a ToolResult, pass through
         if (result?.content && Array.isArray(result.content)) {
           return result as ToolResult;
         }

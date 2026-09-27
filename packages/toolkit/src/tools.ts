@@ -32,8 +32,9 @@ export const tools: ToolDefinition[] = [
   {
     name: 'web_fetch',
     description:
-      'Fetch a URL and return its content as clean markdown. Fetched via Scrapling ' +
-      '(residential egress + JS-challenge solving) and rendered to markdown by Crawl4AI.',
+      'Fetch a URL and return its content as clean markdown, fetched and rendered by the ' +
+      'Scrapling sidecar (residential egress + JS-challenge solving). Italian and ' +
+      'bot-walled sources route through the Italian residential Firefox.',
     parameters: WebFetchInput,
     annotations: {
       readOnlyHint: true,
@@ -58,7 +59,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'web_screenshot',
-    description: 'Capture a full-page PNG screenshot of a URL via Crawl4AI',
+    description: 'Capture a full-page PNG screenshot of a URL and return it base64-encoded',
     parameters: WebScreenshotInput,
     annotations: {
       readOnlyHint: true,
@@ -69,7 +70,7 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'web_pdf',
-    description: 'Generate a PDF document of a URL via Crawl4AI',
+    description: 'Convert a URL to PDF (Chromium print-to-PDF) and return it base64-encoded',
     parameters: WebPdfInput,
     annotations: {
       readOnlyHint: true,
@@ -80,7 +81,8 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'web_execute_js',
-    description: 'Execute JavaScript snippets on a URL via Crawl4AI and return the crawl result',
+    description:
+      'Execute JavaScript snippets on a URL in order and return their results as JSON',
     parameters: WebExecuteJsInput,
     annotations: {
       readOnlyHint: false,
@@ -91,7 +93,9 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'web_crawl',
-    description: 'Crawl one or more URLs and extract their content using Crawl4AI',
+    description:
+      'Crawl one or more URLs sequentially and return one payload whose `results` array ' +
+      'holds {url, status_code, success, markdown} per URL',
     parameters: WebCrawlInput,
     annotations: {
       readOnlyHint: true,

@@ -1,5 +1,5 @@
-import { callMdTool } from './crawl4ai.js';
-import type { SnapshotInfo, ToolResult } from './types.js';
+import { scraplingRenderMarkdown } from './scrapling.js';
+import type { SnapshotInfo } from './types.js';
 
 const CDX_API_URL = 'https://web.archive.org/cdx/search/cdx';
 const WAYBACK_BASE_URL = 'https://web.archive.org/web';
@@ -68,11 +68,13 @@ export async function getArchivedPage(params: {
   const prefix = original ? 'id_' : '';
   const waybackUrl = `${WAYBACK_BASE_URL}/${prefix}${timestamp}/${url}`;
 
-  const result = await callMdTool({ url: waybackUrl, f: 'raw' });
-  const content = (result as ToolResult).content
-    .filter((c) => c.type === 'text')
-    .map((c) => c.text)
-    .join('\n');
+  // The archive is an open origin — no bot gate, no browser needed. Plain
+  // fetch, then the sidecar's CPU-only markdown render (same converter as
+  // web_fetch, `raw` filter: an archived page is read in full, not pruned).
+  const res = await fetch(waybackUrl, { signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) throw new Error(`Wayback fetch error: ${res.status} ${res.statusText}`);
+  const html = await res.text();
+  const content = await scraplingRenderMarkdown({ html, url: waybackUrl, filter: 'raw' });
 
   return { waybackUrl, content };
 }

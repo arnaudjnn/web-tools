@@ -1,11 +1,4 @@
 import {
-  callCrawlTool,
-  callExecuteJsTool,
-  callPdfTool,
-  callScreenshotTool,
-  renderMarkdown,
-} from './crawl4ai.js';
-import {
   camoufoxBytes,
   camoufoxEval,
   camoufoxRecycle,
@@ -14,29 +7,31 @@ import {
   camoufoxSpaFetch,
   camoufoxFormSubmit,
 } from './camoufox.js';
-import { isItalianSource, prefersCrawl4ai } from './routing.js';
-import { scraplingFetch } from './scrapling.js';
+import { forcedWaitMs, isItalianSource, prefersCamoufox } from './routing.js';
+import {
+  scraplingEval,
+  scraplingFetch,
+  scraplingPdf,
+  scraplingRenderMarkdown,
+  scraplingScreenshot,
+} from './scrapling.js';
 import { searchSearXNG } from './searxng.js';
 import { getStats, recordCall, type ToolName } from './stats.js';
 import { getArchivedPage, getSnapshots } from './wayback.js';
 import type { ToolResult } from './types.js';
 
-// Upstream failure modes worth counting as errors in /stats even when
-// Crawl4AI reports them as a 200 with the error JSON in the body: explicit
-// anti-bot signals (429, CF challenge) and internal errors that trace back to
-// a wedged browser context. Note Crawl4AI >= 0.9 also surfaces a plain
-// anti-bot 403 as an opaque HTTP 500 + correlation id, so a 500 from it is not
-// necessarily a server fault.
+// Upstream failure modes worth counting as errors in /stats even when the tool
+// hands them back as content: challenge pages (web_html reports status as data
+// with isError:false), explicit anti-bot signals, and the sidecar's own hard
+// deadline / capture failures.
 const BLOCK_RE =
-  /HTTP 429|Too Many Requests|Cloudflare JS challenge|anti-bot protection|Just a moment\.\.\.|Unexpected error in _crawl_web|BrowserContext\.new_page|Navigation timeout|Connection closed while reading from the driver/i;
+  /HTTP 429|Too Many Requests|Cloudflare JS challenge|Just a moment\.\.\.|upstream returned HTTP [45]|hard deadline|capture failed/i;
 
 // Count a tool invocation: bytes = size of the text payload we hand back to
-// the caller. There is deliberately no browser-rotation hook here any more.
-// The old rotation module killed Crawl4AI's hot browser on N consecutive
-// blocks so the next call would re-dial the residential proxy and land on a
-// fresh exit IP. Crawl4AI >= 0.9 rejects proxy_config outright, so there is no
-// proxy connection to re-dial: killing browsers could not change our egress IP,
-// it only churned the pool on every LinkedIn 999.
+// the caller. There is deliberately no browser-rotation hook here: killing a
+// browser cannot change an egress IP the service does not control (the one
+// rotation that matters — a vendor exit refusing us — lives in the sidecars,
+// where the proxy connection is owned).
 function trace(tool: ToolName, result: ToolResult): ToolResult {
   const text = result.content?.[0]?.text ?? '';
   const blocked = BLOCK_RE.test(text);
@@ -53,76 +48,7 @@ const log = (...args: unknown[]) => {
   );
 };
 
-// ── Crawl4AI proxy wrapper ───────────────────────────────────────────
-
-async function proxyCrawl4AI(
-  toolName: string,
-  fn: () => Promise<unknown>,
-): Promise<ToolResult> {
-  try {
-    const resolved = (await fn()) as ToolResult;
-
-    if (resolved?.isError) {
-      const text =
-        resolved.content?.[0]?.text ||
-        JSON.stringify(resolved.content) ||
-        '(no details returned)';
-      log(`Crawl4AI ${toolName} error response:`, text);
-      return {
-        content: [{ type: 'text', text: `Crawl4AI ${toolName} error: ${text}` }],
-        isError: true,
-      };
-    }
-
-    if (
-      !resolved?.content ||
-      resolved.content.length === 0 ||
-      resolved.content.every((c) => !c.text)
-    ) {
-      log(`Crawl4AI ${toolName} returned empty content`);
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Crawl4AI ${toolName} returned empty content. The page may have no extractable text or the crawl may have timed out.`,
-          },
-        ],
-        isError: true,
-      };
-    }
-
-    // Crawl4AI's MCP layer reports upstream HTTP failures as a SUCCESSFUL tool
-    // call whose text is an error envelope — `{"error": 500, "detail": ...}` —
-    // with isError absent. Left alone, that envelope flows all the way out as if
-    // it were page content: a caller asking for a Trustpilot page got
-    // `{"error": 500, ...}` back with isError:false. Detect the envelope and
-    // call it what it is.
-    const first = resolved.content?.[0]?.text ?? '';
-    if (first.startsWith('{')) {
-      try {
-        const parsed = JSON.parse(first) as { error?: unknown; detail?: unknown };
-        if (parsed && typeof parsed === 'object' && 'error' in parsed && !('results' in parsed)) {
-          log(`Crawl4AI ${toolName} error envelope:`, first.slice(0, 300));
-          return {
-            content: [{ type: 'text', text: `Crawl4AI ${toolName} error: ${first}` }],
-            isError: true,
-          };
-        }
-      } catch {
-        // Not JSON after all — fall through and treat it as content.
-      }
-    }
-
-    return resolved;
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    log(`Crawl4AI ${toolName} threw:`, msg);
-    return {
-      content: [{ type: 'text', text: `Crawl4AI ${toolName} error: ${msg}` }],
-      isError: true,
-    };
-  }
-}
+const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 // ── Fetching ─────────────────────────────────────────────────────────
 
@@ -139,10 +65,12 @@ type FetchedPage = {
 /**
  * Fetch a page through the backend the host calls for.
  *
- * Both web_fetch and web_html need this and used to each carry their own copy of
- * the Camoufox-to-page mapping, which is how web_html ended up without the
- * Crawl4AI host preference that web_fetch had: the same URL was fast through one
- * tool and slow through the other. One function, one routing decision.
+ * Every consumer (web_fetch, web_html, web_crawl) comes here, so the routing
+ * decision exists once: Italian sources and the hosts in routing.ts that the
+ * Scrapling solver cannot clear go to Camoufox; everything else to Scrapling.
+ * When Scrapling fails — absent service, transport error, a wall only a
+ * different exit clears — Camoufox is the symmetric fallback, so an outage
+ * degrades the exit and the browser, not the tool.
  */
 type PageOpts = {
   timeoutMs?: number;
@@ -155,9 +83,17 @@ type PageOpts = {
 
 async function fetchPage(url: string, opts: PageOpts = {}): Promise<FetchedPage> {
   const timeoutMs = opts.timeoutMs ?? 60_000;
+  // A host that NEEDS a settle time gets it regardless of what the caller asked
+  // for (measured minimum — see routing.ts).
+  const forced = forcedWaitMs(url);
 
-  if (isItalianSource(url)) {
-    const r = await camoufoxRender({ url, timeoutMs, ...opts });
+  const viaCamoufox = async (): Promise<FetchedPage> => {
+    const r = await camoufoxRender({
+      url,
+      timeoutMs,
+      ...opts,
+      ...(forced !== undefined ? { waitMs: forced } : {}),
+    });
     return {
       status: r.status,
       url: r.url,
@@ -166,12 +102,33 @@ async function fetchPage(url: string, opts: PageOpts = {}): Promise<FetchedPage>
       mode: 'camoufox',
       escalated: false,
     };
+  };
+
+  if (isItalianSource(url) || prefersCamoufox(url)) {
+    return viaCamoufox();
   }
 
-  // No mode passed: the sidecar routes by host and escalates to a challenge
-  // solve only on evidence. It takes networkIdle rather than the full set of
-  // page knobs, so the rest are honoured where supported and dropped here.
-  return scraplingFetch({ url, timeoutMs, networkIdle: opts.waitUntil === 'networkidle' });
+  try {
+    // No mode passed: the sidecar routes by host and escalates to a challenge
+    // solve only on evidence (and never for hosts it cannot clear).
+    const page = await scraplingFetch({
+      url,
+      timeoutMs,
+      networkIdle: opts.waitUntil === 'networkidle',
+      waitMs: opts.waitMs,
+    });
+    return { ...page };
+  } catch (err) {
+    const scraplingMsg = errMsg(err);
+    log('fetchPage: scrapling failed, falling back to camoufox:', scraplingMsg);
+    try {
+      return await viaCamoufox();
+    } catch (err2) {
+      // Both backends failed. Report both causes: which one fired first is the
+      // interesting half of a dual-outage diagnosis.
+      throw new Error(`scrapling: ${scraplingMsg}; camoufox fallback: ${errMsg(err2)}`);
+    }
+  }
 }
 
 /** The page-behaviour knobs, read off a tool's params. */
@@ -203,69 +160,6 @@ export async function web_search(params: {
   return results.data;
 }
 
-/** Pull markdown for the requested filter out of a Crawl4AI `crawl` result. */
-function markdownFromCrawlResult(
-  resp: ToolResult,
-  filter: string,
-): { md: string; success: boolean } | null {
-  const text = resp?.content?.[0]?.text;
-  if (!text) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  const r = (parsed as { results?: Array<Record<string, unknown>> })?.results?.[0];
-  if (!r) return null;
-
-  const m = r.markdown as string | { raw_markdown?: string; fit_markdown?: string } | undefined;
-  let md = '';
-  if (typeof m === 'string') {
-    md = m;
-  } else if (m && typeof m === 'object') {
-    md =
-      (filter === 'raw' ? m.raw_markdown : m.fit_markdown) ||
-      m.raw_markdown ||
-      m.fit_markdown ||
-      '';
-  }
-  if (!md) return null;
-  return { md, success: r.success !== false };
-}
-
-/** Fetch a URL through Crawl4AI directly. The fallback when Scrapling is down. */
-async function crawl4aiFetch(url: string, filter: string, delay: number): Promise<ToolResult> {
-  return proxyCrawl4AI('crawl', async () => {
-    const resp = (await callCrawlTool({
-      urls: [url],
-      // Only fields Crawl4AI >= 0.9 accepts from a request body. No
-      // proxy_config / session_id (forbidden -> hard 400) and no
-      // user_agent_mode:'random' (see stripPoolHostileFields).
-      browser_config: {
-        type: 'BrowserConfig',
-        params: { headless: true, enable_stealth: true },
-      },
-      crawler_config: {
-        type: 'CrawlerRunConfig',
-        params: {
-          wait_until: 'load',
-          // Clamped to 60s server-side anyway, so ask honestly.
-          page_timeout: 60000,
-          delay_before_return_html: delay,
-        },
-      },
-    })) as ToolResult;
-
-    const extracted = markdownFromCrawlResult(resp, filter);
-    if (!extracted) return resp;
-    return {
-      content: [{ type: 'text', text: extracted.md }],
-      isError: !extracted.success,
-    };
-  });
-}
-
 export async function web_fetch(params: Record<string, unknown>): Promise<ToolResult> {
   const url = params.url as string | undefined;
   if (!url) {
@@ -274,71 +168,74 @@ export async function web_fetch(params: Record<string, unknown>): Promise<ToolRe
       isError: true,
     };
   }
-  const filter = ((params.f as string | undefined) ?? 'fit').toLowerCase();
-  const delay =
-    typeof params.delay === 'number' && Number.isFinite(params.delay) ? params.delay : 2;
+  const filter = params.f === 'raw' ? 'raw' : 'fit';
+  // An explicit delay is a settle time the caller asked for; absent it, the
+  // fetcher's own stability wait is the whole story (no hidden default 2s).
+  const delayMs =
+    typeof params.delay === 'number' && Number.isFinite(params.delay) && params.delay > 0
+      ? Math.round(params.delay * 1000)
+      : undefined;
 
-  // Which backend fetches this is decided from the host (see routing.ts), never
-  // asked of the caller. Italian sources need an Italian residential visitor —
-  // a US exit is the wrong country, not a milder version of the right one.
-  // Some hosts are served best by the plain datacenter browser — going through a
-  // stealth path would only spend a timeout before falling back here anyway.
-  if (prefersCrawl4ai(url)) {
-    return trace('web_fetch', await crawl4aiFetch(url, filter, delay));
+  let page: FetchedPage;
+  try {
+    page = await fetchPage(url, { timeoutMs: 60_000, waitMs: delayMs });
+  } catch (err) {
+    // Both backends failed — no third engine to try, so say what happened.
+    return trace('web_fetch', {
+      content: [{ type: 'text', text: `web_fetch error: ${errMsg(err)}` }],
+      isError: true,
+    });
+  }
+
+  let md: string | null = null;
+  if (page.html) {
+    try {
+      // Pass the URL we actually landed on (after redirects) so relative links
+      // resolve against the right origin.
+      md = await scraplingRenderMarkdown({
+        html: page.html,
+        url: page.url || url,
+        filter,
+      });
+    } catch (err) {
+      return trace('web_fetch', {
+        content: [
+          { type: 'text', text: `web_fetch error: could not render markdown: ${errMsg(err)}` },
+        ],
+        isError: true,
+      });
+    }
   }
 
   let result: ToolResult;
-  try {
-    const page = await fetchPage(url, { timeoutMs: 60_000 });
-    // Pass the URL we actually landed on (after redirects) so relative links
-    // resolve against the right origin.
-    const md = page.html
-      ? await renderMarkdown(page.html, filter, params.q as string | undefined, page.url || url)
-      : null;
-
-    if (md) {
-      // A block/challenge page converts to markdown perfectly well, so the
-      // HTTP status is the only honest signal here — not whether we got text.
-      // Keep the body either way: callers can often still use it, and it makes
-      // "which wall did we hit" diagnosable.
-      const blocked = page.status >= 400;
-      const provenance = `scrapling mode=${page.mode}${page.escalated ? ', escalated' : ''}`;
-      result = blocked
-        ? {
-            content: [
-              {
-                type: 'text',
-                text: `web_fetch: upstream returned HTTP ${page.status} (${provenance}). Body as markdown follows.\n\n${md}`,
-              },
-            ],
-            isError: true,
-          }
-        : { content: [{ type: 'text', text: md }], isError: false };
-    } else if (page.status === 200) {
-      // Fetched fine but the markdown render produced nothing. Retry the whole
-      // thing through Crawl4AI rather than reporting an empty page: it fetches
-      // and renders in one step, so it cannot hit this particular seam.
-      log(`web_fetch: no markdown from ${page.size} bytes (mode=${page.mode}); retrying via Crawl4AI`);
-      result = await crawl4aiFetch(url, filter, delay);
-    } else {
-      result = {
-        content: [
-          {
-            type: 'text',
-            text: `web_fetch: upstream returned HTTP ${page.status} with no extractable content (${page.size} bytes, mode=${page.mode}).`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  } catch (err) {
-    // Scrapling unreachable or erroring: fall back to Crawl4AI so a sidecar
-    // outage degrades quality rather than failing the tool outright.
-    log(
-      `web_fetch: stealth fetcher unavailable, falling back to Crawl4AI:`,
-      err instanceof Error ? err.message : String(err),
-    );
-    result = await crawl4aiFetch(url, filter, delay);
+  if (md) {
+    // A block/challenge page converts to markdown perfectly well, so the
+    // HTTP status is the only honest signal here — not whether we got text.
+    // Keep the body either way: callers can often still use it, and it makes
+    // "which wall did we hit" diagnosable.
+    const blocked = page.status >= 400;
+    const provenance = `mode=${page.mode}${page.escalated ? ', escalated' : ''}`;
+    result = blocked
+      ? {
+          content: [
+            {
+              type: 'text',
+              text: `web_fetch: upstream returned HTTP ${page.status} (${provenance}). Body as markdown follows.\n\n${md}`,
+            },
+          ],
+          isError: true,
+        }
+      : { content: [{ type: 'text', text: md }], isError: false };
+  } else {
+    result = {
+      content: [
+        {
+          type: 'text',
+          text: `web_fetch: upstream returned HTTP ${page.status} with no extractable content (${page.size} bytes, mode=${page.mode}).`,
+        },
+      ],
+      isError: true,
+    };
   }
 
   return trace('web_fetch', result);
@@ -367,177 +264,202 @@ export async function web_html(params: Record<string, unknown>): Promise<ToolRes
       ? params.timeout_ms
       : 60_000;
 
-  // Same host preference as web_fetch. Without this the two tools disagree about
-  // which backend serves a host, so the same URL is fast through one and pays a
-  // stealth timeout through the other.
-  if (prefersCrawl4ai(url)) {
-    return trace('web_html', await crawl4aiHtml(url));
-  }
-
+  let page: FetchedPage;
   try {
-    const page = await fetchPage(url, pageOptsFrom(params, timeoutMs));
-    const result: ToolResult = {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: page.status,
-            url: page.url,
-            mode: page.mode,
-            escalated: page.escalated,
-            size: page.size,
-            html: page.html,
-          }),
-        },
-      ],
-      // A non-2xx is reported in `status` rather than as a tool error: callers
-      // like the LinkedIn path branch on 999 vs 404 themselves, and losing the
-      // body would take that decision away from them.
-      isError: false,
-    };
-    return trace('web_html', result);
+    page = await fetchPage(url, pageOptsFrom(params, timeoutMs));
   } catch (err) {
-    // Same fallback as web_fetch: a stack without the Scrapling service (i.e.
-    // deployed from the template before it existed) still gets HTML, just
-    // without residential egress or challenge solving.
-    log(
-      'web_html: stealth fetcher unavailable, falling back to Crawl4AI:',
-      err instanceof Error ? err.message : String(err),
-    );
-    return trace('web_html', await crawl4aiHtml(url));
+    return trace('web_html', {
+      content: [{ type: 'text', text: `web_html error: ${errMsg(err)}` }],
+      isError: true,
+    });
   }
+
+  const result: ToolResult = {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify({
+          status: page.status,
+          url: page.url,
+          mode: page.mode,
+          escalated: page.escalated,
+          size: page.size,
+          html: page.html,
+        }),
+      },
+    ],
+    // A non-2xx is reported in `status` rather than as a tool error: callers
+    // like the LinkedIn path branch on 999 vs 404 themselves, and losing the
+    // body would take that decision away from them.
+    isError: false,
+  };
+  return trace('web_html', result);
 }
 
-/** Raw HTML via Crawl4AI. The fallback when Scrapling is unavailable. */
-async function crawl4aiHtml(url: string): Promise<ToolResult> {
-  return proxyCrawl4AI('crawl', async () => {
-    const resp = (await callCrawlTool({
-      urls: [url],
-      browser_config: {
-        type: 'BrowserConfig',
-        params: { headless: true, enable_stealth: true },
-      },
-      crawler_config: {
-        type: 'CrawlerRunConfig',
-        params: { wait_until: 'load', page_timeout: 60000, delay_before_return_html: 2 },
-      },
-    })) as ToolResult;
-
-    const text = resp?.content?.[0]?.text;
-    if (!text) return resp;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return resp;
-    }
-    const r = (parsed as { results?: Array<Record<string, unknown>> })?.results?.[0];
-    const html = typeof r?.html === 'string' ? r.html : '';
-    if (!html) return resp;
-
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify({
-            status: typeof r?.status_code === 'number' ? r.status_code : 200,
-            url,
-            // Report the engine honestly so a degraded stack is visible in the
-            // response rather than silently looking like a stealth fetch.
-            mode: 'crawl4ai',
-            escalated: false,
-            size: html.length,
-            html,
-          }),
-        },
-      ],
-      isError: false,
-    };
-  });
-}
+// ── Captures ─────────────────────────────────────────────────────────
 
 export async function web_screenshot(params: Record<string, unknown>): Promise<ToolResult> {
   const url = params.url as string | undefined;
-
-  // Same host routing as web_fetch: capturing what an Italian residential
-  // visitor sees is the whole point for these sources, and Crawl4AI would
-  // screenshot a bot wall from this host's datacenter IP instead.
-  if (url && isItalianSource(url)) {
-    try {
-      const r = await camoufoxScreenshot({
-        url,
-        fullPage: params.full_page !== false,
-        waitMs:
-          typeof params.screenshot_wait_for === 'number'
-            ? params.screenshot_wait_for * 1000
-            : undefined,
-      });
-      return trace('web_screenshot', {
-        content: [{ type: 'text', text: r.b64 }],
-        isError: r.status >= 400,
-      });
-    } catch (err) {
-      log(
-        'web_screenshot: camoufox unavailable, falling back to Crawl4AI:',
-        err instanceof Error ? err.message : String(err),
-      );
-    }
+  if (!url) {
+    return {
+      content: [{ type: 'text', text: 'web_screenshot error: missing required `url`' }],
+      isError: true,
+    };
   }
+  const waitMs =
+    typeof params.screenshot_wait_for === 'number'
+      ? Math.round(params.screenshot_wait_for * 1000)
+      : 2000;
+  const fullPage = params.full_page !== false;
 
-  return proxyCrawl4AI('screenshot', () => callScreenshotTool(params)).then((r) =>
-    trace('web_screenshot', r),
-  );
+  const viaCamoufox = async (): Promise<ToolResult> => {
+    const r = await camoufoxScreenshot({ url, fullPage, waitMs });
+    return trace('web_screenshot', {
+      content: [{ type: 'text', text: r.b64 }],
+      isError: r.status >= 400,
+    });
+  };
+  const viaScrapling = async (): Promise<ToolResult> => {
+    const r = await scraplingScreenshot({ url, fullPage, waitMs });
+    return trace('web_screenshot', {
+      content: [{ type: 'text', text: r.b64 }],
+      isError: r.status >= 400,
+    });
+  };
+
+  // Capturing what the routed visitor sees is the whole point: Italian and
+  // challenge-host pages must be captured from Camoufox, everything else is
+  // Scrapling's — with the other as fallback so one outage doesn't lose captures.
+  const primaryIsCamoufox = isItalianSource(url) || prefersCamoufox(url);
+  const primary = primaryIsCamoufox ? viaCamoufox : viaScrapling;
+  const secondary = primaryIsCamoufox ? viaScrapling : viaCamoufox;
+  const primaryName = primaryIsCamoufox ? 'camoufox' : 'scrapling';
+
+  try {
+    return await primary();
+  } catch (err) {
+    log(`web_screenshot: ${primaryName} failed, falling back:`, errMsg(err));
+  }
+  try {
+    return await secondary();
+  } catch (err) {
+    return trace('web_screenshot', {
+      content: [{ type: 'text', text: `web_screenshot error: ${errMsg(err)}` }],
+      isError: true,
+    });
+  }
 }
 
 export async function web_pdf(params: Record<string, unknown>): Promise<ToolResult> {
-  return proxyCrawl4AI('pdf', () => callPdfTool(params)).then((r) => trace('web_pdf', r));
+  const url = params.url as string | undefined;
+  if (!url) {
+    return { content: [{ type: 'text', text: 'web_pdf error: missing required `url`' }], isError: true };
+  }
+  try {
+    // Print-to-PDF is Chromium-only, so there is no Camoufox fallback here by
+    // design: Firefox cannot print-to-PDF for us either way.
+    const r = await scraplingPdf({ url, timeoutMs: 60_000 });
+    return trace('web_pdf', {
+      content: [{ type: 'text', text: r.b64 }],
+      isError: r.status >= 400,
+    });
+  } catch (err) {
+    return trace('web_pdf', {
+      content: [{ type: 'text', text: `web_pdf error: ${errMsg(err)}` }],
+      isError: true,
+    });
+  }
 }
 
 export async function web_execute_js(params: Record<string, unknown>): Promise<ToolResult> {
-  return proxyCrawl4AI('execute_js', () => callExecuteJsTool(params)).then((r) =>
-    trace('web_execute_js', r),
-  );
+  const url = params.url as string | undefined;
+  const scripts = params.scripts;
+  if (!url || !Array.isArray(scripts) || scripts.length === 0) {
+    return {
+      content: [
+        { type: 'text', text: 'web_execute_js error: `url` and a non-empty `scripts` array are required' },
+      ],
+      isError: true,
+    };
+  }
+  try {
+    const r = await scraplingEval({
+      url,
+      scripts: scripts as string[],
+      timeoutMs: 60_000,
+    });
+    return trace('web_execute_js', {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({ status: r.status, url: r.url, mode: r.mode, results: r.results }),
+        },
+      ],
+      isError: false,
+    });
+  } catch (err) {
+    return trace('web_execute_js', {
+      content: [{ type: 'text', text: `web_execute_js error: ${errMsg(err)}` }],
+      isError: true,
+    });
+  }
 }
 
-// Crawl4AI pools browsers by a SHA1 of the ENTIRE BrowserConfig
-// (crawler_pool._sig), so any field that varies per request mints a brand new
-// ~180MB Chromium that is never reused. `user_agent_mode: 'random'` does
-// exactly that: measured 10 live browsers / 1890MB / reuse_rate_percent: 0,
-// then `RuntimeError: can't start new thread` — after which the service 500s
-// on EVERY request, not just the crawl that caused it. A caller asking for it
-// would take down web_screenshot/web_pdf/web_crawl along with itself, so drop
-// it here rather than trusting callers. A fixed `user_agent` string is fine:
-// it is one stable signature, and was measured at 100% pool reuse.
-function stripPoolHostileFields(bcParams: Record<string, unknown>): Record<string, unknown> {
-  if (bcParams.user_agent_mode !== 'random') return bcParams;
-  const { user_agent_mode: _dropped, ...rest } = bcParams;
-  log(
-    "web_crawl: dropped browser_config.user_agent_mode='random' — it defeats Crawl4AI's " +
-      'browser pool (new Chromium per call) and exhausts the container.',
-  );
-  return rest;
-}
-
+/**
+ * Crawl sequentially through the same pipeline as web_fetch: one fetch + one
+ * markdown render per URL, in the order given.
+ *
+ * Sequential on purpose. Both sidecars serialize their work per browser mode
+ * anyway (one single-slot executor), so a concurrent loop would only shuffle
+ * the queue; and a caller watching progress wants the URLs in their own order.
+ * The response shape — one payload, `results[]` with {url, status_code,
+ * success, markdown} — is the contract existing callers parse.
+ */
 export async function web_crawl(params: Record<string, unknown>): Promise<ToolResult> {
-  // Default sensible browser config when the caller didn't set their own.
-  // Keeps web_crawl symmetric with web_fetch. No proxy_config: Crawl4AI >= 0.9
-  // rejects it outright (see config.ts).
-  const bc = (params.browser_config as { params?: Record<string, unknown> } | undefined) ?? {};
-  const bcParams = stripPoolHostileFields(bc.params ?? {});
-  params = {
-    ...params,
-    browser_config: {
-      type: 'BrowserConfig',
-      params: {
-        headless: true,
-        enable_stealth: true,
-        ...bcParams,
-      },
-    },
-  };
-  return proxyCrawl4AI('crawl', () => callCrawlTool(params)).then((r) =>
-    trace('web_crawl', r),
-  );
+  const urls = Array.isArray(params.urls) ? (params.urls as unknown[]).filter((u): u is string => typeof u === 'string') : [];
+  if (urls.length === 0) {
+    return {
+      content: [{ type: 'text', text: 'web_crawl error: `urls` must be a non-empty array' }],
+      isError: true,
+    };
+  }
+
+  const results: Array<Record<string, unknown>> = [];
+  const timeoutMs =
+    typeof params.timeout_ms === 'number' && Number.isFinite(params.timeout_ms)
+      ? params.timeout_ms
+      : 60_000;
+  const cssSelector = typeof params.css_selector === 'string' ? params.css_selector : undefined;
+  for (const url of urls) {
+    try {
+      const page = await fetchPage(url, { timeoutMs });
+      const markdown = page.html
+        ? await scraplingRenderMarkdown({
+            html: page.html,
+            url: page.url || url,
+            filter: 'fit',
+            ...(cssSelector ? { cssSelector } : {}),
+          })
+        : '';
+      results.push({
+        url,
+        status_code: page.status,
+        success: page.status < 400 && !!markdown,
+        mode: page.mode,
+        markdown,
+      });
+    } catch (err) {
+      // A failed URL must not sink the batch: report it in its own slot and
+      // keep going, exactly as a per-URL failure would read in parallel mode.
+      log(`web_crawl: ${url} failed:`, errMsg(err));
+      results.push({ url, status_code: 0, success: false, error: errMsg(err) });
+    }
+  }
+
+  return trace('web_crawl', {
+    content: [{ type: 'text', text: JSON.stringify({ results }) }],
+    isError: results.every((r) => r.success !== true),
+  });
 }
 
 export async function web_snapshots(params: {
@@ -585,8 +507,8 @@ export async function web_usage_stats(_params: Record<string, unknown>) {
 }
 
 // ── Camoufox-backed tools ────────────────────────────────────────────
-// These expose what the Italian residential Firefox can do and the other two
-// backends cannot. They are separate tools rather than flags on the existing
+// These expose what the Italian residential Firefox can do and the other
+// backend cannot. They are separate tools rather than flags on the existing
 // ones because the capability differs, not just the egress: a binary download
 // and a warmed-session POST are not "web_fetch with an option".
 
@@ -613,19 +535,19 @@ export async function web_bytes(params: Record<string, unknown>): Promise<ToolRe
       isError: false,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errMsg(err);
     log('web_bytes failed:', msg);
     return trace('web_bytes', { content: [{ type: 'text', text: `web_bytes error: ${msg}` }], isError: true });
   }
 }
 
 /**
- * Evaluate JS in a residential page and return its JSON result.
+ * Fill and submit a form in the residential Firefox.
  *
- * web_execute_js already runs scripts, but through Crawl4AI on this host's
- * datacenter IP — useless for a site that bot-gates that IP. This is the same
- * idea from an Italian residential Firefox, for driving/inspecting JS SPAs
- * (open a facet dropdown, read the codes behind it).
+ * web_execute_js runs scripts from Scrapling; this is the same idea driven
+ * from an Italian residential Firefox, for forms on sites that bot-gate this
+ * host's own IP — and for the POST itself, which needs a warmed session on
+ * Akamai-gated origins.
  */
 export async function web_form_submit(params: Record<string, unknown>): Promise<ToolResult> {
   const url = params.url as string | undefined;
@@ -667,7 +589,7 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       isError: false,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errMsg(err);
     log('web_form_submit failed:', msg);
     return trace('web_form_submit', {
       content: [{ type: 'text', text: `web_form_submit error: ${msg}` }],
@@ -699,7 +621,7 @@ export async function web_eval(params: Record<string, unknown>): Promise<ToolRes
       isError: false,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errMsg(err);
     log('web_eval failed:', msg);
     return trace('web_eval', { content: [{ type: 'text', text: `web_eval error: ${msg}` }], isError: true });
   }
@@ -745,7 +667,7 @@ export async function web_spa_fetch(params: Record<string, unknown>): Promise<To
       isError: false,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errMsg(err);
     log('web_spa_fetch failed:', msg);
     return trace('web_spa_fetch', {
       content: [{ type: 'text', text: `web_spa_fetch error: ${msg}` }],
@@ -767,7 +689,7 @@ export async function web_recycle(_params: Record<string, unknown>): Promise<Too
     const r = await camoufoxRecycle();
     return { content: [{ type: 'text', text: JSON.stringify(r) }], isError: false };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errMsg(err);
     log('web_recycle failed:', msg);
     return { content: [{ type: 'text', text: `web_recycle error: ${msg}` }], isError: true };
   }

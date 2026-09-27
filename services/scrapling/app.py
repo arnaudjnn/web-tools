@@ -1,8 +1,27 @@
 """
-Scrapling sidecar — stealth fetch for the pages Crawl4AI cannot reach.
+Scrapling sidecar — fetch, render and capture for the pages a plain browser cannot reach.
 
-POST /fetch { url, mode?, network_idle?, timeout_ms?, disable_resources? }
-       → { status, url, html, size, mode, escalated }
+POST /fetch      { url, mode?, network_idle?, timeout_ms?, disable_resources?, wait_ms? }
+             → { status, url, html, size, mode, escalated }
+POST /markdown   { html, url, filter?, css_selector? }   → { markdown }   (no browser)
+POST /screenshot { url, mode?, full_page?, wait_ms?, timeout_ms? }        → { status, url, b64 }
+POST /pdf        { url, wait_ms?, timeout_ms?, format?, landscape? }      → { status, url, b64 }
+POST /eval       { url, scripts, mode?, wait_ms?, timeout_ms? }           → { status, url, results }
+GET  /healthz    → also reports busy_age_s: submission age of in-flight runs per mode.
+                   A slot whose age keeps growing is a wedged driver — see _execute.
+
+Why markdown lives here too
+---------------------------
+Rendering used to be Crawl4AI's REST /md with a raw:// body, which died with the
+Crawl4AI service (opaque 500s, ~0.8s per call, a second dependency to wedge).
+The conversion itself is pure CPU, so it is one small endpoint on this sidecar:
+Scrapling's own Convertor (noise-tag strip + prompt-injection sanitize + markdownify),
+then a urljoin pass so relative links resolve against the final URL — markdownify
+emits them verbatim and a page with relative /users/ links reads as a page with
+no links at all. The production pin is 0.4.14, whose Response has no `.markdown()`
+yet (added in 0.4.15); the Convertor methods it wraps exist unchanged in 0.4.14
+and are called directly here so the browser pin does not have to move. When the
+pin reaches 0.4.15+, _render_markdown can collapse to `Response.markdown(...)`.
 
 Why this service exists at all
 -----------------------------
@@ -61,12 +80,17 @@ Threading model
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
-from urllib.parse import urlsplit
+from functools import partial
+from typing import Any, Callable
+from urllib.parse import urljoin, urlsplit
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -112,6 +136,18 @@ STEALTH_HOSTS = ("linkedin.com",)
 # refused. An unsolvable challenge here costs the full MAX_FETCH_MS per request and
 # blocks the solve executor behind it.
 SOLVE_HOSTS: tuple[str, ...] = ()
+
+# Hosts that must NEVER be escalated to SOLVE, even when the response looks like
+# a challenge. trustpilot.com lived here as a measurement, not a guess: on
+# 2026-09-27 one auto-routed fetch escalated into the managed-Turnstile solve
+# loop and wedged the WHOLE worker — for minutes afterwards no request on any
+# mode completed, including a plain fast fetch of example.com that normally
+# answers in 0.5s, and no log line appeared (the solve attempt holds the driver
+# while the queue behind it starves). fast alone answers trustpilot in 0.7s with
+# the 970-byte interstitial; the page that renders is Camoufox's job now, which
+# is where web-tools routes the host. An unsolvable challenge here costs the
+# full fetch cap AND the worker; a skipped escalation costs one useless 403.
+NEVER_ESCALATE_HOSTS: tuple[str, ...] = ("trustpilot.com",)
 
 
 def _host_matches(host: str, suffixes: tuple[str, ...]) -> bool:
@@ -160,6 +196,14 @@ _executors: dict[Mode, ThreadPoolExecutor] = {
     for m in Mode
 }
 _sessions: dict[Mode, StealthySession] = {}
+
+# Submission timestamps of runs that have been handed to an executor but have not
+# completed — INCLUDING time spent queued behind a single-slot slot's current job.
+# This is the observability for the one failure mode no timeout reaches: a driver
+# that never returns. asyncio.wait gives the CALLER its deadline, but the thread
+# keeps running, so healthz reports the oldest age per mode and a slot that keeps
+# growing is a wedged driver rather than a busy one. See _execute.
+_inflight: dict[Mode, list[float]] = {}
 
 
 def _ensure_session_in_worker(mode: Mode) -> StealthySession:
@@ -228,7 +272,7 @@ def _discard_session(mode: Mode) -> None:
 
 
 def _do_fetch(mode: Mode, req_url: str, network_idle: bool, timeout_ms: int,
-              disable_resources: bool) -> dict:
+              disable_resources: bool, wait_ms: int = 0) -> dict:
     """Runs inside this mode's single-thread executor."""
     session = _ensure_session_in_worker(mode)
     try:
@@ -237,6 +281,7 @@ def _do_fetch(mode: Mode, req_url: str, network_idle: bool, timeout_ms: int,
             network_idle=network_idle,
             timeout=timeout_ms,
             disable_resources=disable_resources,
+            wait=wait_ms,
         )
     except Exception:
         _discard_session(mode)
@@ -269,6 +314,12 @@ class FetchRequest(BaseModel):
                     "its subresources) and True otherwise.",
     )
     timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+    wait_ms: int = Field(
+        0,
+        ge=0,
+        le=60_000,
+        description="Extra settle time after the page is stable, before capture/return",
+    )
 
 
 class FetchResponse(BaseModel):
@@ -320,11 +371,20 @@ async def _prewarm() -> None:
 
 @app.get("/healthz")
 def healthz():
+    now = time.monotonic()
     return {
         "ok": True,
         "pid": os.getpid(),
         "sessions_ready": sorted(m.value for m in _sessions),
         "proxy_configured": bool(PROXY_URL),
+        # Seconds since submission of the OLDEST unfinished run per mode. A mode
+        # absent here is idle; a mode sitting at hundreds of seconds is wedged
+        # (its driver never returned) and the container needs a restart.
+        "busy_age_s": {
+            m.value: [round(now - ts) for ts in sorted(starts)]
+            for m, starts in _inflight.items()
+            if starts
+        },
     }
 
 
@@ -336,6 +396,54 @@ def healthz():
 MAX_FETCH_MS = 90_000
 
 
+# Slack on top of a run's own timeout_ms before the hard deadline fires: queue
+# wait (a single-slot executor can sit behind one slow job) plus transport. The
+# toolkit client aborts at timeout+25s, so this MUST stay below 25s — otherwise
+# the caller sees an aborted socket instead of the honest 504 raised here.
+HARD_DEADLINE_SLACK_S = 20
+
+
+async def _execute(mode: Mode, timeout_ms: int, fn: Callable[[], dict]) -> dict:
+    """Run fn on mode's single-slot executor with a caller-facing hard deadline.
+
+    asyncio.wait bounds the WAIT, not the thread: on timeout the caller gets a
+    504 while the executor keeps running (Python cannot kill a thread). That is
+    deliberate — the alternative is what happened before this existed, when the
+    caller waited forever. The thread's refusal to finish stays observable
+    through healthz `busy_age_s`, which is the signal for a restart.
+    """
+    loop = asyncio.get_running_loop()
+    fut = loop.run_in_executor(_executors[mode], fn)
+    started = time.monotonic()
+    _inflight.setdefault(mode, []).append(started)
+
+    def _done(_f: asyncio.Future) -> None:
+        starts = _inflight.get(mode)
+        if starts and started in starts:
+            starts.remove(started)
+        if starts == []:
+            _inflight.pop(mode, None)
+
+    fut.add_done_callback(_done)
+    done, _pending = await asyncio.wait(
+        {fut}, timeout=(timeout_ms + HARD_DEADLINE_SLACK_S) / 1000
+    )
+    if not done:
+        log.error(
+            "hard deadline exceeded mode=%s timeout_ms=%d (driver may be wedged)",
+            mode.value,
+            timeout_ms,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"[{mode.value}] run exceeded {timeout_ms + HARD_DEADLINE_SLACK_S * 1000}ms; "
+                "the browser driver may be wedged (healthz busy_age_s)"
+            ),
+        )
+    return fut.result()
+
+
 async def _run(mode: Mode, req: FetchRequest) -> dict:
     disable_resources = (
         req.disable_resources
@@ -343,10 +451,13 @@ async def _run(mode: Mode, req: FetchRequest) -> dict:
         else (mode is not Mode.SOLVE)
     )
     timeout_ms = min(req.timeout_ms, MAX_FETCH_MS)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _executors[mode], _do_fetch, mode, req.url, req.network_idle,
-        timeout_ms, disable_resources,
+    return await _execute(
+        mode,
+        timeout_ms,
+        partial(
+            _do_fetch, mode, req.url, req.network_idle, timeout_ms,
+            disable_resources, req.wait_ms,
+        ),
     )
 
 
@@ -362,10 +473,14 @@ async def fetch(req: FetchRequest):
         raise HTTPException(status_code=502, detail=f"[{mode.value}] {e}")
 
     # Only escalate when we chose the mode ourselves — an explicit mode is the
-    # caller's decision and we should not silently spend a second fetch on it.
+    # caller's decision and we should not silently spend a second fetch on it —
+    # and never for a host whose challenge this solver cannot clear (see
+    # NEVER_ESCALATE_HOSTS: solving it wedges the worker, not just the request).
+    host = (urlsplit(req.url).hostname or "").lower()
     if (
         not explicit
         and mode is not Mode.SOLVE
+        and not _host_matches(host, NEVER_ESCALATE_HOSTS)
         and looks_like_challenge(data["status"], data["html"])
     ):
         log.info("escalating to solve url=%s (status=%s)", req.url, data["status"])
@@ -382,3 +497,246 @@ async def fetch(req: FetchRequest):
         return FetchResponse(**solved, escalated=True)
 
     return FetchResponse(**data, escalated=False)
+
+
+# ── Markdown: pure CPU, no browser ──────────────────────────────────
+
+class MarkdownRequest(BaseModel):
+    html: str = Field(..., description="HTML to convert")
+    url: str = Field(
+        ...,
+        description="URL the HTML was fetched from; relative links resolve against it "
+                    "(or against the document's own <base href> if it declares one)",
+    )
+    filter: str = Field(
+        "fit",
+        description="fit = <body> content only (default); raw = whole document. "
+                    "Both strip scripts/styles/hidden (prompt-injection) content.",
+    )
+    css_selector: str | None = Field(
+        None, description="Convert only elements matching this selector (overrides filter scope)"
+    )
+
+
+class MarkdownResponse(BaseModel):
+    markdown: str
+
+
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+_MD_LINK_RE = re.compile(r"\]\(([^)\s]+)([^)]*)\)")
+
+
+def _absolutize_links(md: str, base: str) -> str:
+    """Resolve relative markdown link/image targets against `base`.
+
+    markdownify emits hrefs verbatim, so a page whose links are `/users/abc`
+    comes out with links no consumer can follow — it reads as a page with no
+    links at all. Scheme'd targets (http:, mailto:, data:, …) are left alone.
+    """
+
+    def repl(mo: re.Match) -> str:
+        target, rest = mo.group(1), mo.group(2)
+        if _SCHEME_RE.match(target):
+            return mo.group(0)
+        try:
+            return "](" + urljoin(base, target) + rest + ")"
+        except ValueError:
+            return mo.group(0)
+
+    return _MD_LINK_RE.sub(repl, md)
+
+
+def _render_markdown(html: str, url: str, filt: str, css_selector: str | None) -> str:
+    from scrapling.core.shell import Convertor
+    from scrapling.engines.toolbelt.custom import Response as SResponse
+
+    # A document that declares its own <base href> has already chosen the origin
+    # its relative links belong to; overriding it would break rebased links.
+    base = url
+    m = re.search(r"<base\s[^>]*href=[\"']([^\"']+)", html, re.I)
+    if m:
+        base = urljoin(url, m.group(1))
+
+    # method="MD" only decorates the synthetic response's log line, so renders
+    # are distinguishable from real fetches in the log.
+    sr = SResponse(
+        url=url, content=html, status=200, reason="OK",
+        cookies={}, headers={}, request_headers={}, method="MD",
+    )
+    page = (sr.css("body").first or sr) if filt == "fit" else sr
+    page = Convertor._sanitize_for_ai(Convertor._strip_noise_tags(page))
+    pages = [page] if not css_selector else list(page.css(css_selector))
+    md = "".join(Convertor._convert_to_markdown(p.html_content) for p in pages)
+    return _absolutize_links(md, base)
+
+
+@app.post("/markdown", response_model=MarkdownResponse)
+def markdown_endpoint(req: MarkdownRequest):
+    if req.filter not in ("raw", "fit"):
+        raise HTTPException(status_code=422, detail="filter must be 'raw' or 'fit'")
+    try:
+        return MarkdownResponse(
+            markdown=_render_markdown(req.html, req.url, req.filter, req.css_selector)
+        )
+    except ModuleNotFoundError as e:
+        raise HTTPException(status_code=500, detail=f"markdown dependency missing: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001 - hostile/broken HTML must not kill the worker
+        log.exception("markdown render failed url=%s", req.url)
+        raise HTTPException(status_code=422, detail=f"markdown render failed: {e}")
+
+
+# ── Capture through page_action: screenshot / pdf / eval ────────────
+#
+# No auto-escalation here, unlike /fetch: a challenged page should be ROUTED
+# (Italian and managed-challenge hosts go to Camoufox) rather than solved, and
+# a screenshot of a challenge page is a truthful answer to the wrong question.
+
+
+class ActionFailed(Exception):
+    """The page_action failed while the driver itself is fine.
+
+    Raised by _do_action after the fetch returns, so the session is kept: a
+    bad caller script (or a page that cannot evaluate it) is not evidence that
+    the browser needs rebuilding.
+    """
+
+
+def _do_action(
+    mode: Mode,
+    req_url: str,
+    timeout_ms: int,
+    network_idle: bool,
+    wait_ms: int,
+    action: Callable[[Any, dict], None],
+) -> dict:
+    """Runs inside this mode's single-thread executor: fetch, settle, act."""
+    session = _ensure_session_in_worker(mode)
+    box: dict[str, Any] = {}
+
+    def wrapper(page: Any) -> None:
+        # page_action runs BEFORE Scrapling's own post-action wait, so any
+        # settle time must be spent here, before the capture.
+        if wait_ms:
+            page.wait_for_timeout(wait_ms)
+        try:
+            action(page, box)
+        except Exception as e:  # noqa: BLE001 - reported through the box, not raised
+            box["error"] = f"{type(e).__name__}: {e}"
+
+    try:
+        page = session.fetch(
+            req_url,
+            network_idle=network_idle,
+            timeout=timeout_ms,
+            disable_resources=False,  # a screenshot without CSS is not a screenshot
+            page_action=wrapper,
+        )
+    except Exception:
+        _discard_session(mode)
+        raise
+    if "error" in box:
+        raise ActionFailed(box["error"])
+    return {"status": page.status, "url": page.url, "mode": mode.value, **box}
+
+
+async def _run_action(req: Any, action: Callable[[Any, dict], None]) -> dict:
+    mode = req.mode or pick_mode(req.url)
+    timeout_ms = min(req.timeout_ms, MAX_FETCH_MS)
+    network_idle = getattr(req, "network_idle", False)
+    try:
+        return await _execute(
+            mode,
+            timeout_ms,
+            partial(
+                _do_action, mode, req.url, timeout_ms, network_idle,
+                req.wait_ms, action,
+            ),
+        )
+    except HTTPException:
+        raise
+    except ActionFailed as e:
+        raise HTTPException(status_code=400, detail=f"[{mode.value}] capture failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        log.exception("capture failed url=%s mode=%s", req.url, mode.value)
+        raise HTTPException(status_code=502, detail=f"[{mode.value}] {e}")
+
+
+class ScreenshotRequest(BaseModel):
+    url: str = Field(..., description="Absolute URL to capture")
+    mode: Mode | None = None
+    full_page: bool = Field(True, description="Capture the whole scrollable page")
+    wait_ms: int = Field(0, ge=0, le=60_000, description="Settle time before capture")
+    network_idle: bool = Field(False, description="Wait for network idle before capture")
+    timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+
+
+class PdfRequest(BaseModel):
+    url: str = Field(..., description="Absolute URL to print")
+    mode: Mode | None = None
+    wait_ms: int = Field(0, ge=0, le=60_000, description="Settle time before print")
+    timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+    format: str = Field("A4", description="Paper format accepted by Chromium print-to-PDF")
+    landscape: bool = False
+
+
+class EvalRequest(BaseModel):
+    url: str = Field(..., description="Absolute URL to open")
+    scripts: list[str] = Field(..., min_length=1, description="JS expressions/IIFEs, evaluated in order")
+    mode: Mode | None = None
+    wait_ms: int = Field(0, ge=0, le=60_000, description="Settle time before the first script")
+    timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+
+
+class CaptureResponse(BaseModel):
+    status: int
+    url: str
+    mode: str
+    b64: str
+
+
+class EvalResponse(BaseModel):
+    status: int
+    url: str
+    mode: str
+    results: list[Any]
+
+
+@app.post("/screenshot", response_model=CaptureResponse)
+async def screenshot_endpoint(req: ScreenshotRequest):
+    def act(page: Any, box: dict) -> None:
+        box["b64"] = base64.b64encode(
+            page.screenshot(full_page=req.full_page, type="png")
+        ).decode()
+
+    return CaptureResponse(**await _run_action(req, act))
+
+
+@app.post("/pdf", response_model=CaptureResponse)
+async def pdf_endpoint(req: PdfRequest):
+    def act(page: Any, box: dict) -> None:
+        box["b64"] = base64.b64encode(
+            page.pdf(format=req.format, landscape=req.landscape, print_background=True)
+        ).decode()
+
+    return CaptureResponse(**await _run_action(req, act))
+
+
+@app.post("/eval", response_model=EvalResponse)
+async def eval_endpoint(req: EvalRequest):
+    def act(page: Any, box: dict) -> None:
+        results: list[Any] = []
+        for script in req.scripts:
+            value = page.evaluate(script)
+            try:
+                json.dumps(value)
+            except (TypeError, ValueError):
+                # page.evaluate already serialises JSON-able results, but a
+                # proxy/handle can slip through — degrade to repr, don't fail
+                # the scripts that DID succeed.
+                value = repr(value)
+            results.append(value)
+        box["results"] = results
+
+    return EvalResponse(**await _run_action(req, act))

@@ -5,18 +5,12 @@ const envSchema = z.object({
   SEARXNG_ENGINES: z.string().optional(),
   SEARXNG_CATEGORIES: z.string().optional(),
   API_KEY: z.string().min(1, 'API_KEY is required'),
-  CRAWL4AI_URL: z.string().default('http://crawl4ai.railway.internal:11235'),
-  CRAWL4AI_API_TOKEN: z.string().optional(),
   SCRAPLING_URL: z.string().default('http://scrapling.railway.internal:8000'),
   CAMOUFOX_URL: z.string().default('http://camoufox.railway.internal:8000'),
 });
-// No PROXY_* here on purpose. Crawl4AI >= 0.9 refuses `proxy_config` (and
-// `extra_args`, `session_id`, `magic`, …) from any request body: every HTTP
-// body is Provenance.UNTRUSTED and those fields are in
-// UNTRUSTED_FORBIDDEN_FIELDS, which is a hard 400, not a silent drop. There is
-// no token/header/config.yml route around it, and 0.9 additionally pins
-// Chromium to its own localhost egress proxy, so a server-side proxy gets
-// overwritten too. Residential egress lives in the Scrapling service instead.
+// No PROXY_* here and never will be: proxy credentials belong to the sidecars
+// that own the egress (services/scrapling, services/camoufox), not to the
+// process that routes requests. CRAWL4AI_* left with the service — see AGENTS.md.
 
 const env = envSchema.parse(process.env);
 
@@ -27,16 +21,13 @@ export const Config = {
     engines: env.SEARXNG_ENGINES,
     categories: env.SEARXNG_CATEGORIES,
   },
-  crawl4ai: {
-    url: env.CRAWL4AI_URL,
-    apiToken: env.CRAWL4AI_API_TOKEN,
-  },
-  // Owns residential egress + JS-challenge solving. See services/scrapling.
+  // Owns the fetch/markdown/capture pipeline + residential egress + JS-challenge
+  // solving. See services/scrapling.
   scrapling: {
     url: env.SCRAPLING_URL,
   },
-  // Stealth Firefox on an ITALIAN residential exit, plus the two things no
-  // other backend has: a binary fetch through that exit, and a warmed-session
+  // Stealth Firefox on an ITALIAN residential exit, plus the things no other
+  // backend has: a binary fetch through that exit, and a warmed-session
   // in-page fetch for Akamai-gated POSTs. See services/camoufox.
   camoufox: {
     url: env.CAMOUFOX_URL,

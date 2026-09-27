@@ -6,11 +6,9 @@
 // `approxProxyBytes` tracks the size of the payload we return to the
 // caller (markdown / html / json).
 //
-// NOTE: Crawl4AI-backed tools no longer egress through a residential proxy —
-// Crawl4AI >= 0.9 refuses proxy_config from a request body, so these calls go
-// out on the platform's own IP and cost no proxy bandwidth. The cost estimate
-// below is therefore an upper bound kept for continuity; the metered proxy now
-// sits in the Scrapling service. See config.ts.
+// The metered egress lives in the sidecars (Scrapling's stealth mode, all of
+// Camoufox); this process only estimates their bandwidth from what it hands
+// back. See PROXY_BACKED below.
 
 export type ToolName =
   | 'web_search'
@@ -78,19 +76,20 @@ const errors: Record<ToolName, number> = {
   web_spa_fetch: 0,
 };
 
-// Only Crawl4AI-backed tools accrue proxy bandwidth. SearXNG and
-// Wayback are direct HTTP, not residential-proxied.
-// Only the tools that egress through a metered residential proxy. The
-// Crawl4AI-backed ones (web_crawl, web_screenshot, web_pdf, web_execute_js) used
-// to be listed here and were inflating the estimate: Crawl4AI >= 0.9 refuses a
-// proxy, so those go out on this host's own IP and cost nothing per byte.
-//
-// web_fetch and web_html stay, with a caveat: both fall back to Crawl4AI when a
-// sidecar is unreachable, and a Crawl4AI-preferred host never touches the proxy
-// at all, so their bytes are an upper bound rather than a measurement.
+// Tools whose upstream fetch MAY egress through a metered residential proxy
+// (Scrapling stealth mode, Camoufox always), so their payload bytes are an
+// upper bound: fast-mode Scrapling egresses on the platform's own IP and costs
+// nothing per byte, and web_search / web_archive / web_snapshots are direct
+// HTTP. Counted as upper bound rather than measured — this process cannot see
+// which sidecar mode actually served a call, and over-counting a cost estimate
+// is the safe direction.
 const PROXY_BACKED: ToolName[] = [
   'web_fetch',
   'web_html',
+  'web_crawl',
+  'web_screenshot',
+  'web_pdf',
+  'web_execute_js',
   'web_bytes',
   'web_eval',
   'web_form_submit',
@@ -106,8 +105,8 @@ export function recordCall(tool: ToolName, payloadBytes: number, isError = false
 export function getStats() {
   const ratePerGB = Number(process.env.PROXY_USD_PER_GB ?? '10');
   // We measure the size of the response payload we hand back (markdown
-  // for web_fetch, html/json for web_crawl, etc.). The upstream proxy
-  // traffic is the full rendered HTML + scripts + images that Crawl4AI
+  // for web_fetch, html/json for web_html, etc.). The upstream proxy
+  // traffic is the full rendered HTML + scripts + images the sidecar
   // pulled to produce that payload — typically ~5–10× larger. Tune via
   // env to match the source's real ratio.
   const multiplier = Number(process.env.PROXY_BYTES_MULTIPLIER ?? '8');

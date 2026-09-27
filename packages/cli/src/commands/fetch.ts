@@ -6,10 +6,9 @@ export function registerFetchCommand(program: Command) {
     .command('fetch')
     .description('Fetch a URL and return its content as markdown')
     .argument('<url>', 'URL to fetch')
-    .option('-f, --filter <strategy>', 'Content filter: raw, fit, bm25, llm (default: fit)')
-    .option('-q, --query <query>', 'Query for BM25/LLM filter')
-    .action(async (url: string, opts: { filter?: string; query?: string }) => {
-      const result = await web_fetch({ url, f: opts.filter, q: opts.query });
+    .option('-f, --filter <strategy>', 'Content filter: raw, fit (default: fit)')
+    .action(async (url: string, opts: { filter?: string }) => {
+      const result = await web_fetch({ url, f: opts.filter });
 
       if (result.isError) {
         console.error(result.content[0]?.text ?? 'Unknown error');

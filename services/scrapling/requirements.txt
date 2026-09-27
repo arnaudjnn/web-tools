@@ -8,3 +8,8 @@ scrapling[fetchers]==0.4.14
 fastapi==0.121.1
 uvicorn[standard]==0.34.3
 httpx==0.28.1
+# HTML→markdown for POST /markdown. Not shipped by the [fetchers] extra (it
+# rides along with the `ai`/`shell` extras, which drag in far more than a
+# converter needs); pinned like everything else here — its output IS the
+# web_fetch contract.
+markdownify==1.2.3

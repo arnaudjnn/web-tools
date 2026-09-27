@@ -1,9 +1,9 @@
 // Which backend serves a URL. Decided here, never asked of the caller.
 //
-// There are three fetchers and they are not interchangeable:
+// There are two fetchers and they are not interchangeable:
 //
-//   crawl4ai   headless Chromium on this host's own IP. Fast, no proxy possible.
-//   scrapling  Patchright Chromium: US residential exit, or challenge-solving.
+//   scrapling  Patchright Chromium: US residential exit (stealth mode), or
+//              challenge-solving. Fast mode egresses on this host's own IP.
 //   camoufox   Firefox on an ITALIAN residential exit, geoip-coherent.
 //
 // A caller asking for a URL should not have to know any of that, so the choice
@@ -13,22 +13,25 @@
 // the tributario SPA), and a US residential exit is no better than a datacenter
 // one for them — it is the wrong country with extra latency.
 
-export type Backend = 'crawl4ai' | 'scrapling' | 'camoufox';
+export type Backend = 'scrapling' | 'camoufox';
 
 /**
- * Hosts that the plain datacenter browser serves BETTER than either stealth path.
+ * Hosts that must go to Camoufox whatever the default routing says.
  *
- * Counter-intuitive but measured. Trustpilot accepts Crawl4AI's datacenter IP
- * (~4s, full page) while refusing the residential exit, and its wall is now a
- * *managed* Cloudflare Turnstile that Scrapling's solver cannot clear — it loops
- * "captcha is still present, solving again" until the 90s cap and then we fall
- * back to Crawl4AI anyway. Sending it straight there turns a 90s timeout into a
- * 4s success.
+ * trustpilot.com, measured 2026-09-27 (the benchmark that removed Crawl4AI):
+ * Scrapling's fast mode answers in ~0.7s but with the 970-byte challenge
+ * interstitial, and auto-escalating into the managed-Turnstile solve loop
+ * WEDGED the whole worker for minutes — no request on any mode completed until
+ * the service was redeployed (hence also NEVER_ESCALATE_HOSTS in app.py).
+ * Camoufox renders the full page from the Italian exit (890KB, real review
+ * bodies) — but only with a forced wait: the review list hydrates well after
+ * load, and capturing earlier returns a challenge-looking shell.
  *
  * A residential exit is not a strictly stronger option; for some origins it is
- * the suspicious one.
+ * the suspicious one. What made Crawl4AI's datacenter IP serve this host was
+ * removed with Crawl4AI; Camoufox + forced wait is the measured survivor.
  */
-const CRAWL4AI_HOSTS = ['trustpilot.com'];
+const CAMOUFOX_HOSTS = ['trustpilot.com'];
 
 /**
  * Hosts that must be fetched as an Italian residential visitor.
@@ -71,6 +74,19 @@ export function isItalianSource(url: string): boolean {
 }
 
 /**
+ * A settle time this host NEEDS, regardless of what the caller asked for.
+ *
+ * Returns undefined for ordinary hosts (the caller's own wait applies). The
+ * forced value is a measured minimum for content that hydrates long after
+ * load — see CAMOUFOX_HOSTS.
+ */
+export function forcedWaitMs(url: string): number | undefined {
+  const host = hostOf(url);
+  if (host && matchesHost(host, CAMOUFOX_HOSTS)) return 20_000;
+  return undefined;
+}
+
+/**
  * The fetcher for a URL.
  *
  * Note what is NOT decided here: whether Scrapling uses its proxy or solves a
@@ -81,12 +97,12 @@ export function isItalianSource(url: string): boolean {
 export function pickBackend(url: string): Backend {
   if (isItalianSource(url)) return 'camoufox';
   const host = hostOf(url);
-  if (host && matchesHost(host, CRAWL4AI_HOSTS)) return 'crawl4ai';
+  if (host && matchesHost(host, CAMOUFOX_HOSTS)) return 'camoufox';
   return 'scrapling';
 }
 
-/** True when the plain datacenter browser is the right tool for this host. */
-export function prefersCrawl4ai(url: string): boolean {
+/** True when this host must be served by the Italian residential Firefox. */
+export function prefersCamoufox(url: string): boolean {
   const host = hostOf(url);
-  return !!host && matchesHost(host, CRAWL4AI_HOSTS);
+  return !!host && matchesHost(host, CAMOUFOX_HOSTS);
 }
