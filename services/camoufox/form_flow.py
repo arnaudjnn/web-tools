@@ -90,7 +90,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                    "token_present": None, "blocked_mutations": 0, "page_script_errors": 0,
                    "navigation_status": None, "captcha_guard_blocked": False,
                    "ready_condition_met": None, "solver_attempts": 0,
-                   "solver_status": None}
+                   "solver_status": None, "field_attempt": None, "phase": None}
     result["diagnostics"] = diagnostics
     page = None
     phase = "navigation"
@@ -189,6 +189,10 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 pass  # Optional cookie banners; required fields below fail closed.
         phase = "fields"
         for field in fields:
+            # Selector only — never the value. On an exception this is the
+            # field that was in flight, which is otherwise invisible (the
+            # outer handler deliberately swallows the message).
+            diagnostics["field_attempt"] = field["selector"]
             control = page.locator(field["selector"])
             action = field.get("action", "type")
             if action == "check":
@@ -215,6 +219,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     raise ValueError("typed text did not land in the field")
             else:
                 raise ValueError("Unknown field action")
+        diagnostics["field_attempt"] = None
         if ready_expression:
             phase = "readiness"
             diagnostics["ready_condition_met"] = False
@@ -290,5 +295,6 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             result["error"] = "outcome_unknown"
     except Exception:
         # Never expose field values, page exception text or proxy credentials.
+        diagnostics["phase"] = phase
         result["error"] = result["error"] or ("outcome_unknown" if result["form_submissions"] else f"{phase}_failed")
     return result
