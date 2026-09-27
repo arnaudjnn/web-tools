@@ -104,11 +104,7 @@ async function fetchPage(url: string, opts: PageOpts = {}): Promise<FetchedPage>
     };
   };
 
-  if (isItalianSource(url) || prefersCamoufox(url)) {
-    return viaCamoufox();
-  }
-
-  try {
+  const viaScrapling = async (): Promise<FetchedPage> => {
     // No mode passed: the sidecar routes by host and escalates to a challenge
     // solve only on evidence (and never for hosts it cannot clear).
     const page = await scraplingFetch({
@@ -118,15 +114,29 @@ async function fetchPage(url: string, opts: PageOpts = {}): Promise<FetchedPage>
       waitMs: opts.waitMs,
     });
     return { ...page };
+  };
+
+  const camoufoxFirst = isItalianSource(url) || prefersCamoufox(url);
+  const preferred = camoufoxFirst ? viaCamoufox : viaScrapling;
+  const fallback = camoufoxFirst ? viaScrapling : viaCamoufox;
+  const preferredName = camoufoxFirst ? 'camoufox' : 'scrapling';
+  const fallbackName = camoufoxFirst ? 'scrapling' : 'camoufox';
+
+  // Both directions fall back: a Camoufox outage (its renders do fail
+  // transiently — NS_ERROR_CONNECTION_REFUSED on an otherwise healthy origin)
+  // must not kill the tool when Scrapling can still fetch, and vice versa.
+  // What changes is which exit and browser you get, not whether you get a page.
+  try {
+    return await preferred();
   } catch (err) {
-    const scraplingMsg = errMsg(err);
-    log('fetchPage: scrapling failed, falling back to camoufox:', scraplingMsg);
+    const preferredMsg = errMsg(err);
+    log(`fetchPage: ${preferredName} failed, falling back to ${fallbackName}:`, preferredMsg);
     try {
-      return await viaCamoufox();
+      return await fallback();
     } catch (err2) {
       // Both backends failed. Report both causes: which one fired first is the
       // interesting half of a dual-outage diagnosis.
-      throw new Error(`scrapling: ${scraplingMsg}; camoufox fallback: ${errMsg(err2)}`);
+      throw new Error(`${preferredName}: ${preferredMsg}; ${fallbackName}: ${errMsg(err2)}`);
     }
   }
 }

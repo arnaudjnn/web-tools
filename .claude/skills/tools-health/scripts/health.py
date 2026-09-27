@@ -22,7 +22,7 @@ import urllib.request
 
 PROJECT = "3375ebc9-cb5f-42ac-999d-b1d3b8feb5ef"  # web-tools
 TOOLS_URL = "https://tools-production-d199.up.railway.app"
-SERVICES = ["Tools", "SearXNG", "Crawl4AI", "Scrapling", "Camoufox"]
+SERVICES = ["Tools", "SearXNG", "Scrapling", "Camoufox"]
 
 # signature -> what it means. Every one was observed in production; see
 # references/signatures.md.
@@ -43,7 +43,7 @@ LOG_SIGNATURES = [
     (r"UNVALIDATED\(~-1~\)", "akamai sensor was unvalidated at some point"),
     (r"ERR_PNPM_OUTDATED_LOCKFILE", "manifest and lockfile disagree"),
     (r"ZodError.*API_KEY", "wrong program deployed (root Dockerfile)"),
-    (r"Cloudflare page didn't disappear", "unsolvable Turnstile; host should route to Crawl4AI"),
+    (r"Cloudflare page didn't disappear", "unsolvable Turnstile; host should stay out of SOLVE_HOSTS"),
 ]
 
 # Signatures that are structural rather than transient: they do not self-heal and
@@ -135,9 +135,9 @@ def check_probes(findings: list[dict], key: str) -> None:
         findings.append({"check": "probe", "service": "SearXNG", "severity": "error",
                          "detail": f"web_search failed: {type(e).__name__}", "action": "redeploy"})
 
-    # web_html on LinkedIn: asserts the ENGINE, not the status. A 200 from
-    # mode=crawl4ai here means the stealth path is down and we are silently
-    # fetching from a datacenter IP LinkedIn blocks.
+    # web_html on LinkedIn: asserts the ENGINE, not the status. A non-stealth
+    # mode here (camoufox, fast) means the stealth path is down and we are
+    # silently fetching from the wrong exit.
     try:
         res, secs = call_tool("web_html", {"url": "https://www.linkedin.com/in/williamhgates"}, key, 150)
         env = json.loads(res["content"][0]["text"])
@@ -169,15 +169,43 @@ def check_probes_deep(findings: list[dict], key: str) -> None:
         findings.append({"check": "probe", "service": "Camoufox", "severity": "error",
                          "detail": f"camoufox probe failed: {type(e).__name__}", "action": "redeploy"})
 
-    # Crawl4AI serves web_crawl/screenshot/pdf and the markdown render.
+    # Scrapling serves web_crawl (sequential, one post to /markdown per URL).
     try:
         res, secs = call_tool("web_crawl", {"urls": ["https://example.com"]}, key, 120)
         if res.get("isError"):
-            findings.append({"check": "probe", "service": "Crawl4AI", "severity": "error",
-                             "detail": "web_crawl returned an error", "action": "evict_browsers"})
+            findings.append({"check": "probe", "service": "Scrapling", "severity": "error",
+                             "detail": "web_crawl returned an error", "action": "redeploy"})
     except Exception as e:
-        findings.append({"check": "probe", "service": "Crawl4AI", "severity": "error",
-                         "detail": f"web_crawl failed: {type(e).__name__}", "action": "evict_browsers"})
+        findings.append({"check": "probe", "service": "Scrapling", "severity": "error",
+                         "detail": f"web_crawl failed: {type(e).__name__}", "action": "redeploy"})
+
+
+def check_sidecar_wedge(findings: list[dict]) -> None:
+    """busy_age_s on the Scrapling /healthz: a request older than 150s is a wedge.
+
+    The sidecar's hard deadline is timeout+20s slack and clients abort at
+    +25s, so nothing legitimate is still busy at 150s — a leftover busy_age_s
+    means a stuck executor. healthz is internal-only, so this needs a
+    reachable URL: set SCRAPLING_HEALTHZ (e.g. a tcp-proxy URL while one is
+    open). Skipped silently when unset.
+    """
+    import os
+
+    url = os.environ.get("SCRAPLING_HEALTHZ")
+    if not url:
+        return
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            health = json.loads(r.read())
+    except Exception as e:
+        findings.append({"check": "healthz", "service": "Scrapling", "severity": "warn",
+                         "detail": f"healthz unreachable ({type(e).__name__})", "action": "watch"})
+        return
+    for mode, age in (health.get("busy_age_s") or {}).items():
+        if age > 150:
+            findings.append({"check": "healthz", "service": "Scrapling", "severity": "error",
+                             "detail": f"sidecar wedged: {mode} busy for {int(age)}s (deadline "
+                                       f"should have fired)", "action": "redeploy"})
 
 
 def main() -> int:
@@ -199,6 +227,7 @@ def main() -> int:
     if not args.fast:
         check_logs(findings)
         check_probes_deep(findings, key)
+        check_sidecar_wedge(findings)
 
     if args.json:
         print(json.dumps({"project": args.project, "findings": findings}, indent=1))

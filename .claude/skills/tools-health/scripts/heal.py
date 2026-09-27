@@ -22,7 +22,6 @@ import urllib.request
 
 STATE = os.path.expanduser("~/.tools-health-state.json")
 REDEPLOY_COOLDOWN_S = 900  # 15 min: long enough that a crashloop is not amplified
-CRAWL4AI_URL = "https://crawl4ai-production-9a95.up.railway.app"  # no public domain: internal only
 TOOLS_URL = "https://tools-production-d199.up.railway.app"
 
 
@@ -69,47 +68,6 @@ def redeploy(service: str, apply: bool) -> str:
     return f"redeployed {service}" + (" (cli reported an error)" if "__ERROR__" in out else "")
 
 
-def evict_browsers(apply: bool) -> str:
-    """Kill Crawl4AI's killable pooled browsers.
-
-    Its pool does not check liveness before reuse, so one dead browser fails every
-    later crawl on that signature. The Tools service now evicts on its own when it
-    sees a server error, so this is the manual escalation for a pool that is
-    already wedged before any request arrives.
-    """
-    if not apply:
-        return "WOULD evict Crawl4AI pooled browsers"
-    token = None
-    m = re.search(r"^CRAWL4AI_API_TOKEN=(\S+)",
-                  sh(["railway", "variables", "-s", "Crawl4AI", "--kv"]), re.M)
-    if m:
-        token = m.group(1)
-    if not token:
-        return "SKIP evict: no CRAWL4AI_API_TOKEN readable"
-    hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    try:
-        req = urllib.request.Request(f"{CRAWL4AI_URL}/monitor/browsers", headers=hdr)
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.loads(r.read())
-    except Exception as e:
-        # Expected when the public domain is removed, which is the hardened state.
-        return (f"SKIP evict: Crawl4AI not reachable from here ({type(e).__name__}). "
-                "It is private by design; redeploy it instead, or run this from inside the project.")
-    killed = 0
-    for b in (data.get("browsers") or []):
-        if not b.get("killable"):
-            continue
-        try:
-            req = urllib.request.Request(
-                f"{CRAWL4AI_URL}/monitor/actions/kill_browser", headers=hdr,
-                data=json.dumps({"sig": b["sig"]}).encode())
-            urllib.request.urlopen(req, timeout=30).read()
-            killed += 1
-        except Exception:
-            pass
-    return f"evicted {killed} browser(s)"
-
-
 def recycle(apply: bool) -> str:
     """Drop Camoufox's warmed Akamai session and take a fresh exit IP.
 
@@ -132,7 +90,7 @@ def recycle(apply: bool) -> str:
         return f"recycle failed: {type(e).__name__}"
 
 
-ACTIONS = {"redeploy", "evict_browsers", "recycle"}
+ACTIONS = {"redeploy", "recycle"}
 
 
 def main() -> int:
@@ -175,11 +133,6 @@ def main() -> int:
                 continue
             done.add(svc)
             print(" ", redeploy(svc, args.apply))
-        elif action == "evict_browsers":
-            if "evict" in done:
-                continue
-            done.add("evict")
-            print(" ", evict_browsers(args.apply))
         elif action == "recycle":
             if "recycle" in done:
                 continue

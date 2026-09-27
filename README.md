@@ -1,6 +1,6 @@
 # Web Tools
 
-A self-hosted web toolkit providing fourteen tools for search, content extraction, and archival. Available as an [MCP](https://modelcontextprotocol.io/) server, REST API, and CLI, powered by [SearXNG](https://github.com/searxng/searxng), [Crawl4AI](https://github.com/unclecode/crawl4ai), [Scrapling](https://github.com/D4Vinci/Scrapling), [Camoufox](https://github.com/daijro/camoufox), and the [Wayback Machine](https://web.archive.org/).
+A self-hosted web toolkit providing fourteen tools for search, content extraction, and archival. Available as an [MCP](https://modelcontextprotocol.io/) server, REST API, and CLI, powered by [SearXNG](https://github.com/searxng/searxng), [Scrapling](https://github.com/D4Vinci/Scrapling), [Camoufox](https://github.com/daijro/camoufox), and the [Wayback Machine](https://web.archive.org/).
 
 ## Architecture
 
@@ -14,26 +14,26 @@ graph LR
     SearXNG --> Redis
     Toolkit --> Scrapling
     Toolkit --> Camoufox
-    Toolkit --> Crawl4AI
     Toolkit --> Wayback["Wayback Machine"]
 ```
 
-### Why three fetchers
+### Why two fetchers
 
-They are not redundant. Each reaches pages the others cannot, and the split is
+They are not redundant. Each reaches pages the other cannot, and the split is
 measured rather than aesthetic:
 
-| | Crawl4AI | Scrapling | Camoufox |
-| --- | --- | --- | --- |
-| Browser | Chromium | Patchright Chromium | **Firefox** |
-| Egress | this host's IP only¹ | rotating **US** residential | rotating **Italian** residential |
-| JS challenges | no | yes (`solve`) | n/a (coherent fingerprint) |
-| LinkedIn profiles | decays to 0/6, HTTP 999 | 94% (34/36) | not measured |
-| Trustpilot reviews | luck-of-the-IP | 2/2 via challenge solve | not measured |
-| Italian bot-gated sites | blocked | wrong country | **the point** |
-| Binary / PDF fetch | no | no | yes (`web_bytes`) |
-| Anti-bot sensor sessions | no | no | yes (`web_spa_fetch`) |
-| Ordinary pages | ~2-5s | ~0.7-1.9s (`fast`) | ~8-12s |
+| | Scrapling | Camoufox |
+| --- | --- | --- |
+| Browser | Patchright Chromium | **Firefox** |
+| Egress | direct (`fast`) / rotating **US** residential (`stealth`) / solving (`solve`) | rotating **Italian** residential |
+| JS challenges | yes (`solve`, evidence-gated) | n/a (coherent fingerprint) |
+| Markdown + captures | **yes** (`/markdown`, `/screenshot`, `/pdf`, `/eval`) | no |
+| LinkedIn profiles | 94% (34/36) | not measured |
+| Italian bot-gated sites | wrong country | **the point** |
+| Trustpilot reviews | interstitial only (escalation deliberately refused) | **full page** with a forced wait |
+| Binary / PDF fetch | no | yes (`web_bytes`) |
+| Anti-bot sensor sessions | no | yes (`web_spa_fetch`) |
+| Ordinary pages | ~0.7-1.9s (`fast`), markdown in 14-200ms | ~8-12s |
 
 Camoufox is Firefox on purpose: stealth-patched headless *Chrome* was flagged by
 Akamai even through an Italian residential IP, while Camoufox's fingerprint is
@@ -42,11 +42,11 @@ internally coherent: its locale and timezone are derived from the exit IP, so
 bot-gate datacenter IPs outright or score the exit country as part of a sensor
 decision, and a US residential exit is not a milder version of the right answer.
 
-¹ Crawl4AI >= 0.9 treats every HTTP request body as `Provenance.UNTRUSTED` and
-lists `proxy_config` in `UNTRUSTED_FORBIDDEN_FIELDS`, so passing a proxy is a
-hard 400. It also pins Chromium to its own localhost egress proxy, so a
-server-side proxy is overwritten. There is no supported way to give Crawl4AI a
-proxy, which is why residential egress lives in Scrapling.
+Crawl4AI was the third fetcher until 2026-09-27, when a side-by-side benchmark
+confirmed its removal: Scrapling fetched 3-10x faster, matched its markdown
+quality (now with link absolutisation), and covers every capability through
+`sessions` + Chromium (`screenshot`, `pdf`, `evaluate`). See `AGENTS.md` for the
+numbers.
 
 ### Fetch strategy
 
@@ -66,20 +66,22 @@ solving is paid for only on evidence. A small body carrying a known
 interstitial title with a 403/429/503 gets retried once in `solve`, and the
 response reports `escalated: true`.
 
-So: **Scrapling fetches, Crawl4AI renders and does the browser work.**
-`web_fetch` and `web_html` fetch through Scrapling; `web_fetch` then renders
-that HTML to markdown through Crawl4AI's markdown pipeline (via its `raw://`
-input) so the `f` filter keeps working. `web_crawl`, `web_execute_js`,
-`web_screenshot` and `web_pdf` stay on Crawl4AI. If Scrapling is unreachable,
-`web_fetch` falls back to fetching through Crawl4AI directly.
+So: **Scrapling owns fetch, markdown and captures; Camoufox owns the Italian
+exit.** `web_fetch` and `web_html` fetch through Scrapling (or Camoufox, by
+host); `web_fetch` renders that HTML to markdown through Scrapling's CPU-only
+`/markdown` endpoint — a single hop each, no browser for the render. `web_crawl`
+loops the same pipeline per URL; `web_execute_js`, `web_screenshot` and
+`web_pdf` go to Scrapling's `/eval`, `/screenshot` and `/pdf`. When one backend
+fails, the other is the fallback in both directions; if both fail, the error
+says so rather than pretending a third engine exists.
 
 The project is structured as a **monorepo** with three packages:
 
-- **`packages/toolkit`**: Core business logic: Zod schemas, tool definitions, SearXNG/Crawl4AI/Wayback clients. Framework-agnostic.
+- **`packages/toolkit`**: Core business logic: Zod schemas, tool definitions, SearXNG/Scrapling/Camoufox/Wayback clients. Framework-agnostic.
 - **`packages/api`**: Express HTTP server exposing MCP (`POST /mcp`) and REST (`POST /api/v0/{tool_name}`) endpoints.
 - **`packages/cli`**: Commander.js CLI for terminal usage.
 
-The full stack deploys as **6 services**: Redis, SearXNG, Crawl4AI, Scrapling, Camoufox, and the Web Tools server.
+The full stack deploys as **5 services**: Redis, SearXNG, Scrapling, Camoufox, and the Web Tools server.
 
 Browser form execution uses Camoufox's [single-attempt form contract](services/camoufox/FORMS.md).
 
@@ -101,15 +103,15 @@ Returns a JSON array of `{ url, title, description }` results.
 
 ### `web_fetch`
 
-Fetch a single URL and return its content as clean markdown. Fetched via
-Scrapling, rendered to markdown by Crawl4AI.
+Fetch a single URL and return its content as clean markdown. Fetched and
+rendered by Scrapling (`/fetch` + `/markdown`); Italian and bot-walled hosts
+route through Camoufox.
 
 | Parameter | Type              | Description                                                              |
 | --------- | ----------------- | ------------------------------------------------------------------------ |
 | `url`     | string (required) | URL to fetch                                                             |
-| `f`       | enum (optional)   | Content-filter strategy: `raw`, `fit`, `bm25`, or `llm` (default: `fit`) |
-| `q`       | string (optional) | Query string for BM25/LLM filters                                        |
-| `delay`   | number (optional) | Seconds to settle before extraction (default: 2)                         |
+| `f`       | enum (optional)   | Content filter: `fit` (body only, default) or `raw` (whole document)     |
+| `delay`   | number (optional) | Seconds to settle after the page is stable (default: 0)                  |
 
 Returns the page content as markdown.
 
@@ -135,7 +137,8 @@ so callers can branch on 999 vs 404 themselves.
 
 ### `web_screenshot`
 
-Capture a full-page PNG screenshot of a URL via Crawl4AI.
+Capture a full-page PNG screenshot of a URL (base64). Scrapling's
+`/screenshot`; Italian and bot-walled hosts go through Camoufox.
 
 | Parameter             | Type              | Description                                 |
 | --------------------- | ----------------- | ------------------------------------------- |
@@ -146,7 +149,7 @@ Returns a base64-encoded PNG image.
 
 ### `web_pdf`
 
-Generate a PDF document of a URL via Crawl4AI.
+Convert a URL to PDF (Chromium print-to-PDF) and return it base64-encoded.
 
 | Parameter | Type              | Description           |
 | --------- | ----------------- | --------------------- |
@@ -156,26 +159,29 @@ Returns a base64-encoded PDF.
 
 ### `web_execute_js`
 
-Execute JavaScript snippets on a URL via Crawl4AI and return the full crawl result.
+Execute JavaScript snippets on a URL in order and return their results as JSON.
 
 | Parameter | Type                | Description                                     |
 | --------- | ------------------- | ----------------------------------------------- |
 | `url`     | string (required)   | URL to execute scripts on                       |
 | `scripts` | string[] (required) | List of JavaScript snippets to execute in order |
 
-Returns the full CrawlResult JSON including markdown, links, media, and JS execution results.
+Returns `{ status, url, mode, results }` — one entry per script, in order.
 
 ### `web_crawl`
 
-Crawl one or more URLs and extract their content using Crawl4AI.
+Crawl one or more URLs sequentially through the same pipeline as `web_fetch`
+(fetch + markdown render per URL) and return one payload.
 
-| Parameter        | Type                | Description                    |
-| ---------------- | ------------------- | ------------------------------ |
-| `urls`           | string[] (required) | List of URLs to crawl          |
-| `browser_config` | object (optional)   | Crawl4AI browser configuration |
-| `crawler_config` | object (optional)   | Crawl4AI crawler configuration |
+| Parameter     | Type                | Description                                            |
+| ------------- | ------------------- | ------------------------------------------------------ |
+| `urls`        | string[] (required) | URLs to crawl, in order                                |
+| `css_selector`| string (optional)   | Convert only elements matching this selector           |
+| `timeout_ms`  | number (optional)   | Per-URL fetch timeout (default: 60000)                 |
 
-Returns the extracted content from each URL.
+Returns `{ results: [{ url, status_code, success, mode, markdown }] }`. A failed
+URL reports `{ url, status_code: 0, success: false, error }` in its own slot
+without sinking the batch.
 
 ### `web_snapshots`
 
@@ -279,9 +285,9 @@ Process-local usage counters: per-tool call counts, approximate proxy bandwidth
 and an estimated cost. No parameters.
 
 In-memory only, so it resets on container restart; the `started_at` field lets a
-caller detect that. Only the proxied tools accrue bandwidth, and their byte counts
-are an upper bound rather than a measurement, since `web_fetch` and `web_html`
-fall back to the unproxied browser when a sidecar is unreachable.
+caller detect that. The proxied tools' byte counts are an upper bound rather
+than a measurement: this process cannot see which sidecar mode actually served a
+call, and over-counting a cost estimate is the safe direction.
 
 ## Interfaces
 
@@ -365,7 +371,7 @@ web-tools fetch https://example.com
 web-tools screenshot https://example.com
 
 # Crawl multiple URLs
-web-tools crawl https://a.com https://b.com --magic
+web-tools crawl https://a.com https://b.com --selector "main"
 
 # Wayback Machine
 web-tools snapshots https://example.com --from 20200101
@@ -407,7 +413,7 @@ claude mcp add web_tools --scope user \
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/web-tools?referralCode=zMTz_F&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
-- Click **Deploy on Railway**: you'll see all 4 services listed (Redis, SearXNG, Crawl4AI, Web Tools Server)
+- Click **Deploy on Railway**: you'll see the services listed (Redis, SearXNG, Scrapling, Camoufox, Web Tools Server)
 - Click **Deploy**: Railway provisions everything and wires the services together automatically
 - An `API_KEY` is **auto-generated** during deployment. Find it in your Web Tools service's **Variables** tab and use it as your Bearer token
 
@@ -465,11 +471,9 @@ hardcoded hostnames, so renaming or moving a service does not silently break
 private networking:
 
 ```
-CRAWL4AI_URL       = http://${{Crawl4AI.RAILWAY_PRIVATE_DOMAIN}}:11235
-CRAWL4AI_API_TOKEN = ${{Crawl4AI.CRAWL4AI_API_TOKEN}}
-SCRAPLING_URL      = http://${{Scrapling.RAILWAY_PRIVATE_DOMAIN}}:${{Scrapling.PORT}}
-CAMOUFOX_URL       = http://${{Camoufox.RAILWAY_PRIVATE_DOMAIN}}:${{Camoufox.PORT}}
-SEARXNG_URL        = http://${{SearXNG.RAILWAY_PRIVATE_DOMAIN}}:8080
+SCRAPLING_URL = http://${{Scrapling.RAILWAY_PRIVATE_DOMAIN}}:${{Scrapling.PORT}}
+CAMOUFOX_URL  = http://${{Camoufox.RAILWAY_PRIVATE_DOMAIN}}:${{Camoufox.PORT}}
+SEARXNG_URL   = http://${{SearXNG.RAILWAY_PRIVATE_DOMAIN}}:8080
 ```
 
 Reference `${{Service.PORT}}` only where the service actually **binds** it and has
@@ -478,11 +482,9 @@ their CMD is `uvicorn --port ${PORT}` and they deliberately ship no `ENV PORT`, 
 the Railway variable is the single source of truth for both the bind and the URL,
 and a missing one stops the container at boot rather than yielding `http://host:`.
 
-It does not hold for the two third-party images, whose URLs keep literal ports:
-SearXNG hardcodes `--port 8080` in its entrypoint and Crawl4AI reads `port: 11235`
-from its own `config.yml`, so `PORT` is decoration on both and a reference to it is
-a guess that fails open. Crawl4AI's read `8000` while the app listened on `11235`,
-which pointed every fetch at a closed port.
+It does not hold for the third-party SearXNG image, whose URL keeps a literal
+port: SearXNG hardcodes `--port 8080` in its entrypoint, so `PORT` is decoration
+and a reference to it is a guess that fails open.
 
 Service names are case-sensitive: `${{camoufox.…}}` against a service named
 `Camoufox` resolves to an empty string rather than erroring, giving `http://:8000`.
@@ -517,12 +519,9 @@ build locally; each is self-contained, and every URL is optional:
 docker build -t searxng services/searxng && docker run -d -p 8080:8080 \
   -e SEARXNG_SECRET_KEY=dev -e SEARXNG_REDIS_URL=redis://host.docker.internal:6379/0 searxng
 docker run -d -p 6379:6379 redis:7-alpine
-docker run -d -p 11235:11235 -e CRAWL4AI_API_TOKEN=dev unclecode/crawl4ai:0.9.2
 
 API_KEY=any-local-value \
 SEARXNG_URL=http://localhost:8080 \
-CRAWL4AI_URL=http://localhost:11235 \
-CRAWL4AI_API_TOKEN=dev \
 pnpm run start
 ```
 
@@ -530,17 +529,16 @@ The server is at `http://localhost:3000`. `API_KEY` is required but arbitrary
 locally, since it only guards your own endpoint.
 
 Leave a URL out and that path degrades rather than fails: `SEARXNG_URL` alone gives
-you `web_search`; `CRAWL4AI_URL` gives `web_crawl` / `web_screenshot` / `web_pdf`
-and markdown rendering; `web_fetch` and `web_html` fall back to Crawl4AI when the
-stealth sidecars are absent. The two stealth sidecars each bake a browser into
-their image (~200MB Chromium for Scrapling, Camoufox's Firefox plus a GeoIP
-database), and their residential paths need a `PROXY_URL` you supply, so build
-them only when you are working on those paths specifically.
+you `web_search`; without `SCRAPLING_URL` the fetch/markdown/capture tools report
+the missing sidecar instead of failing opaquely. The two stealth sidecars each
+bake a browser into their image (~200MB Chromium for Scrapling, Camoufox's Firefox
+plus a GeoIP database), and their residential paths need a `PROXY_URL` you supply,
+so build them only when you are working on those paths specifically.
 
 If you genuinely need to reach a deployed sidecar from your machine, add a service
-domain temporarily (`railway domain --service Crawl4AI`) and delete it when you are
-done. Do not leave one on: an exposed SearXNG is an open search proxy that spends
-your metered residential bandwidth.
+domain temporarily (`railway domain --service Scrapling`) and delete it when you
+are done. Do not leave one on: an exposed SearXNG is an open search proxy that
+spends your metered residential bandwidth.
 
 ## Exposure
 
@@ -552,8 +550,7 @@ network:
 | --- | --- | --- |
 | Tools | **yes** | the API surface: MCP + REST, API-key guarded |
 | SearXNG | no | it has **no authentication of its own**, so a public domain is an open search proxy, and its outgoing requests egress through your metered `PROXY_URL` |
-| Crawl4AI | no | `CRAWL4AI_API_TOKEN` is the only thing between a public domain and free use of your browser fleet |
-| Scrapling | no | residential egress; nothing should reach it but Tools |
+| Scrapling | no | residential egress + challenge solving; nothing should reach it but Tools |
 | Camoufox | no | residential egress + warmed anti-bot sessions |
 
 `SEARXNG_SECRET_KEY` is not an access credential. It is SearXNG's internal
@@ -567,11 +564,10 @@ broken or open.
 | --- | --- | --- |
 | `API_KEY` | Yes | Bearer token for authentication (auto-generated on Railway) |
 | `SEARXNG_URL` | No | SearXNG URL (default: `http://searxng.railway.internal:8080`) |
-| `CRAWL4AI_URL` | No | Crawl4AI URL (default: `http://crawl4ai.railway.internal:11235`) |
-| `CRAWL4AI_API_TOKEN` | No | API token for Crawl4AI authentication |
 | `SCRAPLING_URL` | No | Scrapling URL (default: `http://scrapling.railway.internal:8000`) |
+| `CAMOUFOX_URL` | No | Camoufox URL (default: `http://camoufox.railway.internal:8000`) |
 | `SEARXNG_ENGINES` | No | Default engines (e.g. `"brave,bing"`) |
-| `PROXY_URL` | No | Rotating residential proxy. Set on the **SearXNG** and **Scrapling** services, not the server. Required for `mode=stealth`. |
+| `PROXY_URL` | No | Rotating residential proxy. Set on the **SearXNG**, **Scrapling** and **Camoufox** services, not the server. US-geo for Scrapling, **IT-geo** for Camoufox. |
 
 ## Authentication
 

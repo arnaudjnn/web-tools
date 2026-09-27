@@ -1,9 +1,9 @@
 // Client for the Camoufox sidecar (services/camoufox).
 //
 // Camoufox is a stealth *Firefox* on an Italian residential exit, and it is not
-// interchangeable with the other two backends:
+// interchangeable with the other backend (after the Crawl4AI removal,
+// benchmarked 2026-09-27 — see AGENTS.md):
 //
-//   Crawl4AI   headless Chromium, this host's datacenter IP, no proxy possible
 //   Scrapling  Patchright Chromium, US residential exit or challenge-solving
 //   Camoufox   Firefox, IT residential exit, geoip-coherent, sticky sessions
 //

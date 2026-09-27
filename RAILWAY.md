@@ -4,7 +4,7 @@ Web Tools is an open-source web toolkit that gives AI agents fourteen tools to s
 
 ## About Hosting Web Tools
 
-This template deploys a complete self-hosted web toolkit as six services on Railway: **Redis**, **SearXNG** (privacy-respecting metasearch engine), **Crawl4AI** (headless browser for content extraction, screenshots, PDFs, and JS execution), **Scrapling** (stealth fetching: residential egress and JS-challenge solving), **Camoufox** (stealth Firefox on a geo-targeted residential exit, for sources that refuse anything else), and the **Web Tools Server** that ties them together. An API key is auto-generated at deploy time to secure your endpoint. Once deployed, any MCP-compatible client (Claude Code, Claude Desktop, Cursor, Windsurf, etc.) can connect over HTTP and use all fourteen tools. A REST API (`POST /api/v0/{tool_name}`) is also available for non-MCP integrations. No per-query fees, no third-party API keys, no usage limits. You own the infrastructure and the data never leaves your stack.
+This template deploys a complete self-hosted web toolkit as five services on Railway: **Redis**, **SearXNG** (privacy-respecting metasearch engine), **Scrapling** (stealth fetching, rendering, screenshots, PDFs, JS execution: residential egress and JS-challenge solving), **Camoufox** (stealth Firefox on a geo-targeted residential exit, for sources that refuse anything else), and the **Web Tools Server** that ties them together. An API key is auto-generated at deploy time to secure your endpoint. Once deployed, any MCP-compatible client (Claude Code, Claude Desktop, Cursor, Windsurf, etc.) can connect over HTTP and use all fourteen tools. A REST API (`POST /api/v0/{tool_name}`) is also available for non-MCP integrations. No per-query fees, no third-party API keys, no usage limits. You own the infrastructure and the data never leaves your stack.
 
 ## Common Use Cases
 
@@ -17,8 +17,7 @@ This template deploys a complete self-hosted web toolkit as six services on Rail
 
 - **Redis** (7-alpine): In-memory cache used by SearXNG for rate limiting and result caching
 - **SearXNG**: Privacy-respecting metasearch engine that aggregates results from Google, Brave, DuckDuckGo, and more. Builds from `services/searxng/Dockerfile` with optional `PROXY_URL` support for outgoing requests
-- **Crawl4AI**: Headless browser service for crawling, screenshots, PDFs and JavaScript execution, and for rendering HTML to markdown. Note Crawl4AI >= 0.9 refuses `proxy_config` from a request body, so it always egresses on its own IP. Pin the image rather than tracking `:latest`
-- **Scrapling**: Stealth fetch sidecar that serves `web_fetch` and `web_html`. Owns the rotating residential egress (for IP-reputation walls such as LinkedIn) and the JS-challenge solving (for Cloudflare-style walls) that Crawl4AI structurally cannot do. Builds from `services/scrapling/Dockerfile`; set `PROXY_URL` on it to enable `mode=stealth`
+- **Scrapling**: Stealth fetch sidecar, and the whole render pipeline: `web_fetch`, `web_html`, `web_crawl` (as sequential markdown posts), `web_screenshot`, `web_pdf`, `web_execute_js`. Owns the rotating residential egress (for IP-reputation walls such as LinkedIn), the JS-challenge solving (for Cloudflare-style walls), and a hard per-request deadline with `busy_age_s` observable on `/healthz`. Builds from `services/scrapling/Dockerfile`; set `PROXY_URL` on it to enable `mode=stealth`
 - **Camoufox**: Stealth Firefox sidecar on a **geo-targeted** residential exit, with a fingerprint whose locale and timezone derive from the exit IP. Serves the sources the other two cannot reach at all: ones that bot-gate datacenter IPs outright, or score the exit country as part of an anti-bot sensor decision. Also owns the two capabilities nothing else here has: a binary/PDF fetch through that exit (`web_bytes`) and warmed anti-bot sensor sessions (`web_spa_fetch`). Builds from `services/camoufox/Dockerfile`; set `PROXY_URL` (geo-targeted) and keep `WORKERS=1`
 - **Web Tools Server** (Node.js 22): The HTTP server exposing MCP and REST API endpoints. Builds from the **repo-root `Dockerfile`**. Do not delete it; it is this service's build
 
@@ -26,7 +25,6 @@ This template deploys a complete self-hosted web toolkit as six services on Rail
 
 - [Web Tools GitHub Repository](https://github.com/arnaudjnn/web-tools)
 - [SearXNG Documentation](https://docs.searxng.org/)
-- [Crawl4AI Documentation](https://docs.crawl4ai.com/)
 - [Model Context Protocol Specification](https://modelcontextprotocol.io/)
 
 ### Implementation Details
@@ -60,10 +58,12 @@ curl -X POST https://your-server.up.railway.app/api/v0/web_search \
 
 The fourteen tools available are: `web_search`, `web_fetch`, `web_html`, `web_screenshot`, `web_pdf`, `web_execute_js`, `web_crawl`, `web_bytes`, `web_eval`, `web_spa_fetch`, `web_recycle`, `web_snapshots`, `web_archive`, and `web_usage_stats`.
 
-Callers never choose a fetch engine. Which of the three browsers serves a URL,
+Callers never choose a fetch engine. Which of the two browsers serves a URL,
 and whether it egresses through a residential proxy, in which country, or solves a
 JS challenge, is decided from the host inside the server. Adding a knob for it would
-put the burden of knowing which engine can reach which site on every caller.
+put the burden of knowing which engine can reach which site on every caller. When
+the preferred engine fails, the server falls back to the other one and reports both
+causes only when both fail.
 
 ### Railway Service Configuration
 
@@ -73,7 +73,6 @@ put the burden of knowing which engine can reach which site on every caller.
 | SearXNG | GitHub repo | `services/searxng` | Optional `PROXY_URL` |
 | Scrapling | GitHub repo | `services/scrapling` | `PROXY_URL` (US-geo), `PORT=8000` |
 | Camoufox | GitHub repo | `services/camoufox` | `PROXY_URL` (target-geo), `PORT=8000`, `WORKERS=1` |
-| Crawl4AI | Docker image (pin the tag) | n/a | `CRAWL4AI_API_TOKEN` |
 | Redis | Docker image | n/a | Used by SearXNG |
 
 **Set Root Directory before connecting a subfolder service to the repo.** Railway
@@ -110,25 +109,21 @@ deliberately not the default, because disabling the content sandbox weakens the
 fingerprint this browser exists for.
 
 **Give only the Web Tools Server a public domain.** It is the authenticated front
-door; the other five talk over Railway's private network and should have no domain
-at all. SearXNG in particular has no authentication of its own, so a public domain
-makes it an open search proxy whose outgoing requests spend your metered
-`PROXY_URL` bandwidth. `SEARXNG_SECRET_KEY` does not change that, because it is an
-internal signing secret rather than a credential. `CRAWL4AI_API_TOKEN` *is* a
-credential, and it is the only thing between an exposed Crawl4AI and free use of
-your browser fleet. Removing the domain is what makes a service private; removing
-its credentials just makes it broken or open.
+door; the other services talk over Railway's private network and should have no
+domain at all. SearXNG in particular has no authentication of its own, so a public
+domain makes it an open search proxy whose outgoing requests spend your metered
+`PROXY_URL` bandwidth. `SEARXNG_SECRET_KEY` does not change that, because it is
+an internal signing secret rather than a credential. Removing the domain is what
+makes a service private; removing its credentials just makes it broken or open.
 
 **Wire the services together with reference variables** rather than hardcoded
 `*.railway.internal` hostnames, so the wiring survives a rename and each port is
 only right in one place:
 
 ```
-CRAWL4AI_URL       = http://${{Crawl4AI.RAILWAY_PRIVATE_DOMAIN}}:11235
-CRAWL4AI_API_TOKEN = ${{Crawl4AI.CRAWL4AI_API_TOKEN}}
-SCRAPLING_URL      = http://${{Scrapling.RAILWAY_PRIVATE_DOMAIN}}:${{Scrapling.PORT}}
-CAMOUFOX_URL       = http://${{Camoufox.RAILWAY_PRIVATE_DOMAIN}}:${{Camoufox.PORT}}
-SEARXNG_URL        = http://${{SearXNG.RAILWAY_PRIVATE_DOMAIN}}:8080
+SCRAPLING_URL = http://${{Scrapling.RAILWAY_PRIVATE_DOMAIN}}:${{Scrapling.PORT}}
+CAMOUFOX_URL  = http://${{Camoufox.RAILWAY_PRIVATE_DOMAIN}}:${{Camoufox.PORT}}
+SEARXNG_URL   = http://${{SearXNG.RAILWAY_PRIVATE_DOMAIN}}:8080
 ```
 
 Reference `${{Service.PORT}}` only where the service actually **binds** it and has
@@ -137,11 +132,11 @@ their CMD is `uvicorn --port ${PORT}` and they deliberately ship no `ENV PORT`, 
 the Railway variable is the single source of truth for both the bind and the URL,
 and a missing one stops the container at boot rather than yielding `http://host:`.
 
-It does not hold for the two third-party images, whose URLs keep literal ports:
-SearXNG hardcodes `--port 8080` in its entrypoint and Crawl4AI reads `port: 11235`
-from its own `config.yml`, so `PORT` is decoration on both and a reference to it is
-a guess that fails open. Crawl4AI's read `8000` while the app listened on `11235`,
-which pointed every fetch at a closed port.
+It does not hold for the third-party image, whose URL keeps a literal port:
+SearXNG hardcodes `--port 8080` in its entrypoint, so `PORT` is decoration there
+and a reference to it is a guess that fails open. (The decommissioned Crawl4AI
+service learned this the hard way: its URL read `8000` from `PORT` while the app
+listened on `11235`, which pointed every fetch at a closed port.)
 
 Service names are case-sensitive: `${{camoufox.…}}` against a service named
 `Camoufox` resolves to an empty string rather than erroring, giving `http://:8000`.

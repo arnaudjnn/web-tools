@@ -5,16 +5,16 @@ description: Check whether the web-tools Railway stack is actually working and h
 
 # tools-health
 
-Diagnose and repair the web-tools stack: `Tools`, `SearXNG`, `Crawl4AI`,
+Diagnose and repair the web-tools stack: `Tools`, `SearXNG`,
 `Scrapling`, `Camoufox`, `Redis` in project `3375ebc9-cb5f-42ac-999d-b1d3b8feb5ef`.
 
 ## Why liveness checks are not enough here
 
-There are three fetchers, and when the right one is unavailable a request silently
-falls back to a worse one. The caller gets a real page and a 200 with quietly wrong
-provenance: LinkedIn fetched from a datacenter IP that LinkedIn blocks, or an
-Italian source fetched from a US exit. `web_search` fails the same way, returning
-`[]` with a 200.
+There are two fetchers behind a symmetric fallback, and when the right one is
+unavailable a request silently falls back to the other. The caller gets a real
+page and a 200 with quietly wrong provenance: LinkedIn fetched from the Italian
+exit, or an Italian source fetched from a US one. `web_search` fails the same
+way, returning `[]` with a 200.
 
 So this skill asserts on **which backend served the request** and on **result
 counts**, never on liveness alone. Read `references/signatures.md` before

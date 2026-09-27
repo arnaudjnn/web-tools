@@ -130,7 +130,7 @@ STEALTH_HOSTS = ("linkedin.com",)
 # that had 24. SOLVE fixed that until Trustpilot moved to a *managed* Cloudflare
 # Turnstile, which this solver cannot clear: it loops "captcha is still present,
 # solving again" until the fetch cap, every time. web-tools now routes that host to
-# Crawl4AI, whose datacenter IP Trustpilot is happy to serve in ~4s.
+# Camoufox, which renders the full page behind a forced 20s wait.
 #
 # Before adding a host, confirm SOLVE actually CLEARS it — not merely that FAST is
 # refused. An unsolvable challenge here costs the full MAX_FETCH_MS per request and
@@ -333,10 +333,9 @@ class FetchResponse(BaseModel):
 
 # Modes worth paying for before the first request arrives. A browser launch costs
 # tens of seconds on a cold container, and the caller's budget is finite: web-tools
-# aborts a fetch at timeout+25s and falls back to the plain datacenter browser. So a
-# cold start does not merely feel slow, it silently downgrades the result — LinkedIn
-# came back from Crawl4AI's blocked IP twice because the first stealth request of a
-# fresh container never finished in time.
+# aborts a fetch at timeout+25s and falls back to the other sidecar. So a cold
+# start does not merely feel slow, it silently downgrades the result — the wrong
+# exit and fingerprint for the host.
 #
 # SOLVE is deliberately not pre-warmed: nothing routes to it by host any more, it is
 # only reached by escalation, and it is the most expensive session to build.
