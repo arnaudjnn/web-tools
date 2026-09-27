@@ -66,6 +66,7 @@ import os
 import random
 import re
 import secrets
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -186,6 +187,11 @@ _cm = None        # the Camoufox context manager
 _browser = None   # the Playwright Browser it yields
 _page = None      # the persistent warmed page
 _warmed = None    # (base_url, warm_path) the current page is warmed for
+# The thread that owns _page/_browser. Playwright's sync API is thread-bound:
+# after an executor swap, a job queued on the OLD thread can rebuild the handle
+# there, and every later job on the new thread would then use a foreign handle
+# ("cannot switch to a different thread"). _ensure_page checks this and rebuilds.
+_page_thread: int | None = None
 
 
 def _close_cm(cm, label: str) -> None:
@@ -210,9 +216,10 @@ def _close_cm(cm, label: str) -> None:
 
 def _close_in_worker() -> None:
     """Kept for the keepalive/error paths that still close in place."""
-    global _cm, _browser, _page, _warmed
+    global _cm, _browser, _page, _warmed, _page_thread
     cm = _cm
     _cm = _browser = _page = _warmed = None
+    _page_thread = None
     _close_cm(cm, "camoufox session")
 
 
@@ -320,12 +327,22 @@ def _ensure_page(base_url, warm_path, sensor_wait_ms, mature_probe, mature_max_t
     it if needed. On (re)warm we interact to seed the sensor, then — if the
     caller gave a maturation probe — keep interacting until that probe stops
     returning 403 (200 or an app-level non-403 both mean it cleared Akamai)."""
-    global _cm, _browser, _page, _warmed
+    global _cm, _browser, _page, _warmed, _page_thread
     key = (base_url, warm_path)
-    if _page is not None and _warmed == key:
-        return _page
     if _page is not None:
-        _close_in_worker()
+        if _warmed == key and _page_thread == threading.get_ident():
+            return _page
+        if _page_thread == threading.get_ident():
+            _close_in_worker()
+        else:
+            # This handle belongs to a retired executor thread (a job queued on
+            # the old thread rebuilt it after a swap). It cannot be closed from
+            # here — Playwright's sync API is thread-bound — so leak it; its
+            # thread owns the close and is already gone or will exit.
+            log.warning("warmed page owned by retired thread %s (now %s) — re-warming",
+                        _page_thread, threading.get_ident())
+            _cm = _browser = _page = _warmed = None
+            _page_thread = None
     proxy = parse_proxy(PROXY_URL, new_proxy_session())
     if proxy is None:
         raise RuntimeError("PROXY_URL must be set as http://user:pass@host:port")
@@ -361,6 +378,7 @@ def _ensure_page(base_url, warm_path, sensor_wait_ms, mature_probe, mature_max_t
             _interact(page)
             page.wait_for_timeout(1500)
     _cm, _browser, _page, _warmed = cm, browser, page, key
+    _page_thread = threading.get_ident()
     log.info("warmed page base=%s path=%s", base_url, warm_path)
     return page
 
@@ -400,6 +418,8 @@ import base64
 
 _render_cm = None
 _render_browser = None
+# Thread that owns _render_browser (see _page_thread for why this matters).
+_render_thread: int | None = None
 # Set when a render-browser LAUNCH fails, cleared when one succeeds. This is
 # what /healthz reports: a replica whose browser cannot start is not healthy,
 # however cheerfully the rest of the process answers.
@@ -407,9 +427,20 @@ _render_broken = False
 
 
 def _ensure_render_browser():
-    global _render_cm, _render_browser
+    global _render_cm, _render_browser, _render_thread
     if _render_browser is not None:
-        return _render_browser
+        if _render_thread == threading.get_ident():
+            return _render_browser
+        # Foreign thread owns this handle: an executor swap let a job queued on
+        # the old thread build it. Playwright's sync API is thread-bound, so
+        # new_page() from here raises greenlet "Cannot switch to a different
+        # thread" — an error _DEAD_BROWSER cannot recover from, because the
+        # handle LOOKS alive. Leak it (its retired thread owns the close) and
+        # rebuild on THIS thread.
+        log.warning("render browser owned by retired thread %s (now %s) — rebuilding",
+                    _render_thread, threading.get_ident())
+        _render_cm = _render_browser = None
+        _render_thread = None
     # Sticky for this browser's lifetime as well. A page load is many requests,
     # and with geoip=True the fingerprint (locale/timezone) is derived from the
     # exit IP — so letting the exit rotate MID-LOAD advertises one identity while
@@ -428,14 +459,16 @@ def _ensure_render_browser():
         raise
     globals()["_render_broken"] = False
     _render_cm, _render_browser = cm, browser
+    _render_thread = threading.get_ident()
     log.info("render browser ready (residential)")
     return browser
 
 
 def _close_render_in_worker() -> None:
-    global _render_cm, _render_browser
+    global _render_cm, _render_browser, _render_thread
     cm = _render_cm
     _render_cm = _render_browser = None
+    _render_thread = None
     _close_cm(cm, "render browser")
 
 
@@ -664,14 +697,21 @@ _DEAD_BROWSER = re.compile(
     # so it is the same dead-thread recovery, not a caller bug, and retrying it
     # on a fresh thread is correct. If the fresh thread raises it too, the retry
     # propagates, so a genuinely broken Playwright still surfaces.
-    r"|Sync API inside the asyncio loop",
+    r"|Sync API inside the asyncio loop"
+    # A handle owned by a thread that has since been swapped out or exited
+    # (observed 2026-09-27: "cannot switch to a different thread (which happens
+    # to have exited)" after an executor recycle, failing every /render until a
+    # redeploy). Same remedy — drop the handles, fresh thread, retry once. The
+    # _ensure_render_browser/_ensure_page thread guards prevent the common way
+    # to get here; this is the backstop for the ones they cannot see.
+    r"|cannot switch to a different thread",
     re.I,
 )
 
 
 async def _run_render(fn, *args):
     """Run a render-browser job, recovering ONCE from a browser that has died."""
-    global _render_cm, _render_browser
+    global _render_cm, _render_browser, _render_thread
     loop = asyncio.get_running_loop()
     try:
         return await loop.run_in_executor(_render_executor, fn, *args)
@@ -680,6 +720,7 @@ async def _run_render(fn, *args):
             raise
         log.warning("render browser is dead (%s) — fresh thread, retrying once", str(e)[:120])
         _render_cm = _render_browser = None
+        _render_thread = None
         _reset_render_executor()
         return await loop.run_in_executor(_render_executor, fn, *args)
 
@@ -955,14 +996,17 @@ async def _close_or_abandon(executor, fn, label: str) -> bool:
 
 @app.post("/recycle")
 async def recycle():
-    global _cm, _browser, _page, _warmed, _render_cm, _render_browser
+    global _cm, _browser, _page, _warmed, _page_thread
+    global _render_cm, _render_browser, _render_thread
     # SNAPSHOT AND CLEAR FIRST, on the event loop, before any thread work. From
     # this line on the service has no session, so a /spa-fetch arriving while the
     # old browser is still closing builds a fresh one instead of racing the
     # teardown for the same globals.
     cm, render_cm = _cm, _render_cm
     _cm = _browser = _page = _warmed = None
+    _page_thread = None
     _render_cm = _render_browser = None
+    _render_thread = None
     akamai = await _close_or_abandon(_executor, lambda: _close_cm(cm, "akamai session"), "akamai session")
     render = await _close_or_abandon(_render_executor, lambda: _close_cm(render_cm, "render browser"), "render browser")
     _reset_executor()
