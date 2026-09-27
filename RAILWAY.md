@@ -19,6 +19,9 @@ This template deploys a complete self-hosted web toolkit as five services on Rai
 - **Scrapling**: Stealth fetch sidecar, and the whole render pipeline: `web_fetch`, `web_html`, `web_crawl` (as sequential markdown posts), `web_screenshot`, `web_pdf`, `web_execute_js`. Owns the rotating residential egress (for IP-reputation walls such as LinkedIn), the JS-challenge solving (for Cloudflare-style walls), and a hard per-request deadline with `busy_age_s` observable on `/healthz`. Builds from `services/scrapling/Dockerfile`; set `PROXY_URL` on it to enable `mode=stealth`
 - **Camoufox**: Stealth Firefox sidecar on a **geo-targeted** residential exit, with a fingerprint whose locale and timezone derive from the exit IP. Serves the sources the other two cannot reach at all: ones that bot-gate datacenter IPs outright, or score the exit country as part of an anti-bot sensor decision. Also owns the two capabilities nothing else here has: a binary/PDF fetch through that exit (`web_bytes`) and warmed anti-bot sensor sessions (`web_spa_fetch`). Builds from `services/camoufox/Dockerfile`; set `PROXY_URL` (geo-targeted) and keep `WORKERS=1`
 - **Web Tools Server** (Node.js 22): The HTTP server exposing MCP and REST API endpoints. Builds from the **repo-root `Dockerfile`**. Do not delete it; it is this service's build
+
+### Deployment Dependencies
+
 - [Web Tools GitHub Repository](https://github.com/arnaudjnn/web-tools)
 - [SearXNG Documentation](https://docs.searxng.org/)
 - [Model Context Protocol Specification](https://modelcontextprotocol.io/)
