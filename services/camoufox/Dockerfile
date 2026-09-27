@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 ARG CAMOUFOX_BROWSER=official/stable/152.0.4-beta.30
 RUN python -m camoufox set "$CAMOUFOX_BROWSER" && python -m camoufox fetch
 
-COPY app.py form_flow.py form_worker.py entrypoint.sh ./
+COPY app.py form_flow.py form_worker.py captcha_solver.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 # ONE warmed Camoufox page per container (WORKERS=1) — the persistent SPA
