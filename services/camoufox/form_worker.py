@@ -1,8 +1,10 @@
 """Single-attempt forms with a browser lifetime independent of shared readers.
 
 Each admitted operation gets a fresh thread and browser. A cancelled caller does
-not free admission while its worker is still running; an uncertain form is never
-replayed. Queue and launch time consume the same deadline as page interactions.
+not free admission while its worker is still running; a worker wedged past its
+deadline + teardown grace frees admission anyway and fails as unavailable. An
+uncertain form is never replayed. Queue and launch time consume the same
+deadline as page interactions.
 """
 import asyncio
 import logging
@@ -12,6 +14,13 @@ from concurrent.futures import ThreadPoolExecutor
 from form_flow import run_form, validate_form
 
 log = logging.getLogger("camoufox.forms")
+
+# Beyond the operation's own deadline this is teardown budget: launch can start
+# near the deadline and close/join must finish after it. Past that the job is
+# wedged (a browser/driver join that never returns — observed 2026-09-27: a
+# form thread held the admission gate forever while no browser existed, so
+# every later form only ever saw queue_deadline_exceeded).
+TEARDOWN_GRACE_S = 45
 
 
 def not_started(url, error):
@@ -66,6 +75,13 @@ class FormWorker:
         except asyncio.TimeoutError:
             return not_started(url, "queue_deadline_exceeded")
         executor = None
+        state = {"released": False}
+
+        def release_once():
+            if not state["released"]:
+                state["released"] = True
+                self._admission.release()
+
         try:
             # A failed Playwright launch can leave its sync thread tainted.
             # Never reuse that thread, even if closing the manager failed.
@@ -74,15 +90,31 @@ class FormWorker:
         except BaseException:
             if executor is not None:
                 executor.shutdown(wait=False)
-            self._admission.release()
+            release_once()
             raise
 
         def completed(task):
             executor.shutdown(wait=False)
-            self._admission.release()
+            release_once()
             # Retrieve exceptions even when the HTTP caller disconnected.
             if not task.cancelled():
                 task.exception()
 
         future.add_done_callback(completed)
-        return await asyncio.shield(future)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(future),
+                max(0.0, deadline - time.monotonic()) + TEARDOWN_GRACE_S)
+        except asyncio.TimeoutError:
+            if future.done():
+                # The job itself finished with TimeoutError (form deadline) —
+                # a normal outcome, not a wedge. Preserve its exception.
+                return future.result()
+            # The job outlived deadline + teardown grace: wedged, not slow.
+            # Give the gate back (the orphan may still finish later;
+            # release_once keeps that from releasing twice) and fail as
+            # UNAVAILABLE — no response means an unknown outcome, never
+            # permission to resubmit.
+            release_once()
+            log.warning("form job wedged past deadline + grace; admission released, outcome unknown")
+            raise TimeoutError("form outcome unavailable") from None

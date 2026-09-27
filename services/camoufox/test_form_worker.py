@@ -108,6 +108,27 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await worker.run(lambda: "recovered", url="https://example.test",
                                           deadline=time.monotonic() + 5), "recovered")
 
+    async def test_wedged_job_releases_admission_and_fails_unknown(self):
+        worker = FormWorker()
+        stuck = threading.Event()
+        def wedged():
+            stuck.wait(5)
+            return "late"
+        try:
+            with patch("form_worker.TEARDOWN_GRACE_S", 0.05):
+                with self.assertRaises(TimeoutError):
+                    await worker.run(wedged, url="https://example.test",
+                                     deadline=time.monotonic() + 0.01)
+            # The orphan must not hold the gate: the next form runs at once.
+            self.assertEqual(await worker.run(lambda: "next", url="https://example.test",
+                                              deadline=time.monotonic() + 5), "next")
+        finally:
+            stuck.set()
+        # The orphan finishing later must not release a second time.
+        await asyncio.sleep(0.05)
+        self.assertEqual(await worker.run(lambda: "after", url="https://example.test",
+                                          deadline=time.monotonic() + 5), "after")
+
 
 if __name__ == "__main__":
     unittest.main()
