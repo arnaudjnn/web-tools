@@ -36,6 +36,7 @@ liveness. A liveness check passes through all of it.
 | container crashes on `ZodError: API_KEY Required` | the service built the repo-root Dockerfile, i.e. the wrong program. Its Root Directory is unset | set Root Directory, then redeploy; **manual** | recurs on every push until fixed |
 | a URL resolves to `http://host:` or `http://:8000` | a `${{Service.PORT}}` or `${{service.…}}` reference resolved to empty. References fail OPEN | hardcode the port, or check the service-name casing; **manual** | `Crawl4AI.PORT` read 8000 while the app listened on 11235 (the service has since been decommissioned) |
 | an unrelated fetch waits the full client budget under load | queueing. One request per mode per container, so concurrent callers serialise | add a replica | 90.5s on one replica during a signal sweep, 0.7s with two |
+| `web_archive` / `web_snapshots` fail with `{"error": "fetch failed"}` HTTP 500 in ~1s | wayback called with plain `fetch` from the server process — web.archive.org silently DROPS this project's datacenter egress (TCP hang, no RST) | fixed 2026-09-27: both go through the sidecar's `/raw` on the residential exit (host-routed via `STEALTH_HOSTS`). If it recurs, the stealth path to archive.org is down | Tools `wget` and sidecar fast both hang; laptop and sidecar stealth both answer |
 
 ## Things that look like problems and are not
 

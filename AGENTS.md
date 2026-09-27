@@ -49,12 +49,19 @@ Side-by-side, same URLs, raw results in the session bench dir (`sl_results.json`
 
 ## Scrapling sidecar (`services/scrapling/app.py`)
 
-Endpoints: `/fetch` (with `wait_ms`), `/markdown` (`raw|fit`), `/screenshot`,
-`/pdf`, `/eval`, `/healthz`. Traps encoded there:
+Endpoints: `/fetch` (with `wait_ms`), `/markdown` (`raw|fit`), `/raw`,
+`/screenshot`, `/pdf`, `/eval`, `/healthz`. Traps encoded there:
 
+- **`web.archive.org` drops this project's datacenter egress** (verified
+  2026-09-27: wget from the Tools container and `/fetch` fast from the sidecar
+  both hang; the same URL answers from a laptop and through the residential
+  exit). It sits in `STEALTH_HOSTS`, and `web_archive`/`web_snapshots` call the
+  sidecar's `/raw` (plain httpx GET on the mode's egress, no browser) — never
+  `fetch` from the server process. Both tools moved into `PROXY_BACKED` in
+  `stats.ts` when that landed.
 - **Pinned version `scrapling[fetchers]==0.4.14`** — `Response.markdown()` does
   not exist yet; the render path uses the Convertor internals. `markdownify==1.2.3`
-  is a hard dep of `/markdown`.
+  is a hard dep of `/markdown`; `httpx==0.28.1` of `/raw`.
 - `_execute` enforces a hard deadline (timeout + 20 s slack; clients abort at
   +25 s), tracks `_inflight`, and `/healthz` reports `busy_age_s` — a mode busy
   >150 s is a wedge.

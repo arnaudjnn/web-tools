@@ -4,6 +4,7 @@ Scrapling sidecar — fetch, render and capture for the pages a plain browser ca
 POST /fetch      { url, mode?, network_idle?, timeout_ms?, disable_resources?, wait_ms? }
              → { status, url, html, size, mode, escalated }
 POST /markdown   { html, url, filter?, css_selector? }   → { markdown }   (no browser)
+POST /raw        { url, mode?, timeout_ms? } → { status, url, body, size, mode } (no browser)
 POST /screenshot { url, mode?, full_page?, wait_ms?, timeout_ms? }        → { status, url, b64 }
 POST /pdf        { url, wait_ms?, timeout_ms?, format?, landscape? }      → { status, url, b64 }
 POST /eval       { url, scripts, mode?, wait_ms?, timeout_ms? }           → { status, url, results }
@@ -81,6 +82,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import httpx
 import json
 import logging
 import os
@@ -119,7 +121,13 @@ class Mode(str, Enum):
 # Hosts whose correct mode we have measured and which FAST cannot serve at all.
 # Everything else starts at FAST and escalates to SOLVE only if it looks
 # challenged, so an unlisted host never pays the solve tax up front.
-STEALTH_HOSTS = ("linkedin.com",)
+#
+# web.archive.org joins LinkedIn here for a measured network reason, not a bot
+# one: this project's datacenter egress is silently DROPPED there (verified
+# 2026-09-27 — wget from the Tools container and /fetch from this sidecar both
+# hang; the same URL answers in ~1s from a laptop and in ~11s through the
+# residential exit). Only the residential path reaches it at all.
+STEALTH_HOSTS = ("linkedin.com", "web.archive.org")
 
 # Hosts that must START at SOLVE, because escalation can never rescue them: they
 # answer FAST with HTTP 200, so nothing looks challenged, yet the body is wrong.
@@ -584,6 +592,80 @@ def markdown_endpoint(req: MarkdownRequest):
     except Exception as e:  # noqa: BLE001 - hostile/broken HTML must not kill the worker
         log.exception("markdown render failed url=%s", req.url)
         raise HTTPException(status_code=422, detail=f"markdown render failed: {e}")
+
+
+# ── Plain HTTP: /raw ─────────────────────────────────────────────────
+#
+# A GET with no browser: the CDX API answers JSON, archived pages are static
+# HTML, and neither can clear a challenge — so unlike /fetch there is no
+# escalation, and a 403 comes back as a status for the caller to judge. It
+# still runs on the mode's slot (one in-flight egress per exit, and the same
+# deadline/busy_age_s bookkeeping as everything else).
+
+
+class RawRequest(BaseModel):
+    url: str = Field(..., description="Absolute URL to GET")
+    mode: Mode | None = Field(
+        None,
+        description="fast = direct (default). stealth = residential proxy. "
+                    "Omit to pick by host.",
+    )
+    timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+
+
+class RawResponse(BaseModel):
+    status: int
+    url: str = Field(..., description="Final URL after redirects")
+    body: str
+    size: int
+    mode: str
+
+
+_RAW_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+def _do_raw(url: str, timeout_ms: int, mode: Mode) -> dict:
+    """Text bodies only — HTML/JSON is what this endpoint exists for; a binary
+    would be mangled by `.text`. Redirects are followed because wayback 302s to
+    the canonical timestamp, and relative links resolve against the FINAL url.
+    """
+    if mode is Mode.STEALTH and not PROXY_URL:
+        raise RuntimeError(
+            "PROXY_URL must be set as http://user:pass@host:port for mode=stealth"
+        )
+    r = httpx.get(
+        url,
+        proxy=PROXY_URL if mode is Mode.STEALTH else None,
+        follow_redirects=True,
+        timeout=timeout_ms / 1000,
+        headers={"User-Agent": _RAW_UA},
+    )
+    body = r.text
+    return {
+        "status": r.status_code,
+        "url": str(r.url),
+        "body": body,
+        "size": len(body.encode("utf-8", "replace")),
+    }
+
+
+@app.post("/raw", response_model=RawResponse)
+async def raw(req: RawRequest):
+    mode = req.mode or pick_mode(req.url)
+    timeout_ms = min(req.timeout_ms, MAX_FETCH_MS)
+    try:
+        data = await _execute(
+            mode, timeout_ms, partial(_do_raw, req.url, timeout_ms, mode)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("raw failed url=%s mode=%s", req.url, mode.value)
+        raise HTTPException(status_code=502, detail=f"[{mode.value}] {e}")
+    return RawResponse(**data, mode=mode.value)
 
 
 # ── Capture through page_action: screenshot / pdf / eval ────────────

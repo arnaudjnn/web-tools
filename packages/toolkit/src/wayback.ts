@@ -1,4 +1,4 @@
-import { scraplingRenderMarkdown } from './scrapling.js';
+import { scraplingRaw, scraplingRenderMarkdown } from './scrapling.js';
 import type { SnapshotInfo } from './types.js';
 
 const CDX_API_URL = 'https://web.archive.org/cdx/search/cdx';
@@ -33,10 +33,16 @@ export async function getSnapshots(params: {
     for (const f of filter) qs.append('filter', f);
   }
 
-  const res = await fetch(`${CDX_API_URL}?${qs}`);
-  if (!res.ok) throw new Error(`Wayback CDX API error: ${res.status} ${res.statusText}`);
+  // Plain HTTP through the sidecar, never from this process: web.archive.org
+  // silently drops this project's datacenter egress (the connection hangs), so
+  // every wayback call has to leave on the residential exit — the sidecar
+  // picks that by host (STEALTH_HOSTS), so no mode is passed here. See AGENTS.md.
+  const res = await scraplingRaw({ url: `${CDX_API_URL}?${qs}` });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Wayback CDX API error: ${res.status}`);
+  }
 
-  const data: string[][] = await res.json();
+  const data: string[][] = JSON.parse(res.body);
   if (!data || data.length <= 1) return [];
 
   return data.slice(1).map((row) => {
@@ -68,13 +74,19 @@ export async function getArchivedPage(params: {
   const prefix = original ? 'id_' : '';
   const waybackUrl = `${WAYBACK_BASE_URL}/${prefix}${timestamp}/${url}`;
 
-  // The archive is an open origin — no bot gate, no browser needed. Plain
-  // fetch, then the sidecar's CPU-only markdown render (same converter as
-  // web_fetch, `raw` filter: an archived page is read in full, not pruned).
-  const res = await fetch(waybackUrl, { signal: AbortSignal.timeout(60_000) });
-  if (!res.ok) throw new Error(`Wayback fetch error: ${res.status} ${res.statusText}`);
-  const html = await res.text();
-  const content = await scraplingRenderMarkdown({ html, url: waybackUrl, filter: 'raw' });
+  // Same egress story as getSnapshots (residential exit, chosen by host).
+  // Archived pages are static HTML, so plain HTTP beats a browser nav here —
+  // and the render is local either way. Redirects matter: wayback 302s to the
+  // canonical timestamp, so links resolve against res.url, not the request.
+  const res = await scraplingRaw({ url: waybackUrl, timeoutMs: 90_000 });
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Wayback fetch error: ${res.status}`);
+  }
+  const content = await scraplingRenderMarkdown({
+    html: res.body,
+    url: res.url,
+    filter: 'raw',
+  });
 
   return { waybackUrl, content };
 }

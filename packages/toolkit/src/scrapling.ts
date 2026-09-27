@@ -6,6 +6,7 @@
 //
 //   /fetch       pages: residential egress, JS-challenge solving
 //   /markdown    HTML→markdown, pure CPU (no browser)
+//   /raw         plain HTTP GET (CDX JSON, archived pages) — no browser
 //   /screenshot  /pdf /eval through one shared browser session per mode
 //
 // Camoufox keeps the Italian residential exit and is the fallback for fetches.
@@ -39,6 +40,16 @@ export type ScraplingEvalResult = {
   mode: string;
   /** One entry per script in the request, in order. */
   results: unknown[];
+};
+
+export type ScraplingRawResult = {
+  /** HTTP status of the upstream response (the sidecar itself answered 200). */
+  status: number;
+  /** Final URL after redirects. */
+  url: string;
+  body: string;
+  size: number;
+  mode: ScraplingMode;
 };
 
 export class ScraplingError extends Error {}
@@ -164,6 +175,27 @@ export async function scraplingFetch(params: {
     network_idle: params.networkIdle ?? false,
     timeout_ms: timeoutMs,
     wait_ms: params.waitMs ?? 0,
+  }, timeoutMs);
+}
+
+/**
+ * Plain HTTP GET through the sidecar — no browser, no challenge handling.
+ *
+ * Callers use this when the egress matters more than the rendering: web.archive.org
+ * drops this project's datacenter IPs entirely, so the CDX API and archived pages
+ * have to leave on the residential exit (the sidecar picks that by host).
+ * Text bodies only; a 4xx/5xx upstream arrives as `status`, not as an error.
+ */
+export async function scraplingRaw(params: {
+  url: string;
+  mode?: ScraplingMode;
+  timeoutMs?: number;
+}): Promise<ScraplingRawResult> {
+  const timeoutMs = params.timeoutMs ?? 60_000;
+  return postScrapling<ScraplingRawResult>('/raw', {
+    url: params.url,
+    ...(params.mode ? { mode: params.mode } : {}),
+    timeout_ms: timeoutMs,
   }, timeoutMs);
 }
 

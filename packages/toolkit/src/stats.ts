@@ -79,8 +79,11 @@ const errors: Record<ToolName, number> = {
 // Tools whose upstream fetch MAY egress through a metered residential proxy
 // (Scrapling stealth mode, Camoufox always), so their payload bytes are an
 // upper bound: fast-mode Scrapling egresses on the platform's own IP and costs
-// nothing per byte, and web_search / web_archive / web_snapshots are direct
-// HTTP. Counted as upper bound rather than measured — this process cannot see
+// nothing per byte, and web_search is direct — SearXNG does its own egress.
+// web_archive / web_snapshots moved INTO this list on 2026-09-27: web.archive.org
+// silently drops this project's datacenter IPs, so both now ride the sidecar's
+// residential exit through /raw (bodies are KB–MB; the cost is real but small).
+// Counted as upper bound rather than measured — this process cannot see
 // which sidecar mode actually served a call, and over-counting a cost estimate
 // is the safe direction.
 const PROXY_BACKED: ToolName[] = [
@@ -94,6 +97,8 @@ const PROXY_BACKED: ToolName[] = [
   'web_eval',
   'web_form_submit',
   'web_spa_fetch',
+  'web_archive',
+  'web_snapshots',
 ];
 
 export function recordCall(tool: ToolName, payloadBytes: number, isError = false): void {
