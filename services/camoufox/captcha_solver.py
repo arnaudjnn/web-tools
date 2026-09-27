@@ -13,6 +13,14 @@ maps it to a structured zero-submission result. The form's own deadline
 (`remaining`, milliseconds, may raise TimeoutError) bounds every wait —
 there is no retry loop here, and a form operation stays single-attempt.
 
+When the caller passes `proxy` — the very Playwright proxy dict the form
+browser runs on — the mint leaves through that exit and the proxy task
+family is used. This is not cosmetic: a gate that compares the token's
+mint IP against the submitting IP rejects a provider-side (proxyless) mint
+("Error verifying reCAPTCHA" on a completed POST), so a form that posts
+from an exit must also mint from it. A malformed proxy fails closed before
+any HTTP rather than silently dropping back to proxyless.
+
 HTTP is stdlib urllib: the form worker is a plain thread, and the solver
 must add no dependency to the image.
 """
@@ -20,6 +28,7 @@ import json
 import os
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 # Module attrs so tests can point at a loopback provider; the key is read
 # from the environment at import (Railway env is fixed for the process life).
@@ -33,6 +42,7 @@ _HTTP_TIMEOUT_S = 10
 _POLL_MARGIN_MS = 500
 
 _TASK_TYPES = {"v3": "ReCaptchaV3TaskProxyLess", "v2": "ReCaptchaV2TaskProxyLess"}
+_PROXY_TASK_TYPES = {"v3": "ReCaptchaV3Task", "v2": "ReCaptchaV2Task"}
 
 
 class SolverError(Exception):
@@ -59,21 +69,51 @@ def _post(path, payload, budget_ms):
         return json.loads(response.read())
 
 
-def solve(*, sitekey, page_url, action=None, version="v3", remaining):
+def _proxy_payload(proxy):
+    """Playwright proxy dict → CapSolver's `proxy` string.
+
+    The dict is exactly what the form browser navigates with, so the mint and
+    the submit leave from the same exit IP. Anything unusable here (no server,
+    no port, odd scheme) means that guarantee cannot be held — fail closed
+    before any HTTP instead of quietly solving proxyless from other IPs.
+
+    CapSolver wants ONE string ("http://user:pwd@host:port" per their proxy
+    guide) — the documented object form (`proxyType`/`proxyAddress`/…) is not
+    what the `proxy` field of ReCaptcha*Task takes, and a JSON object there is
+    rejected with a parse error.
+    """
+    try:
+        parsed = urlsplit(proxy["server"])
+        if parsed.scheme not in ("http", "https", "socks4", "socks5") \
+                or not parsed.hostname or not parsed.port:
+            raise ValueError("unusable proxy")
+        user = proxy.get("username") or ""
+        password = proxy.get("password") or ""
+        auth = f"{user}:{password}@" if user else ""
+        return f"{parsed.scheme}://{auth}{parsed.hostname}:{parsed.port}"
+    except Exception:
+        raise SolverError("failed") from None
+
+
+def solve(*, sitekey, page_url, action=None, version="v3", remaining, proxy=None):
     """Mint a reCAPTCHA token. `remaining` is form_flow's remaining(): milliseconds,
-    raises TimeoutError when the form deadline passes.
+    raises TimeoutError when the form deadline passes. `proxy` is the form
+    browser's own Playwright proxy dict (see module docstring): when given,
+    the mint leaves from the form's exit and the proxy task family is used.
 
     Polling is part of ONE attempt — a provider stall is a failed form, never
     a second submission opportunity.
     """
     if not API_KEY:
         raise SolverError("unavailable")
-    task_type = _TASK_TYPES.get(version)
+    task_type = (_PROXY_TASK_TYPES if proxy is not None else _TASK_TYPES).get(version)
     if task_type is None:
         raise SolverError("failed")
     task = {"type": task_type, "websiteURL": page_url, "websiteKey": sitekey}
     if action:
         task["pageAction"] = action
+    if proxy is not None:
+        task["proxy"] = _proxy_payload(proxy)
     budget = remaining()  # outside try: the form deadline is not a solver failure
     try:
         created = _post("/createTask", {"clientKey": API_KEY, "task": task}, budget)

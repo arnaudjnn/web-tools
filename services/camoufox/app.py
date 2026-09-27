@@ -948,7 +948,11 @@ async def form_submit(req: FormSubmitRequest):
             submission_urls=req.submission_urls, captcha_field=req.captcha_field,
             inspect_only=req.inspect_only, require_captcha_token=req.require_captcha_token,
             ready_expression=req.ready_expression,
-            captcha=req.captcha.model_dump() if req.captcha else None), url=req.url, deadline=deadline)
+            captcha=req.captcha.model_dump() if req.captcha else None,
+            # Same proxy + session as _form_browser builds: the CAPTCHA mint
+            # must leave from the exit the form POSTs from, or a gate that
+            # compares mint IP to submit IP rejects the token.
+            captcha_proxy=parse_proxy(PROXY_URL, session)), url=req.url, deadline=deadline)
     except Exception as e:
         log.warning("form-submit unavailable (%s); not retried", type(e).__name__)
         raise HTTPException(status_code=502, detail="Form outcome unavailable; do not automatically retry")

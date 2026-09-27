@@ -50,16 +50,21 @@ the only way this service mints a token.
 
 `captcha: { sitekey, action?, version? }` mints the token via CapSolver AFTER
 the human interaction and BEFORE the single click, and only when the Camoufox
-service holds `CAPSOLVER_API_KEY`. Without the key the result is
-`captcha_solver_unavailable`; a provider error, stall, empty token or deadline
-is `captcha_solver_failed`; a page with no matching token textarea is
+service holds `CAPSOLVER_API_KEY`. The mint leaves through the form's OWN exit
+— the same proxy and `exit_session` the browser navigates and POSTs with —
+because a gate that compares the token's mint IP against the submit IP rejects
+a provider-side (proxyless) mint; an exit that cannot be parsed fails closed
+(`captcha_solver_failed`) instead of silently solving from other IPs. A form
+with no exit at all still solves proxyless, as before. Without the key the
+result is `captcha_solver_unavailable`; a provider error, stall, empty token or
+deadline is `captcha_solver_failed`; a page with no matching token textarea is
 `captcha_field_missing`. All three are zero submissions and no click — a solver
 outage cannot become a half-submitted form. The token is written only into the
 CAPTCHA field (`captcha_field`, default `g-recaptcha-response`) and is never
 logged, stored or returned. The solve consumes the operation's own deadline and
 is part of the one attempt; there is no solver retry. `version` picks the task
-family (default `v3`); `v2` maps to the proxyless v2 task but does not tick a
-visible checkbox — a site whose gate is the widget still needs its own handler.
+family (default `v3`); `v2` does not tick a visible checkbox — a site whose
+gate is the widget still needs its own handler.
 Pair with `require_captcha_token` so the outgoing POST is checked for presence.
 
 `ready_expression` optionally waits for a caller-supplied boolean expression in

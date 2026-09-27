@@ -110,6 +110,60 @@ class SolverProviderTests(unittest.TestCase):
               remaining=lambda: 60_000)
         self.assertEqual(created[0]["task"]["type"], "ReCaptchaV2TaskProxyLess")
 
+    def test_an_exit_switches_the_task_to_that_proxy(self):
+        created = []
+
+        def provider(path, payload):
+            if path == "/createTask":
+                created.append(payload)
+                return {"errorId": 0, "taskId": "t-1"}
+            return {"errorId": 0, "status": "ready",
+                    "solution": {"gRecaptchaResponse": "solved-token"}}
+
+        self._serve(provider)
+        solve(sitekey="site-1", page_url="https://x.test/form", action="signup",
+              remaining=lambda: 60_000,
+              proxy={"server": "http://1.2.3.4:8080", "username": "u",
+                     "password": "p_session-abc"})
+        # Mint IP must equal the form's submit IP, so the PROXY task family —
+        # never the provider's own IPs — carries the very proxy the browser
+        # navigates with (session-bearing password included, unchanged).
+        self.assertEqual(created[0]["task"]["type"], "ReCaptchaV3Task")
+        self.assertEqual(created[0]["task"]["proxy"],
+                         "http://u:p_session-abc@1.2.3.4:8080")
+
+    def test_v2_with_an_exit_uses_the_proxy_v2_task(self):
+        created = []
+
+        def provider(path, payload):
+            if path == "/createTask":
+                created.append(payload)
+                return {"errorId": 0, "taskId": "t-1"}
+            return {"errorId": 0, "status": "ready",
+                    "solution": {"gRecaptchaResponse": "tok"}}
+
+        self._serve(provider)
+        solve(sitekey="s", page_url="https://x.test", version="v2",
+              remaining=lambda: 60_000,
+              proxy={"server": "http://1.2.3.4:8080"})
+        self.assertEqual(created[0]["task"]["type"], "ReCaptchaV2Task")
+
+    def test_a_malformed_proxy_fails_closed_without_any_http(self):
+        hits = []
+
+        def provider(path, payload):
+            hits.append(path)
+            return {"errorId": 0, "taskId": "t-1"}
+
+        self._serve(provider)
+        for unusable in ({"server": "not-a-proxy"}, {"server": "http://no-port"},
+                         {}):
+            with self.assertRaises(SolverError) as caught:
+                solve(sitekey="s", page_url="https://x.test",
+                      remaining=lambda: 60_000, proxy=unusable)
+            self.assertEqual(caught.exception.kind, "failed")
+        self.assertEqual(hits, [])  # never fell back to a proxyless solve
+
     def test_missing_key_is_unavailable_without_any_http(self):
         captcha_solver.API_KEY = ""
         with self.assertRaises(SolverError) as caught:
@@ -206,6 +260,19 @@ class FormCaptchaTests(unittest.TestCase):
         self.assertEqual(result["diagnostics"]["solver_status"], "failed")
         self.page.locator.return_value.click.assert_not_called()
 
+    def test_captcha_proxy_reaches_the_solver(self):
+        seen = []
+
+        def fake_solve(**kwargs):
+            seen.append(kwargs)
+            return "solved-token"
+
+        captcha_solver.solve = fake_solve
+        result = run_form(self.context, **self.params, captcha={"sitekey": "k"},
+                          captcha_proxy={"server": "http://1.2.3.4:8080"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(seen[0]["proxy"], {"server": "http://1.2.3.4:8080"})
+
     def test_solved_token_reaches_only_the_captcha_response_field(self):
         seen = []
 
@@ -222,6 +289,7 @@ class FormCaptchaTests(unittest.TestCase):
         self.assertEqual(seen[0]["sitekey"], "k")
         self.assertEqual(seen[0]["action"], "signup")
         self.assertEqual(seen[0]["page_url"], self.page.url)
+        self.assertIsNone(seen[0]["proxy"])  # no exit given → proxyless, as before
         selectors = [call.args[0] for call in self.page.locator.call_args_list]
         self.assertIn('[name="g-recaptcha-response"]', selectors)
         injected = [call for call in self.page.locator.return_value.first.evaluate.call_args_list

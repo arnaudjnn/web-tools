@@ -3,8 +3,10 @@
 CAPTCHA solving happens only when the caller passes `captcha` AND the
 Camoufox service holds CAPSOLVER_API_KEY (see captcha_solver); a solver
 failure returns structured with zero submissions BEFORE the submit click.
-Without an explicit `captcha` the site's own handler supplies any token,
-exactly as before.
+`captcha_proxy` hands the solver the form's own exit (the same proxy dict
+the browser POSTs from) so the token's mint IP equals the submit IP — a
+gate comparing them rejects a provider-side mint. Without an explicit
+`captcha` the site's own handler supplies any token, exactly as before.
 
 The caller owns durable reservations. A lost HTTP response is UNKNOWN and must
 not be retried automatically. The context guard only prevents duplicate POSTs
@@ -79,7 +81,8 @@ def human_click(page, control, remaining) -> None:
 def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              submission_urls=None, wait_until="domcontentloaded", wait_ms=0,
              settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
-             require_captcha_token=False, ready_expression=None, captcha=None):
+             require_captcha_token=False, ready_expression=None, captcha=None,
+             captcha_proxy=None):
     targets = validate_form(url, submission_urls, success_url)
     deadline = time.monotonic() + timeout_ms / 1000
     result = {"contract_version": 2, "status": 0, "url": url, "html": "",
@@ -242,6 +245,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     action=captcha.get("action"),
                     version=captcha.get("version") or "v3",
                     remaining=remaining,
+                    proxy=captcha_proxy,
                 )
             except captcha_solver.SolverError as error:
                 diagnostics["solver_status"] = error.kind
