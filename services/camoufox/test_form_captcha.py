@@ -4,7 +4,7 @@ The provider is a loopback HTTP server — same JSON shapes as CapSolver,
 no external calls. Form-level tests reuse the Mock harness style of
 test_form_flow: the rule under test is that a solver failure returns
 structured with ZERO submissions BEFORE the click, and a solved token
-reaches only the CAPTCHA textarea.
+reaches only the CAPTCHA response field.
 """
 import json
 import threading
@@ -206,7 +206,7 @@ class FormCaptchaTests(unittest.TestCase):
         self.assertEqual(result["diagnostics"]["solver_status"], "failed")
         self.page.locator.return_value.click.assert_not_called()
 
-    def test_solved_token_reaches_only_the_captcha_textarea(self):
+    def test_solved_token_reaches_only_the_captcha_response_field(self):
         seen = []
 
         def fake_solve(**kwargs):
@@ -223,23 +223,24 @@ class FormCaptchaTests(unittest.TestCase):
         self.assertEqual(seen[0]["action"], "signup")
         self.assertEqual(seen[0]["page_url"], self.page.url)
         selectors = [call.args[0] for call in self.page.locator.call_args_list]
-        self.assertIn('textarea[name="g-recaptcha-response"]', selectors)
+        self.assertIn('[name="g-recaptcha-response"]', selectors)
         injected = [call for call in self.page.locator.return_value.first.evaluate.call_args_list
                     if len(call.args) == 2 and call.args[1] == "solved-token"]
         self.assertEqual(len(injected), 1)
-        # A custom captcha_field names both the textarea and the POST field.
+        # A custom captcha_field names both the response field and the POST
+        # field — which may be an input, not recaptcha's textarea.
         result = run_form(self.context, **self.params,
                           captcha={"sitekey": "k"}, captcha_field="0-captcha")
         self.assertTrue(result["ok"])
         selectors = [call.args[0] for call in self.page.locator.call_args_list]
-        self.assertIn('textarea[name="0-captcha"]', selectors)
+        self.assertIn('[name="0-captcha"]', selectors)
 
     def test_missing_token_field_fails_closed_without_the_click(self):
         captcha_solver.solve = Mock(return_value="solved-token")
         shared = self.page.locator.return_value
 
         def locator(selector):
-            if selector.startswith("textarea"):
+            if selector.startswith("[name="):
                 missing = Mock()
                 missing.first.evaluate.side_effect = RuntimeError("no node")
                 return missing

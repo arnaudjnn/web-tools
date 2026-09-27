@@ -244,12 +244,15 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 return result
             diagnostics["solver_status"] = "solved"
             try:
-                # The standard hidden textarea the recaptcha widget renders;
-                # set its value directly (it is not a field a person types
+                # The response field — recaptcha's hidden textarea by default,
+                # but a site binding its own element exposes an INPUT under the
+                # custom name (Atoka's 0-captcha is an input: a textarea-only
+                # selector silently found nothing and failed closed forever).
+                # Set its value directly (it is not a field a person types
                 # into — the keystroke rule governs TEXT fields). Events let
                 # page listeners see the new value; the DOM is shared with the
                 # page even where Camoufox isolates JS globals.
-                page.locator(f'textarea[name="{captcha_field or "g-recaptcha-response"}"]').first.evaluate(
+                page.locator(f'[name="{captcha_field or "g-recaptcha-response"}"]').first.evaluate(
                     "(el, token) => { el.value = token;"
                     " el.dispatchEvent(new Event('input', {bubbles: true}));"
                     " el.dispatchEvent(new Event('change', {bubbles: true})); }",
