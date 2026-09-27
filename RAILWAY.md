@@ -1,17 +1,16 @@
 # Deploy and Host Web Tools on Railway
 
-Web Tools is an open-source web toolkit that gives AI agents fourteen tools to search, fetch, screenshot, crawl, and archive the web. Available as an [MCP](https://modelcontextprotocol.io/) server, REST API, and CLI. It consumes zero LLM tokens for web access, so your models spend their budget on reasoning, not searching. The web has always been free for humans, so why should AI agents have to pay per query?
+Web Tools is an open-source web toolkit that gives AI agents fifteen tools to search, fetch, screenshot, crawl, and archive the web — available as an MCP server, REST API, and CLI. It consumes zero LLM tokens for web access, so your models spend their budget on reasoning, not searching.
 
 ## About Hosting Web Tools
 
-This template deploys a complete self-hosted web toolkit as five services on Railway: **Redis**, **SearXNG** (privacy-respecting metasearch engine), **Scrapling** (stealth fetching, rendering, screenshots, PDFs, JS execution: residential egress and JS-challenge solving), **Camoufox** (stealth Firefox on a geo-targeted residential exit, for sources that refuse anything else), and the **Web Tools Server** that ties them together. An API key is auto-generated at deploy time to secure your endpoint. Once deployed, any MCP-compatible client (Claude Code, Claude Desktop, Cursor, Windsurf, etc.) can connect over HTTP and use all fourteen tools. A REST API (`POST /api/v0/{tool_name}`) is also available for non-MCP integrations. No per-query fees, no third-party API keys, no usage limits. You own the infrastructure and the data never leaves your stack.
+This template deploys a complete self-hosted web toolkit as five services on Railway: **Redis** (cache), **SearXNG** (privacy-respecting metasearch engine), **Scrapling** (stealth fetching, rendering, screenshots, PDFs and JS execution, with residential egress and JS-challenge solving), **Camoufox** (stealth Firefox on a geo-targeted residential exit, for sources that refuse anything else), and the **Web Tools Server** that ties them together. An API key is auto-generated at deploy time to secure your endpoint. Once deployed, any MCP-compatible client (Claude Code, Claude Desktop, Cursor, Windsurf, etc.) can connect over HTTP, and the REST API (`POST /api/v0/{tool_name}`) serves non-MCP integrations. You own the infrastructure; the data never leaves your stack.
 
 ## Common Use Cases
 
 - **Replace paid search APIs**: Drop-in replacement for Firecrawl, Linkup, Tavily, Exa, or Bright Data. Get web search, page fetching, and content extraction without per-query costs
 - **Supercharge AI coding agents**: Connect Claude Code or Cursor to self-hosted web search and page fetching. Replace their built-in WebSearch and WebFetch tools so every search is private and free
 - **Web research and monitoring**: Search the web, fetch pages as clean markdown, take screenshots, generate PDFs, execute JavaScript on pages, and query the Wayback Machine for historical snapshots
-- **Build custom integrations**: Use the REST API to integrate web tools into any application or workflow
 
 ## Dependencies for Web Tools Hosting
 
@@ -20,9 +19,6 @@ This template deploys a complete self-hosted web toolkit as five services on Rai
 - **Scrapling**: Stealth fetch sidecar, and the whole render pipeline: `web_fetch`, `web_html`, `web_crawl` (as sequential markdown posts), `web_screenshot`, `web_pdf`, `web_execute_js`. Owns the rotating residential egress (for IP-reputation walls such as LinkedIn), the JS-challenge solving (for Cloudflare-style walls), and a hard per-request deadline with `busy_age_s` observable on `/healthz`. Builds from `services/scrapling/Dockerfile`; set `PROXY_URL` on it to enable `mode=stealth`
 - **Camoufox**: Stealth Firefox sidecar on a **geo-targeted** residential exit, with a fingerprint whose locale and timezone derive from the exit IP. Serves the sources the other two cannot reach at all: ones that bot-gate datacenter IPs outright, or score the exit country as part of an anti-bot sensor decision. Also owns the two capabilities nothing else here has: a binary/PDF fetch through that exit (`web_bytes`) and warmed anti-bot sensor sessions (`web_spa_fetch`). Builds from `services/camoufox/Dockerfile`; set `PROXY_URL` (geo-targeted) and keep `WORKERS=1`
 - **Web Tools Server** (Node.js 22): The HTTP server exposing MCP and REST API endpoints. Builds from the **repo-root `Dockerfile`**. Do not delete it; it is this service's build
-
-### Deployment Dependencies
-
 - [Web Tools GitHub Repository](https://github.com/arnaudjnn/web-tools)
 - [SearXNG Documentation](https://docs.searxng.org/)
 - [Model Context Protocol Specification](https://modelcontextprotocol.io/)
@@ -56,16 +52,11 @@ curl -X POST https://your-server.up.railway.app/api/v0/web_search \
   -d '{"query": "railway deployment"}'
 ```
 
-The fourteen tools available are: `web_search`, `web_fetch`, `web_html`, `web_screenshot`, `web_pdf`, `web_execute_js`, `web_crawl`, `web_bytes`, `web_eval`, `web_spa_fetch`, `web_recycle`, `web_snapshots`, `web_archive`, and `web_usage_stats`.
+The fifteen tools available are: `web_search`, `web_fetch`, `web_html`, `web_screenshot`, `web_pdf`, `web_execute_js`, `web_crawl`, `web_bytes`, `web_form_submit`, `web_eval`, `web_spa_fetch`, `web_recycle`, `web_snapshots`, `web_archive`, and `web_usage_stats`.
 
-Callers never choose a fetch engine. Which of the two browsers serves a URL,
-and whether it egresses through a residential proxy, in which country, or solves a
-JS challenge, is decided from the host inside the server. Adding a knob for it would
-put the burden of knowing which engine can reach which site on every caller. When
-the preferred engine fails, the server falls back to the other one and reports both
-causes only when both fail.
+Callers never choose a fetch engine. Which of the two browsers serves a URL, and whether it egresses through a residential proxy, in what country, or solves a JS challenge, is decided from the host inside the server. Adding a knob for it would put the burden of knowing which engine can reach which site on every caller. When the preferred engine fails, the server falls back to the other one and reports both causes only when both fail.
 
-### Railway Service Configuration
+#### Railway Service Configuration
 
 | Service | Source | Root Directory | Notes |
 | --- | --- | --- | --- |
@@ -134,9 +125,7 @@ and a missing one stops the container at boot rather than yielding `http://host:
 
 It does not hold for the third-party image, whose URL keeps a literal port:
 SearXNG hardcodes `--port 8080` in its entrypoint, so `PORT` is decoration there
-and a reference to it is a guess that fails open. (The decommissioned Crawl4AI
-service learned this the hard way: its URL read `8000` from `PORT` while the app
-listened on `11235`, which pointed every fetch at a closed port.)
+and a reference to it is a guess that fails open.
 
 Service names are case-sensitive: `${{camoufox.…}}` against a service named
 `Camoufox` resolves to an empty string rather than erroring, giving `http://:8000`.
