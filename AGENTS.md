@@ -78,10 +78,12 @@ Endpoints: `/fetch` (with `wait_ms`), `/markdown` (`raw|fit`), `/raw`,
   same build and picks up nothing. `--from-source` builds the latest **commit** —
   uncommitted changes are not included. (Why Tools is exempt from auto-deploy is
   unconfirmed; observed on the 2026-09-27 removal push.)
-- A push rebuilding Scrapling/Camoufox depends on their deploy paths: the removal
-  push rebuilt Scrapling (it touched `services/scrapling/**`) and recorded a
-  SKIPPED deployment for Camoufox. Check `railway service list` after any push
-  rather than assuming.
+- **A push rebuilds a sidecar iff it touches that sidecar's directory**
+  (observed both ways: `services/scrapling/**` changes rebuilt Scrapling,
+  `services/camoufox/**` rebuilt Camoufox, pushes touching neither left both
+  alone; Camoufox also shows SKIPPED records on non-matching pushes). A
+  docs/packages-only push should build nothing — verify with
+  `railway service list` rather than assuming.
 - `railway down -s <svc> --yes` is the off switch (status may read `Failed` after
   a graceful stop; the logs show `Stopping Container`). Never `scale=0`.
 - Public TCP proxies (`railway tcp-proxy`) are debug-only and must be deleted
