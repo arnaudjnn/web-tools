@@ -22,7 +22,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download the Camoufox Firefox build + the GeoIP database into the image
 # so the runtime container starts fast and offline.
 ARG CAMOUFOX_BROWSER=official/stable/152.0.4-beta.30
-RUN python -m camoufox set "$CAMOUFOX_BROWSER" && python -m camoufox fetch
+# `sync` MUST precede `set`: without a refreshed manifest `set` cannot resolve
+# the pin, exits 0 SILENTLY, and `fetch` then installs whatever the channel
+# calls stable — that is how .31 (not this ARG) reached an image. The second
+# `set` re-resolves the pin and is grepped for its confirmation line, and a
+# disk walk checks the pinned bytes exist: drift fails the build here instead
+# of shipping an unpinned browser.
+RUN python -m camoufox sync && \
+    python -m camoufox set "$CAMOUFOX_BROWSER" && \
+    python -m camoufox fetch && \
+    python -m camoufox set "$CAMOUFOX_BROWSER" 2>&1 | grep -F "Pinned: $CAMOUFOX_BROWSER" && \
+    PIN="$CAMOUFOX_BROWSER" python -c 'import os,os.path as p,sys; pin=os.environ["PIN"].split("/")[-1]; sys.exit(0 if any(pin in n for b in ("~/.cache/camoufox","~/.local/share/camoufox") for r,d,f in os.walk(p.expanduser(b)) for n in d+f) else "pinned "+pin+" not on disk")'
 
 COPY app.py form_flow.py form_worker.py captcha_solver.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
