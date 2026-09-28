@@ -24,12 +24,17 @@ same class of exit. Playwright's mouse/keyboard produce TRUSTED events
 interaction, not a spoof. The ~one minute this costs per form is the price of
 the score, not waste.
 """
+import logging
 import random
 import re
 import time
 from urllib.parse import urlsplit, parse_qs
 
 import captcha_solver
+
+# Phase logs are the ONLY visibility into a flow that never returns: the
+# wedge handler sees a stackless greenlet and can only say "somewhere".
+log = logging.getLogger("camoufox.forms")
 
 
 def validate_form(url, submission_urls, success_url):
@@ -163,12 +168,16 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
 
     try:
         context.route("**/*", guard)
+        log.info("form flow: new_page")
         page = context.new_page()
+        log.info("form flow: page ready")
         page.on("request", request_started)
         page.on("requestfailed", request_failed)
         page.on("pageerror", page_error)
         page.on("response", response_received)
         navigation = page.goto(url, wait_until=wait_until, timeout=remaining())
+        log.info("form flow: navigated (status=%s)",
+                 navigation.status if navigation is not None else None)
         if navigation is not None and isinstance(navigation.status, int):
             diagnostics["navigation_status"] = navigation.status
         if wait_ms:
@@ -190,6 +199,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 page.locator(selector).first.click(timeout=remaining(2000))
             except Exception:
                 pass  # Optional cookie banners; required fields below fail closed.
+        log.info("form flow: fields (%d)", len(fields))
         phase = "fields"
         for field in fields:
             # Selector only — never the value. On an exception this is the
@@ -225,6 +235,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         diagnostics["field_attempt"] = None
         if ready_expression:
             phase = "readiness"
+            log.info("form flow: readiness")
             diagnostics["ready_condition_met"] = False
             # Camoufox isolates ordinary evaluation from the page's globals.
             # The prefix opts into its main world (a JS label in other engines).
@@ -237,6 +248,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             # must return structured and zero — the click never happens, so a
             # solver outage cannot become a half-submitted form.
             phase = "captcha"
+            log.info("form flow: captcha solve")
             diagnostics["solver_attempts"] += 1
             try:
                 token = captcha_solver.solve(
@@ -272,6 +284,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 return result
             token = None  # never hold it longer than the injection
         phase = "submit"
+        log.info("form flow: submit click")
         # Exactly one click. Any CAPTCHA token was minted and injected above
         # when the caller asked for it; otherwise the site's own handler
         # supplies it. Dwell first: a submit the instant the last field fills
@@ -281,6 +294,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         diagnostics["submit_click_attempted"] = True
         page.locator(submit).click(timeout=remaining())
         phase = "outcome"
+        log.info("form flow: waiting for outcome (success_url=%s)", bool(success_url))
         try:
             if success_url:
                 page.wait_for_url(re.compile(success_url), timeout=remaining(settle_ms))
@@ -289,6 +303,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         except Exception:
             pass  # Rejections stay on the form. Capture them, don't resubmit.
         result["url"] = page.url
+        log.info("form flow: capturing content")
         result["html"] = page.content()
         result["ok"] = bool(result["form_submissions"] == 1 and
                             200 <= result["status"] < 400 and success_url and
