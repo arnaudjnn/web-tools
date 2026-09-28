@@ -7,7 +7,9 @@ uncertain form is never replayed. Queue and launch time consume the same
 deadline as page interactions.
 """
 import asyncio
+import faulthandler
 import logging
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -116,5 +118,15 @@ class FormWorker:
             # UNAVAILABLE — no response means an unknown outcome, never
             # permission to resubmit.
             release_once()
-            log.warning("form job wedged past deadline + grace; admission released, outcome unknown")
+            # Where the orphan's thread is BLOCKED is the only way to see an
+            # unbounded call inside launch/teardown: nothing else logs before
+            # the job returns, and it never does. Stacks are safe here — this
+            # runs on the event loop, never inside the wedged thread itself.
+            # faulthandler needs a real descriptor, hence the temp file.
+            with tempfile.TemporaryFile("w+") as handle:
+                faulthandler.dump_traceback(handle, all_threads=True)
+                handle.seek(0)
+                stacks = handle.read()
+            log.warning("form job wedged past deadline + grace; admission released, outcome unknown\n%s",
+                        stacks.strip())
             raise TimeoutError("form outcome unavailable") from None
