@@ -10,6 +10,7 @@ import asyncio
 import faulthandler
 import logging
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -39,13 +40,16 @@ def run_isolated_form(browser_factory, *, deadline, **params):
         if time.monotonic() >= deadline:
             return not_started(params["url"], "deadline_before_browser")
         try:
+            log.info("form phase: launching browser (headed=%s)", params.get("headed"))
             manager = browser_factory()
             browser = manager.__enter__()
+            log.info("form phase: browser entered")
         except Exception as error:
             log.warning("form browser launch failed (%s); no submission", type(error).__name__)
             return not_started(params["url"], "browser_launch_failed")
         try:
             context = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
+            log.info("form phase: context ready")
         except Exception as error:
             log.warning("form context failed (%s); no submission", type(error).__name__)
             return not_started(params["url"], "browser_context_failed")
@@ -54,6 +58,7 @@ def run_isolated_form(browser_factory, *, deadline, **params):
             return not_started(params["url"], "deadline_before_navigation")
         # Do not catch unexpected exceptions here as "zero submissions": once
         # page execution starts, missing evidence means an unknown outcome.
+        log.info("form phase: entering run_form (budget=%sms)", budget)
         return run_form(context, timeout_ms=budget, **params)
     finally:
         for close in ([context.close] if context is not None else []) + (
@@ -122,11 +127,15 @@ class FormWorker:
             # unbounded call inside launch/teardown: nothing else logs before
             # the job returns, and it never does. Stacks are safe here — this
             # runs on the event loop, never inside the wedged thread itself.
-            # faulthandler needs a real descriptor, hence the temp file.
+            # faulthandler needs a real descriptor, hence the temp file. Thread
+            # NAMES accompany the stacks: the form worker's absence or the
+            # render worker's idleness reads identically without them.
             with tempfile.TemporaryFile("w+") as handle:
                 faulthandler.dump_traceback(handle, all_threads=True)
                 handle.seek(0)
                 stacks = handle.read()
-            log.warning("form job wedged past deadline + grace; admission released, outcome unknown\n%s",
-                        stacks.strip())
+            threads = [(t.name, hex(t.ident)) for t in threading.enumerate()]
+            log.warning("form job wedged past deadline + grace; admission released, outcome unknown"
+                        " | future done=%s threads=%s\n%s",
+                        future.done(), threads, stacks.strip())
             raise TimeoutError("form outcome unavailable") from None
