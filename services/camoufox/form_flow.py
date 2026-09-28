@@ -181,6 +181,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         if navigation is not None and isinstance(navigation.status, int):
             diagnostics["navigation_status"] = navigation.status
         if wait_ms:
+            log.info("form flow: wait_ms=%s", wait_ms)
             page.wait_for_timeout(min(wait_ms, remaining()))
         if inspect_only:
             result["url"] = page.url
@@ -191,9 +192,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # as automation no matter how human the typing itself is.
         page.mouse.move(random.randint(200, 1200), random.randint(150, 700),
                         steps=random.randint(8, 20))
+        log.info("form flow: pointer moved")
         page.wait_for_timeout(min(random.randint(700, 2200), remaining()))
         page.mouse.wheel(0, random.randint(200, 600))
+        log.info("form flow: scrolled")
         page.wait_for_timeout(min(random.randint(400, 1200), remaining()))
+        log.info("form flow: dwell done; dismiss=%s", dismiss)
         for selector in dismiss or []:
             try:
                 page.locator(selector).first.click(timeout=remaining(2000))
