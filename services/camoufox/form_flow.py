@@ -36,6 +36,34 @@ import captcha_solver
 # wedge handler sees a stackless greenlet and can only say "somewhere".
 log = logging.getLogger("camoufox.forms")
 
+# Live-step marker, polled by the admission worker from the event loop. Exactly
+# ONE pre-POST call is unbounded: the humanized mouse.move below — playwright
+# gives input dispatch no timeout and camoufox's browser-side trajectory
+# animation has been observed to never return (every logged wedge died there).
+# Everything else is bounded: locator/fill/click by playwright's default
+# timeout, goto by its own, the outcome wait by remaining(). A park here means
+# no field was touched and no POST left the machine — retryable, unlike every
+# other stall.
+_LIVE = {"name": "", "at": 0.0}
+PRE_SUBMIT_STUCK_S = 8.0
+
+
+def _mark(name):
+    _LIVE["name"] = name
+    _LIVE["at"] = time.monotonic()
+
+
+def reset_live_step():
+    _LIVE["name"] = ""
+    _LIVE["at"] = 0.0
+
+
+def pre_submit_hang_step():
+    """The step name if the flow parked on the unbounded pre-POST call."""
+    if _LIVE["name"] == "moving pointer" and time.monotonic() - _LIVE["at"] > PRE_SUBMIT_STUCK_S:
+        return _LIVE["name"]
+    return None
+
 
 def validate_form(url, submission_urls, success_url):
     origin = urlsplit(url)
@@ -168,6 +196,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
 
     try:
         context.route("**/*", guard)
+        _mark("new page")
         log.info("form flow: new_page")
         page = context.new_page()
         log.info("form flow: page ready")
@@ -204,8 +233,10 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # ops (clicks) have never wedged in our logs.
         move_started = time.monotonic()
         move_steps = 1
+        _mark("moving pointer")
         page.mouse.move(random.randint(200, 1200), random.randint(150, 700),
                         steps=move_steps)
+        _mark("pointer moved")
         log.info("form flow: pointer moved (steps=%s in %.1fs)",
                  move_steps, time.monotonic() - move_started)
         page.wait_for_timeout(min(random.randint(700, 2200), remaining()))

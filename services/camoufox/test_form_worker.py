@@ -5,7 +5,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from form_worker import FormWorker, run_isolated_form
+from form_worker import FormRetryable, FormWorker, run_isolated_form
 
 
 class IsolatedFormTests(unittest.TestCase):
@@ -151,6 +151,34 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(0.05)  # let call_later fire
                 finally:
                     stuck.set()
+        self.assertEqual(fired, [1])
+
+    async def test_pre_submit_park_is_retryable_and_sheds(self):
+        # A park on the unbounded pre-POST move (form_flow's marker) must
+        # surface as FormRetryable within one poll — long before deadline +
+        # grace could fold it into the unknown-outcome 502 — and still shed,
+        # because the orphan's browser can never be closed either.
+        import form_flow
+        worker = FormWorker()
+        stuck = threading.Event()
+
+        def parked():
+            form_flow._mark("moving pointer")
+            form_flow._LIVE["at"] = time.monotonic() - 99  # parked long ago
+            stuck.wait(5)
+            return "late"
+
+        fired = []
+        try:
+            with patch.dict(os.environ, {"FORM_WEDGE_EXIT_S": "0.01"}), \
+                 patch("form_worker.os._exit", lambda code: fired.append(code)), \
+                 patch("form_worker.TEARDOWN_GRACE_S", 30):
+                with self.assertRaises(FormRetryable):
+                    await worker.run(parked, url="https://example.test",
+                                     deadline=time.monotonic() + 30)
+            await asyncio.sleep(0.05)  # let the shed's call_later fire
+        finally:
+            stuck.set()
         self.assertEqual(fired, [1])
 
 

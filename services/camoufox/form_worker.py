@@ -3,8 +3,10 @@
 Each admitted operation gets a fresh thread and browser. A cancelled caller does
 not free admission while its worker is still running; a worker wedged past its
 deadline + teardown grace frees admission anyway and fails as unavailable. An
-uncertain form is never replayed. Queue and launch time consume the same
-deadline as page interactions.
+uncertain form is never replayed — except a FormRetryable: the flow parked on
+the one unbounded pre-POST call, so no POST left this machine and the caller
+may replay the same identity. Queue and launch time consume the same deadline
+as page interactions.
 """
 import asyncio
 import faulthandler
@@ -15,9 +17,14 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import form_flow
 from form_flow import run_form, validate_form
 
 log = logging.getLogger("camoufox.forms")
+
+
+class FormRetryable(Exception):
+    """Parked before the submit click: zero POSTs, identity untouched."""
 
 # Beyond the operation's own deadline this is teardown budget: launch can start
 # near the deadline and close/join must finish after it. Past that the job is
@@ -39,6 +46,18 @@ def _shed_delay_s() -> float:
         return float(os.getenv("FORM_WEDGE_EXIT_S", "0"))
     except ValueError:
         return 0.0
+
+
+def _schedule_shed(reason: str) -> None:
+    """Hard-exit shortly after the response flushes (FORM_WEDGE_EXIT_S, 0 = never).
+
+    The wedged thread's browser/context can never be closed — the handle is
+    inside the stuck greenlet — so the leak is only ever shed with the process.
+    """
+    delay = _shed_delay_s()
+    if delay > 0:
+        log.warning("shedding form worker in %.1fs (FORM_WEDGE_EXIT_S) — %s", delay, reason)
+        asyncio.get_running_loop().call_later(delay, os._exit, 1)
 
 
 def not_started(url, error):
@@ -109,6 +128,8 @@ class FormWorker:
             # A failed Playwright launch can leave its sync thread tainted.
             # Never reuse that thread, even if closing the manager failed.
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="camoufox-form")
+            # A previous job's marker must never age into this one's poll.
+            form_flow.reset_live_step()
             future = asyncio.get_running_loop().run_in_executor(executor, job)
         except BaseException:
             if executor is not None:
@@ -124,41 +145,53 @@ class FormWorker:
                 task.exception()
 
         future.add_done_callback(completed)
-        try:
-            return await asyncio.wait_for(
-                asyncio.shield(future),
-                max(0.0, deadline - time.monotonic()) + TEARDOWN_GRACE_S)
-        except asyncio.TimeoutError:
-            if future.done():
-                # The job itself finished with TimeoutError (form deadline) —
-                # a normal outcome, not a wedge. Preserve its exception.
-                return future.result()
-            # The job outlived deadline + teardown grace: wedged, not slow.
-            # Give the gate back (the orphan may still finish later;
-            # release_once keeps that from releasing twice) and fail as
-            # UNAVAILABLE — no response means an unknown outcome, never
-            # permission to resubmit.
-            release_once()
-            # Where the orphan's thread is BLOCKED is the only way to see an
-            # unbounded call inside launch/teardown: nothing else logs before
-            # the job returns, and it never does. Stacks are safe here — this
-            # runs on the event loop, never inside the wedged thread itself.
-            # faulthandler needs a real descriptor, hence the temp file. Thread
-            # NAMES accompany the stacks: the form worker's absence or the
-            # render worker's idleness reads identically without them.
-            with tempfile.TemporaryFile("w+") as handle:
-                faulthandler.dump_traceback(handle, all_threads=True)
-                handle.seek(0)
-                stacks = handle.read()
-            threads = [(t.name, hex(t.ident)) for t in threading.enumerate()]
-            log.warning("form job wedged past deadline + grace; admission released, outcome unknown"
-                        " | future done=%s threads=%s\n%s",
-                        future.done(), threads, stacks.strip())
-            delay = _shed_delay_s()
-            if delay > 0:
-                # After the 502 has had time to flush: the wedged thread can
-                # never run its finally, so its browser/context leak with it.
-                log.warning("shedding wedged form worker in %.1fs (FORM_WEDGE_EXIT_S)"
-                            " — leaked browser cannot be closed", delay)
-                asyncio.get_running_loop().call_later(delay, os._exit, 1)
-            raise TimeoutError("form outcome unavailable") from None
+        # Poll instead of one long wait: a pre-POST park (the unbounded
+        # humanized mouse.move) must surface as FormRetryable seconds after it
+        # happens — long before deadline + grace would fold it into the
+        # generic unknown outcome.
+        hard_end = deadline + TEARDOWN_GRACE_S
+        while True:
+            left = hard_end - time.monotonic()
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(future), max(0.05, min(0.5, left)))
+            except asyncio.TimeoutError:
+                if future.done():
+                    # The job itself finished with TimeoutError (form deadline)
+                    # — a normal outcome, not a wedge. Preserve its exception.
+                    return future.result()
+                stuck = form_flow.pre_submit_hang_step()
+                if stuck is not None:
+                    # Parked before the submit click: no field touched, no POST
+                    # left this machine, so the caller may replay the same
+                    # identity once the shed has recycled the leak.
+                    release_once()
+                    log.warning("form job parked pre-submit at '%s' — zero POSTs,"
+                                " retryable | future done=%s", stuck, future.done())
+                    _schedule_shed("parked thread's browser cannot be closed")
+                    raise FormRetryable(stuck) from None
+                if time.monotonic() < hard_end:
+                    continue
+                # The job outlived deadline + teardown grace: wedged, not slow.
+                # Give the gate back (the orphan may still finish later;
+                # release_once keeps that from releasing twice) and fail as
+                # UNAVAILABLE — no response means an unknown outcome, never
+                # permission to resubmit.
+                release_once()
+                # Where the orphan's thread is BLOCKED is the only way to see an
+                # unbounded call inside launch/teardown: nothing else logs before
+                # the job returns, and it never does. Stacks are safe here — this
+                # runs on the event loop, never inside the wedged thread itself.
+                # faulthandler needs a real descriptor, hence the temp file. Thread
+                # NAMES accompany the stacks: the form worker's absence or the
+                # render worker's idleness reads identically without them.
+                with tempfile.TemporaryFile("w+") as handle:
+                    faulthandler.dump_traceback(handle, all_threads=True)
+                    handle.seek(0)
+                    stacks = handle.read()
+                threads = [(t.name, hex(t.ident)) for t in threading.enumerate()]
+                log.warning("form job wedged past deadline + grace; admission released, outcome unknown"
+                            " | future done=%s threads=%s\n%s",
+                            future.done(), threads, stacks.strip())
+                _schedule_shed("leaked browser cannot be closed")
+                raise TimeoutError("form outcome unavailable") from None

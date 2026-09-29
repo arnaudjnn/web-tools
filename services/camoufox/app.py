@@ -78,7 +78,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from camoufox.sync_api import Camoufox
-from form_worker import FormWorker, run_isolated_form
+from form_worker import FormRetryable, FormWorker, run_isolated_form
 
 
 PROXY_URL = os.environ.get("PROXY_URL", "")
@@ -953,6 +953,17 @@ async def form_submit(req: FormSubmitRequest):
             # must leave from the exit the form POSTs from, or a gate that
             # compares mint IP to submit IP rejects the token.
             captcha_proxy=parse_proxy(PROXY_URL, session)), url=req.url, deadline=deadline)
+    except FormRetryable as parked:
+        # Parked on the one unbounded pre-POST call (the marker says where):
+        # no field touched, no POST left this machine — the identity is
+        # untouched and the client may replay after the shed recycles the
+        # leaked browser. Never merge this into the 502 below: a 502 forbids
+        # resubmission, this one demands it.
+        log.warning("form-submit retryable: parked pre-submit at '%s'", parked)
+        raise HTTPException(status_code=503, detail={
+            "message": "Form never submitted (stuck pre-POST); safe to retry",
+            "retryable": True,
+        })
     except Exception as e:
         log.warning("form-submit unavailable (%s); not retried", type(e).__name__)
         raise HTTPException(status_code=502, detail="Form outcome unavailable; do not automatically retry")
