@@ -25,8 +25,10 @@ Launch and queue time consume the request deadline. A launch/context failure or
 pre-navigation deadline returns a structured result with **zero submissions**;
 unexpected failures after execution begins remain unknown and are never retried.
 One structured failure is explicit about being pre-POST: if the flow parks on
-the unbounded humanized `mouse.move` (playwright gives input dispatch no
-timeout), the worker answers **503** with `detail = {message, retryable: true}`
+the unbounded arrival `mouse.wheel` (playwright gives input dispatch no
+timeout — the full-viewport `mouse.move` that used to open the arrival is
+retired: it was the input call that kept wedging), the worker answers **503**
+with `detail = {message, retryable: true}`
 within seconds — no field was touched, no POST left the machine, so that
 attempt's identity may be replayed. The leaked browser is shed with the
 process (`FORM_WEDGE_EXIT_S`, 3 in the image), so the retry lands on a

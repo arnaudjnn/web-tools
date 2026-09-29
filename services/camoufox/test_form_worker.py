@@ -154,16 +154,17 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fired, [1])
 
     async def test_pre_submit_park_is_retryable_and_sheds(self):
-        # A park on the unbounded pre-POST move (form_flow's marker) must
-        # surface as FormRetryable within one poll — long before deadline +
-        # grace could fold it into the unknown-outcome 502 — and still shed,
-        # because the orphan's browser can never be closed either.
+        # A park on the unbounded pre-POST input dispatch (form_flow's
+        # marker — the arrival wheel) must surface as FormRetryable within
+        # one poll — long before deadline + grace could fold it into the
+        # unknown-outcome 502 — and still shed, because the orphan's browser
+        # can never be closed either.
         import form_flow
         worker = FormWorker()
         stuck = threading.Event()
 
         def parked():
-            form_flow._mark("moving pointer")
+            form_flow._mark(form_flow.PRE_SUBMIT_STEP)
             form_flow._LIVE["at"] = time.monotonic() - 99  # parked long ago
             stuck.wait(5)
             return "late"

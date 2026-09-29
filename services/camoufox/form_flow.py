@@ -37,15 +37,17 @@ import captcha_solver
 log = logging.getLogger("camoufox.forms")
 
 # Live-step marker, polled by the admission worker from the event loop. Exactly
-# ONE pre-POST call is unbounded: the humanized mouse.move below — playwright
-# gives input dispatch no timeout and camoufox's browser-side trajectory
-# animation has been observed to never return (every logged wedge died there).
-# Everything else is bounded: locator/fill/click by playwright's default
-# timeout, goto by its own, the outcome wait by remaining(). A park here means
-# no field was touched and no POST left the machine — retryable, unlike every
-# other stall.
+# ONE pre-POST call is unbounded: the arrival wheel below — playwright gives
+# input dispatch no timeout and camoufox's browser-side animation has been
+# observed to never return (every logged wedge died on an input dispatch:
+# first the full-viewport mouse.move, retired 2026-09-29 after 2 parks in 6
+# attempts, now the wheel, which has never wedged). Everything else is
+# bounded: locator/fill/click by playwright's default timeout, goto by its
+# own, the outcome wait by remaining(). A park here means no field was
+# touched and no POST left the machine — retryable, unlike every other stall.
 _LIVE = {"name": "", "at": 0.0}
 PRE_SUBMIT_STUCK_S = 8.0
+PRE_SUBMIT_STEP = "arrival scroll"
 
 
 def _mark(name):
@@ -60,7 +62,7 @@ def reset_live_step():
 
 def pre_submit_hang_step():
     """The step name if the flow parked on the unbounded pre-POST call."""
-    if _LIVE["name"] == "moving pointer" and time.monotonic() - _LIVE["at"] > PRE_SUBMIT_STUCK_S:
+    if _LIVE["name"] == PRE_SUBMIT_STEP and time.monotonic() - _LIVE["at"] > PRE_SUBMIT_STUCK_S:
         return _LIVE["name"]
     return None
 
@@ -215,35 +217,34 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         if wait_ms:
             log.info("form flow: wait_ms=%s", wait_ms)
             page.wait_for_timeout(min(wait_ms, remaining()))
-        # Deliberately noisy: wedged runs previously died between this marker
-        # and "pointer moved", and nothing could say which of the two calls
-        # (client timer vs browser-side move ack) never returned.
+        # Deliberately noisy: every phase logs, because a flow that never
+        # returns leaves nothing else — the wedge handler sees a stackless
+        # thread and can only read the last marker (the earlier wedges died
+        # between this line and a later marker and could not say which call
+        # never returned).
         log.info("form flow: wait done")
         if inspect_only:
             result["url"] = page.url
             # No page contents/hidden tokens in an inspection response.
             return result
-        # Arrive like a person before touching anything: look around, scroll,
+        # Arrive like a person before touching anything: settle, scroll,
         # dwell. A submit seconds after navigation with no prior input reads
         # as automation no matter how human the typing itself is.
         #
-        # Exactly ONE dispatched event: the form browser launches with
-        # humanize=True (app.py), so camoufox re-animates EVERY mouse event
-        # browser-side (~0.75s each — measured: steps=11 took 8.7s) and each
-        # animation is a chance to never return (the wedge: wait done logged,
-        # pointer moved never). Playwright's multi-step chain is redundant
-        # against camoufox's own full-path trajectory generator — single-event
-        # ops (clicks) have never wedged in our logs.
-        move_started = time.monotonic()
-        move_steps = 1
-        _mark("moving pointer")
-        page.mouse.move(random.randint(200, 1200), random.randint(150, 700),
-                        steps=move_steps)
-        _mark("pointer moved")
-        log.info("form flow: pointer moved (steps=%s in %.1fs)",
-                 move_steps, time.monotonic() - move_started)
+        # The arrival used to open with a full-viewport mouse.move — and
+        # input dispatch is the one call playwright gives no timeout, so
+        # when camoufox's browser-side trajectory animation never returned
+        # the flow parked there (every logged wedge died between "moving
+        # pointer" and "pointer moved"; 2026-09-29: 2 parks in 6 attempts).
+        # The teleport is retired: it was the least human gesture anyway
+        # (a jump from offscreen over the whole viewport). The arrival is
+        # now the wheel — an input dispatch that has never wedged across
+        # every logged arrival — still marked, so a park on it keeps the
+        # same 503-retryable contract: nothing touched, nothing POSTed.
         page.wait_for_timeout(min(random.randint(700, 2200), remaining()))
+        _mark(PRE_SUBMIT_STEP)
         page.mouse.wheel(0, random.randint(200, 600))
+        reset_live_step()
         log.info("form flow: scrolled")
         page.wait_for_timeout(min(random.randint(400, 1200), remaining()))
         log.info("form flow: dwell done; dismiss=%s", dismiss)

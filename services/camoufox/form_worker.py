@@ -152,9 +152,9 @@ class FormWorker:
 
         future.add_done_callback(completed)
         # Poll instead of one long wait: a pre-POST park (the unbounded
-        # humanized mouse.move) must surface as FormRetryable seconds after it
-        # happens — long before deadline + grace would fold it into the
-        # generic unknown outcome.
+        # arrival wheel — playwright gives input dispatch no timeout) must
+        # surface as FormRetryable seconds after it happens — long before
+        # deadline + grace would fold it into the generic unknown outcome.
         hard_end = deadline + TEARDOWN_GRACE_S
         while True:
             left = hard_end - time.monotonic()
