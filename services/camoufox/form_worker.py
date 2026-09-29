@@ -9,6 +9,7 @@ deadline as page interactions.
 import asyncio
 import faulthandler
 import logging
+import os
 import tempfile
 import threading
 import time
@@ -24,6 +25,20 @@ log = logging.getLogger("camoufox.forms")
 # form thread held the admission gate forever while no browser existed, so
 # every later form only ever saw queue_deadline_exceeded).
 TEARDOWN_GRACE_S = 45
+
+# Seconds after a wedge to hard-exit the process (0 = keep serving). A wedged
+# worker holds its Camoufox manager inside a stuck greenlet: nobody can close
+# it, so the firefox process leaks — threads and FDs accumulate until LAUNCHES
+# start failing on the same replica (2026-09-28: 9 wedges alongside 65
+# browser_launch_failed in three days, each redeploy resetting the count). A
+# restart is the only reliable shed; callers already treat a dropped connection
+# exactly like the 502 (outcome unknown, never resubmitted). Dockerfile sets 3;
+# tests leave it unset so a wedge can never kill the suite.
+def _shed_delay_s() -> float:
+    try:
+        return float(os.getenv("FORM_WEDGE_EXIT_S", "0"))
+    except ValueError:
+        return 0.0
 
 
 def not_started(url, error):
@@ -45,7 +60,8 @@ def run_isolated_form(browser_factory, *, deadline, **params):
             browser = manager.__enter__()
             log.info("form phase: browser entered")
         except Exception as error:
-            log.warning("form browser launch failed (%s); no submission", type(error).__name__)
+            log.warning("form browser launch failed (%s: %s); no submission",
+                        type(error).__name__, str(error)[:300])
             return not_started(params["url"], "browser_launch_failed")
         try:
             context = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
@@ -138,4 +154,11 @@ class FormWorker:
             log.warning("form job wedged past deadline + grace; admission released, outcome unknown"
                         " | future done=%s threads=%s\n%s",
                         future.done(), threads, stacks.strip())
+            delay = _shed_delay_s()
+            if delay > 0:
+                # After the 502 has had time to flush: the wedged thread can
+                # never run its finally, so its browser/context leak with it.
+                log.warning("shedding wedged form worker in %.1fs (FORM_WEDGE_EXIT_S)"
+                            " — leaked browser cannot be closed", delay)
+                asyncio.get_running_loop().call_later(delay, os._exit, 1)
             raise TimeoutError("form outcome unavailable") from None

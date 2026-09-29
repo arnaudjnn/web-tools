@@ -320,4 +320,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # Never expose field values, page exception text or proxy credentials.
         diagnostics["phase"] = phase
         result["error"] = result["error"] or ("outcome_unknown" if result["form_submissions"] else f"{phase}_failed")
+    # One line per form, whatever happened: field_attempt names the SELECTOR
+    # in flight when a phase raised (fields_failed alone says where nothing),
+    # and the path shows what the submit actually landed on. Selector + path
+    # only — never a value.
+    log.info("form flow: done ok=%s error=%s field=%s subs=%s status=%s path=%s",
+             result.get("ok"), result.get("error"), diagnostics.get("field_attempt"),
+             result.get("form_submissions"), result.get("status"),
+             urlsplit(result.get("url") or "").path)
     return result

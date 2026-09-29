@@ -53,6 +53,10 @@ RUN chmod +x entrypoint.sh
 # sites cannot see it (it is OS isolation, not a fingerprint surface), while
 # a fleet that cannot launch is down for every consumer at once.
 ENV MOZ_DISABLE_CONTENT_SANDBOX=1
+# A form wedged past deadline + grace leaks its browser forever (the stuck
+# thread owns the handle); restart the container 3s after the 502 flushes so
+# launches never decay. 0 disables. See form_worker._shed_delay_s.
+ENV FORM_WEDGE_EXIT_S=3
 ENV WORKERS=1
 EXPOSE 8000
 # Bind 0.0.0.0 (Railway's edge talks IPv4; an IPv6-only bind 502s).

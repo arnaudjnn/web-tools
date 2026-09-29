@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 import time
 import unittest
@@ -128,6 +129,29 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual(await worker.run(lambda: "after", url="https://example.test",
                                           deadline=time.monotonic() + 5), "after")
+
+    async def test_wedge_schedules_shed_when_configured(self):
+        # FORM_WEDGE_EXIT_S > 0 must schedule os._exit(1) shortly after the
+        # wedge is reported — but only then: the suite leaves it unset so a
+        # wedge can never take the test process down.
+        worker = FormWorker()
+        stuck = threading.Event()
+        def wedged():
+            stuck.wait(5)
+            return "late"
+        loop = asyncio.get_running_loop()
+        fired = []
+        with patch.dict(os.environ, {"FORM_WEDGE_EXIT_S": "0.01"}):
+            with patch("form_worker.os._exit", lambda code: fired.append(code)):
+                try:
+                    with patch("form_worker.TEARDOWN_GRACE_S", 0.05):
+                        with self.assertRaises(TimeoutError):
+                            await worker.run(wedged, url="https://example.test",
+                                             deadline=time.monotonic() + 0.01)
+                    await asyncio.sleep(0.05)  # let call_later fire
+                finally:
+                    stuck.set()
+        self.assertEqual(fired, [1])
 
 
 if __name__ == "__main__":
