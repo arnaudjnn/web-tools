@@ -37,6 +37,16 @@ launch fails in every mode until the container is moved) is shed the same way:
 process after `LAUNCH_FAIL_SHED_S` seconds of grace (`3`/`10` in the image;
 0 disables), and a success in between retracts the pending exit.
 
+Headed forms additionally need `DISPLAY :99`, and a Railway restart reuses the
+container's writable layer: the dead X server's `/tmp/.X99-lock` and
+`/tmp/.X11-unix/X99` made the next Xvfb refuse to start ("Server is already
+active for display 99") and every headed launch fail from then on — while
+headless renders kept answering and hid it (measured 2026-09-29: 6/6 form
+launches failed across several restarts; only a redeploy, which recreates the
+filesystem, cured it). `entrypoint.sh` probes the display every few seconds,
+clears the stale files when nothing answers and starts Xvfb again — covering
+both the restart and an Xvfb killed mid-life (OOM).
+
 The Docker image pins the browser build as well as the Python wrapper. CI runs
 the real Linux image against loopback form fixtures, including five consecutive
 isolated browser lifetimes. These are runtime tests, not proof of CAPTCHA acceptance.
