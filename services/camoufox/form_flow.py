@@ -128,9 +128,10 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                  "ready_condition_met": None, "solver_attempts": 0,
                  "solver_status": None, "field_attempt": None, "phase": None,
                  "failure_class": None, "dismiss_clicked": [],
-                 "banner_visible": None}
+                 "banner_visible": None, "field_state": None}
     result["diagnostics"] = diagnostics
     page = None
+    control = None
     phase = "navigation"
 
     def remaining(cap=None):
@@ -284,6 +285,20 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             elif action == "type":
                 human_click(page, control, remaining)
                 value = field.get("value") or ""
+                # The human click aims by geometry. When focus never landed
+                # (an overlay swallowed the click, the rect was stale), the
+                # keystrokes go to whatever already had focus — measured
+                # 2026-09-29 as a recurring first-field fields_failed. One
+                # actionability-aware retry: it waits out an overlay instead
+                # of clicking through it. is_focused is advisory (a raise
+                # reads as not focused); the read-back below still fails loud
+                # if the text did not land either way.
+                try:
+                    focused = bool(control.is_focused())
+                except Exception:
+                    focused = False
+                if not focused:
+                    control.click(timeout=remaining())
                 page.keyboard.type(value, delay=random.randint(45, 120))
                 page.wait_for_timeout(min(random.randint(120, 420), remaining()))
                 # Typed into the void is the silent killer (empty fields trip
@@ -377,18 +392,27 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # Never expose field values, page exception text or proxy credentials.
         # The CLASS name is not text — it separates a click that timed out from
         # the typed-text check failing (both surface as fields_failed) without
-        # carrying anything the exception's message might.
+        # carrying anything the exception's message might. The field's own
+        # state at failure is booleans only.
         diagnostics["failure_class"] = type(error).__name__
         diagnostics["phase"] = phase
+        if phase == "fields" and control is not None:
+            try:
+                diagnostics["field_state"] = {"visible": bool(control.is_visible()),
+                                              "enabled": bool(control.is_enabled())}
+            except Exception:
+                diagnostics["field_state"] = None
         result["error"] = result["error"] or ("outcome_unknown" if result["form_submissions"] else f"{phase}_failed")
     # One line per form, whatever happened: field_attempt names the SELECTOR
     # in flight when a phase raised (fields_failed alone says where nothing),
-    # failure_class the kind of exception behind it, and the path shows what
-    # the submit actually landed on. Selector + class + path only — never a
+    # failure_class the kind of exception behind it, banner the cookie-banner
+    # state before the fields phase, and the path shows what the submit
+    # actually landed on. Selector + class + booleans + path only — never a
     # value or an exception message.
-    log.info("form flow: done ok=%s error=%s field=%s cls=%s subs=%s status=%s path=%s",
+    log.info("form flow: done ok=%s error=%s field=%s cls=%s subs=%s status=%s path=%s banner=%s fstate=%s",
              result.get("ok"), result.get("error"), diagnostics.get("field_attempt"),
              diagnostics.get("failure_class"),
              result.get("form_submissions"), result.get("status"),
-             urlsplit(result.get("url") or "").path)
+             urlsplit(result.get("url") or "").path,
+             diagnostics.get("banner_visible"), diagnostics.get("field_state"))
     return result

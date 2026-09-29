@@ -194,6 +194,22 @@ class FormTests(unittest.TestCase):
         # ValueError is the typed-text check; a click that never got to type
         # reports TimeoutError instead — the two fields_failed causes.
         self.assertEqual(result["diagnostics"]["failure_class"], "ValueError")
+        self.assertEqual(set(result["diagnostics"]["field_state"]), {"visible", "enabled"})
+
+    def test_type_retries_the_click_when_focus_never_landed(self):
+        # Focus missing after the geometric click = the keystrokes would land
+        # elsewhere; one actionability-aware click before typing.
+        self.page.locator.return_value.is_focused.return_value = False
+        result = run_form(self.context, **self.params)
+        self.assertTrue(result["ok"])
+        # the fallback click (focus miss) + the single submit click
+        self.assertEqual(self.page.locator.return_value.click.call_count, 2)
+
+    def test_type_does_not_double_click_when_focus_landed(self):
+        self.page.locator.return_value.is_focused.return_value = True
+        result = run_form(self.context, **self.params)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.page.locator.return_value.click.call_count, 1)
 
     def test_dismiss_clicks_record_and_banner_state(self):
         params = dict(self.params, dismiss=["button.accept-cookies"])
