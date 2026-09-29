@@ -194,8 +194,16 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # Arrive like a person before touching anything: look around, scroll,
         # dwell. A submit seconds after navigation with no prior input reads
         # as automation no matter how human the typing itself is.
+        #
+        # Exactly ONE dispatched event: the form browser launches with
+        # humanize=True (app.py), so camoufox re-animates EVERY mouse event
+        # browser-side (~0.75s each — measured: steps=11 took 8.7s) and each
+        # animation is a chance to never return (the wedge: wait done logged,
+        # pointer moved never). Playwright's multi-step chain is redundant
+        # against camoufox's own full-path trajectory generator — single-event
+        # ops (clicks) have never wedged in our logs.
         move_started = time.monotonic()
-        move_steps = random.randint(8, 20)
+        move_steps = 1
         page.mouse.move(random.randint(200, 1200), random.randint(150, 700),
                         steps=move_steps)
         log.info("form flow: pointer moved (steps=%s in %.1fs)",
