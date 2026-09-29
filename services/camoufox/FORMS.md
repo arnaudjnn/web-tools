@@ -31,7 +31,11 @@ within seconds — no field was touched, no POST left the machine, so that
 attempt's identity may be replayed. The leaked browser is shed with the
 process (`FORM_WEDGE_EXIT_S`, 3 in the image), so the retry lands on a
 restarted container. Cleanup failure cannot overwrite an already captured form
-result.
+result. A host that cannot launch at all (user namespaces revoked — every
+launch fails in every mode until the container is moved) is shed the same way:
+`LAUNCH_FAIL_STREAK` consecutive launch failures across any path exit the
+process after `LAUNCH_FAIL_SHED_S` seconds of grace (`3`/`10` in the image;
+0 disables), and a success in between retracts the pending exit.
 
 The Docker image pins the browser build as well as the Python wrapper. CI runs
 the real Linux image against loopback form fixtures, including five consecutive
@@ -59,12 +63,18 @@ the only way this service mints a token.
 
 `captcha: { sitekey, action?, version? }` mints the token via CapSolver AFTER
 the human interaction and BEFORE the single click, and only when the Camoufox
-service holds `CAPSOLVER_API_KEY`. The mint leaves through the form's OWN exit
-— the same proxy and `exit_session` the browser navigates and POSTs with —
-because a gate that compares the token's mint IP against the submit IP rejects
-a provider-side (proxyless) mint; an exit that cannot be parsed fails closed
-(`captcha_solver_failed`) instead of silently solving from other IPs. A form
-with no exit at all still solves proxyless, as before. Without the key the
+service holds `CAPSOLVER_API_KEY`. By default the mint leaves through the form's
+OWN exit — the same proxy and `exit_session` the browser navigates and POSTs
+with — because a gate that compares the token's mint IP against the submit IP
+rejects a provider-side (proxyless) mint; an exit that cannot be parsed fails
+closed (`captcha_solver_failed`) instead of silently solving from other IPs.
+`captcha_proxyless: true` opts OUT of that: the solver gets no proxy and mints
+from its own infrastructure. Use it when the form's exit scores 0 anyway —
+reCAPTCHA v3 scores IP REPUTATION, and measured 2026-09-26..29 the default
+exit accepted 1 of 18 posted submissions whatever minted the token, while the
+same pages from a clean IP pass 85%. The form POST itself always leaves
+through the form's exit either way. A form with no exit at all still solves
+proxyless, as before. Without the key the
 result is `captcha_solver_unavailable`; a provider error, stall, empty token or
 deadline is `captcha_solver_failed`; a page with no matching token textarea is
 `captcha_field_missing`. All three are zero submissions and no click — a solver

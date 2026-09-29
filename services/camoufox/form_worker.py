@@ -18,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import form_flow
+import launch_health
 from form_flow import run_form, validate_form
 
 log = logging.getLogger("camoufox.forms")
@@ -74,11 +75,16 @@ def run_isolated_form(browser_factory, *, deadline, **params):
         if time.monotonic() >= deadline:
             return not_started(params["url"], "deadline_before_browser")
         try:
-            log.info("form phase: launching browser (headed=%s)", params.get("headed"))
+            # `headed` lives in the browser_factory closure, never in params
+            # (run_form would reject it as an unknown keyword) — log what is
+            # knowable instead of a field that is always None here.
+            log.info("form phase: launching browser")
             manager = browser_factory()
             browser = manager.__enter__()
+            launch_health.note(True)
             log.info("form phase: browser entered")
         except Exception as error:
+            launch_health.note(False)
             log.warning("form browser launch failed (%s: %s); no submission",
                         type(error).__name__, str(error)[:300])
             return not_started(params["url"], "browser_launch_failed")

@@ -35,7 +35,7 @@ RUN python -m camoufox fetch "$CAMOUFOX_BROWSER" && \
     grep -F "${CAMOUFOX_BROWSER##*/}" /tmp/active && \
     ! grep -F "not fetched" /tmp/active
 
-COPY app.py form_flow.py form_worker.py captcha_solver.py entrypoint.sh ./
+COPY app.py form_flow.py form_worker.py captcha_solver.py launch_health.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 # ONE warmed Camoufox page per container (WORKERS=1) — the persistent SPA
@@ -57,6 +57,12 @@ ENV MOZ_DISABLE_CONTENT_SANDBOX=1
 # thread owns the handle); restart the container 3s after the 502 flushes so
 # launches never decay. 0 disables. See form_worker._shed_delay_s.
 ENV FORM_WEDGE_EXIT_S=3
+# A host that loses user namespaces fails EVERY browser launch in every mode
+# (EACCES + SIGSEGV, see the sandbox note above) and only a restart can move
+# the container — so a streak of failed launches sheds the process the same
+# way a form wedge does. 0 disables. See launch_health.py.
+ENV LAUNCH_FAIL_STREAK=3
+ENV LAUNCH_FAIL_SHED_S=10
 ENV WORKERS=1
 EXPOSE 8000
 # Bind 0.0.0.0 (Railway's edge talks IPv4; an IPv6-only bind 502s).

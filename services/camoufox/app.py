@@ -79,6 +79,7 @@ from pydantic import BaseModel, Field
 
 from camoufox.sync_api import Camoufox
 from form_worker import FormRetryable, FormWorker, run_isolated_form
+import launch_health
 
 
 PROXY_URL = os.environ.get("PROXY_URL", "")
@@ -351,7 +352,12 @@ def _ensure_page(base_url, warm_path, sensor_wait_ms, mature_probe, mature_max_t
     # geoip=True matches locale/timezone to the proxy's exit IP (an Italian
     # user signal Akamai expects); humanize adds human-like cursor motion.
     cm = Camoufox(headless=True, geoip=True, humanize=True, proxy=proxy)
-    browser = cm.__enter__()
+    try:
+        browser = cm.__enter__()
+    except Exception:
+        launch_health.note(False)
+        raise
+    launch_health.note(True)
     page = browser.new_page()
     page.goto(f"{base_url}{warm_path}", wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     half = max(0, sensor_wait_ms) / 2000.0
@@ -457,8 +463,10 @@ def _ensure_render_browser():
     except Exception:
         # Record it for /healthz before re-raising: the caller gets its 502 either
         # way, but a replica that cannot launch must stop being told it is fine.
+        launch_health.note(False)
         globals()["_render_broken"] = True
         raise
+    launch_health.note(True)
     globals()["_render_broken"] = False
     _render_cm, _render_browser = cm, browser
     _render_thread = threading.get_ident()
@@ -906,6 +914,12 @@ class FormSubmitRequest(BaseModel):
         None,
         description="Solve the CAPTCHA via CapSolver before the single submit; needs CAPSOLVER_API_KEY "
                     "on this service, else the form fails closed with captcha_solver_unavailable and zero submissions")
+    captcha_proxyless: bool = Field(
+        False,
+        description="Solve from the provider's own infrastructure instead of the form's exit. "
+                    "reCAPTCHA v3 scores IP reputation: an exit the verifier scores 0 rejects every "
+                    "token minted through it, whichever browser mints — use this when the form's "
+                    "exit is that exit (only with `captcha`; the POST itself still leaves from the form's exit)")
     inspect_only: bool = Field(False, description="Navigate without filling/clicking; block same-origin mutating requests")
     headed: bool = Field(False, description="headed browser (under xvfb) for score-gated forms; headless fleets score 0 on reCAPTCHA v3")
     url: str
@@ -934,6 +948,26 @@ class FormSubmitResponse(BaseModel):
     exit_session: str = ""
 
 
+def _captcha_proxy_for(req, session: str | None):
+    """Where the CAPTCHA mint leaves from — the crux of reCAPTCHA v3 scoring.
+
+    Default: the mint shares the form's own exit (same proxy dict, same
+    sticky session), so a gate comparing mint IP against submit IP accepts
+    it. But v3 scores IP REPUTATION, not just consistency: measured
+    2026-09-26..29, the form's residential exit accepted 1 of 18 posted
+    submissions whatever minted the token (page or provider), while the
+    same pages from a clean IP pass 85%. `captcha_proxyless` therefore
+    hands the solver no proxy — the provider's ReCaptcha*ProxyLess task
+    mints from the provider's own infrastructure — which trades the
+    IP-comparison risk for an exit that scores. The form POST itself never
+    changes: it still leaves through the form's exit.
+    """
+    if req.captcha_proxyless:
+        return None
+    # Same proxy + session as _form_browser builds.
+    return parse_proxy(PROXY_URL, session)
+
+
 @app.post("/form-submit", response_model=FormSubmitResponse)
 async def form_submit(req: FormSubmitRequest):
     deadline = time.monotonic() + req.timeout_ms / 1000
@@ -949,10 +983,7 @@ async def form_submit(req: FormSubmitRequest):
             inspect_only=req.inspect_only, require_captcha_token=req.require_captcha_token,
             ready_expression=req.ready_expression,
             captcha=req.captcha.model_dump() if req.captcha else None,
-            # Same proxy + session as _form_browser builds: the CAPTCHA mint
-            # must leave from the exit the form POSTs from, or a gate that
-            # compares mint IP to submit IP rejects the token.
-            captcha_proxy=parse_proxy(PROXY_URL, session)), url=req.url, deadline=deadline)
+            captcha_proxy=_captcha_proxy_for(req, session)), url=req.url, deadline=deadline)
     except FormRetryable as parked:
         # Parked on the one unbounded pre-POST call (the marker says where):
         # no field touched, no POST left this machine — the identity is
