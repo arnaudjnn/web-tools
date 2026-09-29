@@ -129,9 +129,12 @@ def human_click(page, control, remaining) -> None:
     steps = random.randint(6, 18)
     sx, sy = tx - random.randint(100, 400), ty - random.randint(60, 200)
     # Input dispatch is the class that wedges (playwright gives it no
-    # timeout of its own): the whole approach plus the press is one mark,
-    # threshold above its ~1.5s legitimate worst case.
-    with _at("pointer move"):
+    # timeout of its own) — but camoufox ANIMATES trajectories: measured
+    # 2026-09-29, every run parked here at the old 8s threshold with the
+    # job alive, so the approach legitimately takes up to ~15s. 25s covers
+    # 18 animated steps with margin; a true park still surfaces far before
+    # deadline + grace.
+    with _at("pointer move", 25.0):
         for i in range(1, steps + 1):
             page.mouse.move(sx + (tx - sx) * i / steps, sy + (ty - sy) * i / steps)
             page.wait_for_timeout(random.randint(8, 30))
@@ -331,10 +334,11 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 if not focused:
                     with _at("field focus click", 18.0):
                         control.click(timeout=min(remaining(), 10000))
-                # Keystroke delay is client-side and scales with the value:
-                # the mark's threshold is the worst case + margin, so a slow
-                # type is never mistaken for a park.
-                with _at("field type", len(value) * 0.13 + 8.0):
+                # Keystroke delay is client-side and scales with the value;
+                # dispatch itself is animated in camoufox. The mark's
+                # threshold is the worst case + margin, so a slow type is
+                # never mistaken for a park.
+                with _at("field type", len(value) * 0.25 + 10.0):
                     page.keyboard.type(value, delay=random.randint(45, 120))
                 with _at("field pause"):
                     page.wait_for_timeout(min(random.randint(120, 420), remaining()))
