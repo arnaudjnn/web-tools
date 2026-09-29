@@ -57,6 +57,12 @@ attempted, nullable `token_present`, and the solver's `solver_attempts` /
 `captcha` was not requested). Token presence inspects only the first
 outgoing form POST (`captcha_field`, default `g-recaptcha-response`); diagnostics
 never include tokens, request bodies, query strings or exception messages.
+For a failed run it also carries `failure_class` (the exception's class NAME —
+which failure kind, never its message), `field_attempt` (the selector in
+flight), `phase`, `dismiss_clicked` (cookie-banner selectors actually clicked)
+and `banner_visible` (whether the first dismiss target was still showing right
+before the fields phase — an overlay that never went away blocks the first
+click and looks like a slow field).
 A token's presence does NOT prove validity, action, score or server acceptance.
 Likewise, a loaded script does not prove its handler ran. The solver below is
 the only way this service mints a token.

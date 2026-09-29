@@ -43,6 +43,9 @@ class FormTests(unittest.TestCase):
         result = run_form(self.context, **self.params)
         self.assertEqual(result["form_submissions"], 0)
         self.assertEqual(result["error"], "fields_failed")
+        # Class name yes, message no — the kind of failure is safe to log,
+        # whatever the exception text carried.
+        self.assertEqual(result["diagnostics"]["failure_class"], "RuntimeError")
         self.assertNotIn("private-value", str(result))
         self.page.locator.return_value.click.assert_not_called()
 
@@ -188,6 +191,30 @@ class FormTests(unittest.TestCase):
         result = run_form(self.context, **self.params)
         self.assertEqual(result["form_submissions"], 0)
         self.assertEqual(result["error"], "fields_failed")
+        # ValueError is the typed-text check; a click that never got to type
+        # reports TimeoutError instead — the two fields_failed causes.
+        self.assertEqual(result["diagnostics"]["failure_class"], "ValueError")
+
+    def test_dismiss_clicks_record_and_banner_state(self):
+        params = dict(self.params, dismiss=["button.accept-cookies"])
+        self.page.locator.return_value.first.is_visible.return_value = False
+        result = run_form(self.context, **params)
+        self.assertTrue(result["ok"])
+        d = result["diagnostics"]
+        self.assertEqual(d["dismiss_clicked"], ["button.accept-cookies"])
+        self.assertFalse(d["banner_visible"])
+
+    def test_failed_dismiss_leaves_banner_visible_flagged(self):
+        params = dict(self.params, dismiss=["button.accept-cookies"])
+        # The dismiss click times out (banner not up yet); the banner itself
+        # still reports visible right before the fields phase.
+        self.page.locator.return_value.first.click.side_effect = TimeoutError("banner")
+        self.page.locator.return_value.first.is_visible.return_value = True
+        result = run_form(self.context, **params)
+        self.assertTrue(result["ok"])
+        d = result["diagnostics"]
+        self.assertEqual(d["dismiss_clicked"], [])
+        self.assertTrue(d["banner_visible"])
 
 
 if __name__ == "__main__":

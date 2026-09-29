@@ -125,8 +125,10 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                    "captcha_network_failures": 0, "submit_click_attempted": False,
                    "token_present": None, "blocked_mutations": 0, "page_script_errors": 0,
                    "navigation_status": None, "captcha_guard_blocked": False,
-                   "ready_condition_met": None, "solver_attempts": 0,
-                   "solver_status": None, "field_attempt": None, "phase": None}
+                 "ready_condition_met": None, "solver_attempts": 0,
+                 "solver_status": None, "field_attempt": None, "phase": None,
+                 "failure_class": None, "dismiss_clicked": [],
+                 "banner_visible": None}
     result["diagnostics"] = diagnostics
     page = None
     phase = "navigation"
@@ -247,8 +249,17 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         for selector in dismiss or []:
             try:
                 page.locator(selector).first.click(timeout=remaining(2000))
+                diagnostics["dismiss_clicked"].append(selector)
             except Exception:
                 pass  # Optional cookie banners; required fields below fail closed.
+        # A banner left covering the form makes the first human_click wait out
+        # its actionability timeout — recorded so a fields_failed can say
+        # whether the overlay was still up, without logging any page text.
+        if dismiss:
+            try:
+                diagnostics["banner_visible"] = bool(page.locator(dismiss[0]).first.is_visible())
+            except Exception:
+                diagnostics["banner_visible"] = None
         log.info("form flow: fields (%d)", len(fields))
         phase = "fields"
         for field in fields:
@@ -362,16 +373,22 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             result["error"] = "no_submission"
         elif result["form_submissions"] and not result["status"]:
             result["error"] = "outcome_unknown"
-    except Exception:
+    except Exception as error:
         # Never expose field values, page exception text or proxy credentials.
+        # The CLASS name is not text — it separates a click that timed out from
+        # the typed-text check failing (both surface as fields_failed) without
+        # carrying anything the exception's message might.
+        diagnostics["failure_class"] = type(error).__name__
         diagnostics["phase"] = phase
         result["error"] = result["error"] or ("outcome_unknown" if result["form_submissions"] else f"{phase}_failed")
     # One line per form, whatever happened: field_attempt names the SELECTOR
     # in flight when a phase raised (fields_failed alone says where nothing),
-    # and the path shows what the submit actually landed on. Selector + path
-    # only — never a value.
-    log.info("form flow: done ok=%s error=%s field=%s subs=%s status=%s path=%s",
+    # failure_class the kind of exception behind it, and the path shows what
+    # the submit actually landed on. Selector + class + path only — never a
+    # value or an exception message.
+    log.info("form flow: done ok=%s error=%s field=%s cls=%s subs=%s status=%s path=%s",
              result.get("ok"), result.get("error"), diagnostics.get("field_attempt"),
+             diagnostics.get("failure_class"),
              result.get("form_submissions"), result.get("status"),
              urlsplit(result.get("url") or "").path)
     return result
