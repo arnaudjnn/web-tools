@@ -24,7 +24,14 @@ is serial per replica, including while a disconnected caller's operation finishe
 Launch and queue time consume the request deadline. A launch/context failure or
 pre-navigation deadline returns a structured result with **zero submissions**;
 unexpected failures after execution begins remain unknown and are never retried.
-Cleanup failure cannot overwrite an already captured form result.
+One structured failure is explicit about being pre-POST: if the flow parks on
+the unbounded humanized `mouse.move` (playwright gives input dispatch no
+timeout), the worker answers **503** with `detail = {message, retryable: true}`
+within seconds — no field was touched, no POST left the machine, so that
+attempt's identity may be replayed. The leaked browser is shed with the
+process (`FORM_WEDGE_EXIT_S`, 3 in the image), so the retry lands on a
+restarted container. Cleanup failure cannot overwrite an already captured form
+result.
 
 The Docker image pins the browser build as well as the Python wrapper. CI runs
 the real Linux image against loopback form fixtures, including five consecutive
@@ -33,7 +40,9 @@ isolated browser lifetimes. These are runtime tests, not proof of CAPTCHA accept
 This is not cross-request idempotency: callers must persist their operation or
 identity reservation BEFORE sending the HTTP request. A lost response or 502
 means unknown, never zero submissions or permission to replay. Do not add a
-generic HTTP retry policy to this endpoint. Site rejections are returned as
+generic HTTP retry policy to this endpoint — the ONLY sanctioned replay is the
+explicit 503 `retryable: true` above (bounded by the caller, e.g. two attempts
+ten seconds apart). Site rejections are returned as
 page content for the caller to interpret. Neither fields nor exception payloads
 are logged by the form runner.
 
