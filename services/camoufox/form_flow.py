@@ -183,6 +183,10 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         if wait_ms:
             log.info("form flow: wait_ms=%s", wait_ms)
             page.wait_for_timeout(min(wait_ms, remaining()))
+        # Deliberately noisy: wedged runs previously died between this marker
+        # and "pointer moved", and nothing could say which of the two calls
+        # (client timer vs browser-side move ack) never returned.
+        log.info("form flow: wait done")
         if inspect_only:
             result["url"] = page.url
             # No page contents/hidden tokens in an inspection response.
@@ -190,9 +194,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # Arrive like a person before touching anything: look around, scroll,
         # dwell. A submit seconds after navigation with no prior input reads
         # as automation no matter how human the typing itself is.
+        move_started = time.monotonic()
+        move_steps = random.randint(8, 20)
         page.mouse.move(random.randint(200, 1200), random.randint(150, 700),
-                        steps=random.randint(8, 20))
-        log.info("form flow: pointer moved")
+                        steps=move_steps)
+        log.info("form flow: pointer moved (steps=%s in %.1fs)",
+                 move_steps, time.monotonic() - move_started)
         page.wait_for_timeout(min(random.randint(700, 2200), remaining()))
         page.mouse.wheel(0, random.randint(200, 600))
         log.info("form flow: scrolled")
