@@ -20,16 +20,31 @@ class IsolatedFormTests(unittest.TestCase):
         return run_isolated_form(self.factory, deadline=time.monotonic() + 5,
                                  **(self.params | overrides))
 
+    @patch("form_worker.time.sleep")
     @patch("form_worker.run_form")
-    def test_launch_failure_has_zero_submissions_and_no_replay(self, execute):
+    def test_launch_failure_has_zero_submissions_and_no_replay(self, execute, _sleep):
+        # Both attempts fail: structured, zero submissions, no execute — the
+        # single retry cannot turn a launch failure into a submission.
         self.manager.__enter__.side_effect = RuntimeError("private proxy credential")
         result = self.run_form()
         self.assertEqual(result["form_submissions"], 0)
         self.assertEqual(result["error"], "browser_launch_failed")
         self.assertNotIn("credential", str(result))
-        self.factory.assert_called_once()
-        self.manager.__exit__.assert_called_once()
+        self.assertEqual(self.factory.call_count, 2)
+        self.assertEqual(self.manager.__exit__.call_count, 2)
         execute.assert_not_called()
+
+    @patch("form_worker.time.sleep")
+    @patch("form_worker.run_form")
+    def test_transient_launch_failure_recovers_on_the_single_retry(self, execute, _sleep):
+        # The first launch of a fresh process fails (tunnel coming up); the
+        # retry lands and the form runs — no caller attempt burned.
+        execute.return_value = {"ok": True, "form_submissions": 1}
+        self.manager.__enter__.side_effect = [RuntimeError("tunnel up yet"), self.manager.__enter__.return_value]
+        result = self.run_form()
+        self.assertEqual(result, execute.return_value)
+        self.assertEqual(self.factory.call_count, 2)
+        execute.assert_called_once()
 
     @patch("form_worker.run_form")
     def test_context_failure_has_zero_submissions(self, execute):

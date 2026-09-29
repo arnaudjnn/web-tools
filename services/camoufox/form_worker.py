@@ -72,22 +72,40 @@ def run_isolated_form(browser_factory, *, deadline, **params):
     validate_form(params["url"], params.get("submission_urls"), params.get("success_url"))
     manager = context = None
     try:
-        if time.monotonic() >= deadline:
-            return not_started(params["url"], "deadline_before_browser")
-        try:
-            # `headed` lives in the browser_factory closure, never in params
-            # (run_form would reject it as an unknown keyword) — log what is
-            # knowable instead of a field that is always None here.
-            log.info("form phase: launching browser")
-            manager = browser_factory()
-            browser = manager.__enter__()
-            launch_health.note(True)
-            log.info("form phase: browser entered")
-        except Exception as error:
-            launch_health.note(False)
-            log.warning("form browser launch failed (%s: %s); no submission",
-                        type(error).__name__, str(error)[:300])
-            return not_started(params["url"], "browser_launch_failed")
+        # One launch retry: the first launch of a fresh process (tunnel still
+        # coming up, proxy exit cycling) fails transiently, and today that
+        # structured failure burns a whole caller attempt. Pre-navigation, so
+        # zero submissions either way — the retry cannot double anything.
+        for attempt in (1, 2):
+            if time.monotonic() >= deadline:
+                return not_started(params["url"], "deadline_before_browser")
+            try:
+                # `headed` lives in the browser_factory closure, never in params
+                # (run_form would reject it as an unknown keyword) — log what is
+                # knowable instead of a field that is always None here.
+                log.info("form phase: launching browser (attempt %d)", attempt)
+                manager = browser_factory()
+                browser = manager.__enter__()
+                launch_health.note(True)
+                log.info("form phase: browser entered")
+                break
+            except Exception as error:
+                launch_health.note(False)
+                log.warning("form browser launch failed attempt %d (%s: %s); %s",
+                            attempt, type(error).__name__, str(error)[:300],
+                            "retrying" if attempt == 1 else "no submission")
+                if manager is not None:
+                    # A factory that opened before __enter__ raised still owns
+                    # whatever it opened — close it here; the finally below
+                    # only ever sees the manager the retry succeeded with.
+                    try:
+                        manager.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                manager = None
+                if attempt == 2:
+                    return not_started(params["url"], "browser_launch_failed")
+                time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
         try:
             context = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
             log.info("form phase: context ready")

@@ -20,8 +20,11 @@ workers so form requests remain visible to interception.
 Forms own a short-lived browser and fresh worker thread, separate from the
 shared render/Akamai browsers. `/recycle` cannot close a form's browser. Admission
 is serial per replica, including while a disconnected caller's operation finishes.
-Launch and queue time consume the request deadline. A launch/context failure or
-pre-navigation deadline returns a structured result with **zero submissions**;
+Launch and queue time consume the request deadline. A launch failure gets ONE
+retry inside the worker (the first launch of a fresh process fails transiently
+— tunnel coming up, exit cycling — and it is pre-navigation, so zero
+submissions either way); a launch/context failure after that, or a
+pre-navigation deadline, returns a structured result with **zero submissions**;
 unexpected failures after execution begins remain unknown and are never retried.
 One structured failure is explicit about being pre-POST: every driver call
 before the submit click runs inside a live-step mark whose threshold sits
