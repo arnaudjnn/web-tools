@@ -82,12 +82,12 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   matches `cannot switch to a different thread` (fresh thread + one retry).
   Without that, every later render 502s and the toolkit silently falls back to
   the wrong-country exit — observed live 2026-09-27.
-- **Forms are single-attempt and solver-gated**: `captcha` {sitekey, action?,
-  version?} mints the token via CapSolver (`CAPSOLVER_API_KEY` on this service
-  only) and fails closed (`captcha_solver_*`, zero submissions) before the click
-  when the key or provider is missing. Text is typed keystroke-by-keystroke —
-  reCAPTCHA v3 scores behaviour — so never reintroduce `.fill(`: `test_form_flow.py`
-  greps for it.
+- **Forms are single-attempt, never solver-gated**: CapSolver was removed
+  2026-09-29 (last third-party credential; page-minted tokens passed whenever
+  any token passed, so it bought nothing) — the endpoint accepts only the
+  observation fields `captcha_field` / `require_captcha_token`. Text is typed
+  keystroke-by-keystroke — reCAPTCHA v3 scores behaviour — so never
+  reintroduce `.fill(`: `test_form_flow.py` greps for it.
 
 ## Deploy lore (Railway, project `3375ebc9…`)
 

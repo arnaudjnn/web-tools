@@ -34,11 +34,11 @@ POST /screenshot { url, wait_until?, wait_ms?, full_page?, width?, height?, clic
 POST /eval { url, js, wait_ms?, fresh_ip? }
     → { status, url, result } # run arbitrary JS in the residential page and
                             # return its JSON result (drive/inspect JS SPAs)
-POST /form-submit { url, fields[], submit, dismiss?, success_url?, fresh_ip?, captcha? }
+POST /form-submit { url, fields[], submit, dismiss?, success_url?, fresh_ip? }
     → { contract_version, form_submissions, status, url, html, ok, error }
                             # isolated, single attempt; never replayed on failure
-                            # captcha: { sitekey, action?, version? } → solve via
-                            # CapSolver before the one click (CAPSOLVER_API_KEY)
+                            # CAPTCHA: the page's own handler mints any token
+                            # (observation only: captcha_field/require_captcha_token)
 POST /bytes { url, timeout_ms? }
     → { status, b64 }       # residential binary fetch (PDFs) through the same exit
 POST /recycle {}           # drop both the Akamai warmed session and the render browser
@@ -900,26 +900,10 @@ class FormField(BaseModel):
     action: str = Field("type", description="type | check | select")
 
 
-class CaptchaSpec(BaseModel):
-    sitekey: str = Field(..., max_length=256, description="reCAPTCHA site key (the widget's data-sitekey)")
-    action: str | None = Field(None, max_length=64, description="reCAPTCHA v3 action (the value passed to grecaptcha.execute)")
-    version: str = Field("v3", pattern="^v[23]$", description="v3 (default) or v2")
-
-
 class FormSubmitRequest(BaseModel):
     ready_expression: str | None = Field(None, max_length=2000, description="Main-world boolean expression required before clicking submit")
     require_captcha_token: bool = Field(False, description="Abort the form POST if its CAPTCHA field is empty/unreadable; never retry")
     captcha_field: str | None = Field(None, max_length=100, description="POST field checked for token presence only; value is never returned")
-    captcha: CaptchaSpec | None = Field(
-        None,
-        description="Solve the CAPTCHA via CapSolver before the single submit; needs CAPSOLVER_API_KEY "
-                    "on this service, else the form fails closed with captcha_solver_unavailable and zero submissions")
-    captcha_proxyless: bool = Field(
-        False,
-        description="Solve from the provider's own infrastructure instead of the form's exit. "
-                    "reCAPTCHA v3 scores IP reputation: an exit the verifier scores 0 rejects every "
-                    "token minted through it, whichever browser mints — use this when the form's "
-                    "exit is that exit (only with `captcha`; the POST itself still leaves from the form's exit)")
     inspect_only: bool = Field(False, description="Navigate without filling/clicking; block same-origin mutating requests")
     headed: bool = Field(False, description="headed browser (under xvfb) for score-gated forms; headless fleets score 0 on reCAPTCHA v3")
     url: str
@@ -948,26 +932,6 @@ class FormSubmitResponse(BaseModel):
     exit_session: str = ""
 
 
-def _captcha_proxy_for(req, session: str | None):
-    """Where the CAPTCHA mint leaves from — the crux of reCAPTCHA v3 scoring.
-
-    Default: the mint shares the form's own exit (same proxy dict, same
-    sticky session), so a gate comparing mint IP against submit IP accepts
-    it. But v3 scores IP REPUTATION, not just consistency: measured
-    2026-09-26..29, the form's residential exit accepted 1 of 18 posted
-    submissions whatever minted the token (page or provider), while the
-    same pages from a clean IP pass 85%. `captcha_proxyless` therefore
-    hands the solver no proxy — the provider's ReCaptcha*ProxyLess task
-    mints from the provider's own infrastructure — which trades the
-    IP-comparison risk for an exit that scores. The form POST itself never
-    changes: it still leaves through the form's exit.
-    """
-    if req.captcha_proxyless:
-        return None
-    # Same proxy + session as _form_browser builds.
-    return parse_proxy(PROXY_URL, session)
-
-
 @app.post("/form-submit", response_model=FormSubmitResponse)
 async def form_submit(req: FormSubmitRequest):
     deadline = time.monotonic() + req.timeout_ms / 1000
@@ -981,9 +945,7 @@ async def form_submit(req: FormSubmitRequest):
             wait_until=req.wait_until, wait_ms=req.wait_ms, settle_ms=req.settle_ms,
             submission_urls=req.submission_urls, captcha_field=req.captcha_field,
             inspect_only=req.inspect_only, require_captcha_token=req.require_captcha_token,
-            ready_expression=req.ready_expression,
-            captcha=req.captcha.model_dump() if req.captcha else None,
-            captcha_proxy=_captcha_proxy_for(req, session)), url=req.url, deadline=deadline)
+            ready_expression=req.ready_expression), url=req.url, deadline=deadline)
     except FormRetryable as parked:
         # Parked on the one unbounded pre-POST call (the marker says where):
         # no field touched, no POST left this machine — the identity is

@@ -173,14 +173,6 @@ export const WebFormSubmitInput = z.object({
   success_url: z.string().optional().describe('Regex; a final URL matching it means success'),
   submission_urls: z.array(z.string().url()).min(1).max(10).optional().describe('Same-origin form POST URLs sharing one submission budget; defaults to url'),
   captcha_field: z.string().min(1).max(100).optional().describe('POST field to check for token presence, never its value'),
-  captcha: z
-    .object({
-      sitekey: z.string().min(1).max(256).describe('reCAPTCHA site key (the widget data-sitekey)'),
-      action: z.string().min(1).max(64).optional().describe('reCAPTCHA v3 action (grecaptcha.execute)'),
-      version: z.enum(['v3', 'v2']).optional().describe('default v3'),
-    })
-    .optional()
-    .describe('Solve via CapSolver before the single submit (needs CAPSOLVER_API_KEY on Camoufox; without it the form fails closed with captcha_solver_unavailable and zero submissions)'),
   require_captcha_token: z.boolean().optional().describe('Block the form POST when its CAPTCHA field is empty/unreadable; no retry'),
   ready_expression: z.string().min(1).max(2000).optional().describe('Main-world boolean expression required before clicking submit'),
   inspect_only: z.boolean().optional().describe('Navigate without filling/clicking; block same-origin mutating requests'),

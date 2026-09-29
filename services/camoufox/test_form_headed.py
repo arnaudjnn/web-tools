@@ -99,21 +99,5 @@ class HeadedFormBrowserTests(unittest.TestCase):
         self.assertIn("headed", app.FormSubmitRequest.__annotations__)
 
 
-class ProxylessCaptchaTests(unittest.TestCase):
-    """Where the CAPTCHA mint leaves from — request field to proxy dict."""
-
-    def test_request_model_accepts_proxyless(self):
-        self.assertIn("captcha_proxyless", app.FormSubmitRequest.__annotations__)
-
-    def test_default_mints_through_the_form_exit(self):
-        req = types.SimpleNamespace(captcha_proxyless=False)
-        proxy = app._captcha_proxy_for(req, "sess-9")
-        self.assertIn("_session-sess-9", proxy["password"])
-
-    def test_proxyless_opt_out_hands_the_solver_no_proxy(self):
-        req = types.SimpleNamespace(captcha_proxyless=True)
-        self.assertIsNone(app._captcha_proxy_for(req, "sess-9"))
-
-
 if __name__ == "__main__":
     unittest.main()

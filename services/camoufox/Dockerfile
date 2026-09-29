@@ -35,7 +35,7 @@ RUN python -m camoufox fetch "$CAMOUFOX_BROWSER" && \
     grep -F "${CAMOUFOX_BROWSER##*/}" /tmp/active && \
     ! grep -F "not fetched" /tmp/active
 
-COPY app.py form_flow.py form_worker.py captcha_solver.py launch_health.py entrypoint.sh ./
+COPY app.py form_flow.py form_worker.py launch_health.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 # ONE warmed Camoufox page per container (WORKERS=1) — the persistent SPA
