@@ -154,11 +154,11 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fired, [1])
 
     async def test_pre_submit_park_is_retryable_and_sheds(self):
-        # A park on the unbounded pre-POST input dispatch (form_flow's
-        # marker — the arrival wheel) must surface as FormRetryable within
-        # one poll — long before deadline + grace could fold it into the
-        # unknown-outcome 502 — and still shed, because the orphan's browser
-        # can never be closed either.
+        # A park on ANY marked pre-POST driver call (form_flow's marker —
+        # fields, dismiss, arrival — the observed class) must surface as
+        # FormRetryable within one poll — long before deadline + grace could
+        # fold it into the unknown-outcome 502 — and still shed, because the
+        # orphan's browser can never be closed either.
         import form_flow
         worker = FormWorker()
         stuck = threading.Event()

@@ -25,6 +25,7 @@ same class of exit. Playwright's mouse/keyboard produce TRUSTED events
 interaction, not a spoof. The ~one minute this costs per form is the price of
 the score, not waste.
 """
+import contextlib
 import logging
 import random
 import re
@@ -35,35 +36,49 @@ from urllib.parse import urlsplit, parse_qs
 # wedge handler sees a stackless greenlet and can only say "somewhere".
 log = logging.getLogger("camoufox.forms")
 
-# Live-step marker, polled by the admission worker from the event loop. Exactly
-# ONE pre-POST call is unbounded: the arrival wheel below — playwright gives
-# input dispatch no timeout and camoufox's browser-side animation has been
-# observed to never return (every logged wedge died on an input dispatch:
-# first the full-viewport mouse.move, retired 2026-09-29 after 2 parks in 6
-# attempts, now the wheel, which has never wedged). Everything else is
-# bounded: locator/fill/click by playwright's default timeout, goto by its
-# own, the outcome wait by remaining(). A park here means no field was
-# touched and no POST left the machine — retryable, unlike every other stall.
-_LIVE = {"name": "", "at": 0.0}
+# Live-step marker, polled by the admission worker from the event loop. A
+# pre-POST driver roundtrip has no timeout we can trust: playwright's own
+# `timeout=` is enforced by the driver's loop, and a wedged transport (the
+# greenlet parked on a socket read) never reaches it — measured 2026-09-29:
+# the fields phase sat in the driver's `select` for minutes past every
+# timeout. So EVERY driver call before the submit click is marked around
+# with a threshold ABOVE its own legitimate worst case (its timeout, or the
+# keystroke duration for `type`): a mark older than its threshold means the
+# call never returned, so no field was touched and no POST left the machine
+# — retryable, unlike every other stall. Marks are strictly pre-POST; the
+# submit click onwards is never marked (a click may already have POSTed).
+_LIVE = {"name": "", "at": 0.0, "stuck": 8.0}
 PRE_SUBMIT_STUCK_S = 8.0
 PRE_SUBMIT_STEP = "arrival scroll"
 
 
-def _mark(name):
+def _mark(name, stuck_s=PRE_SUBMIT_STUCK_S):
     _LIVE["name"] = name
     _LIVE["at"] = time.monotonic()
+    _LIVE["stuck"] = float(stuck_s)
 
 
 def reset_live_step():
     _LIVE["name"] = ""
     _LIVE["at"] = 0.0
+    _LIVE["stuck"] = PRE_SUBMIT_STUCK_S
 
 
 def pre_submit_hang_step():
-    """The step name if the flow parked on the unbounded pre-POST call."""
-    if _LIVE["name"] == PRE_SUBMIT_STEP and time.monotonic() - _LIVE["at"] > PRE_SUBMIT_STUCK_S:
+    """The mark name if the flow parked on a pre-POST driver call."""
+    if _LIVE["name"] and time.monotonic() - _LIVE["at"] > _LIVE["stuck"]:
         return _LIVE["name"]
     return None
+
+
+@contextlib.contextmanager
+def _at(name, stuck_s=PRE_SUBMIT_STUCK_S):
+    """Mark one driver call; always clear it, even when the call raises."""
+    _mark(name, stuck_s)
+    try:
+        yield
+    finally:
+        reset_live_step()
 
 
 def validate_form(url, submission_urls, success_url):
@@ -93,23 +108,34 @@ def human_click(page, control, remaining) -> None:
     (measured 2026-09-26: every field typed into the void, HTML5 validation
     then blocked the submit with no POST and no error).
     """
-    control.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
+    with _at("field scroll"):
+        control.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
     # Instant scrolls do not animate, but layout may need a beat before the
     # rect is readable. Fixed margin, not a scrollY poll: polling would spend
     # page.evaluate calls that belong to the readiness gate.
-    page.wait_for_timeout(300)
-    box = control.bounding_box(timeout=remaining())
+    with _at("field settle"):
+        page.wait_for_timeout(300)
+    # Bounded, then marked above that bound: a form field that takes >5s to
+    # appear is a broken page (fail fast as fields_failed), and a driver
+    # roundtrip that never returns must surface as a hang, not deadline+grace.
+    with _at("field geometry", 13.0):
+        box = control.bounding_box(timeout=min(remaining(), 5000))
     if not box:
-        control.click(timeout=remaining())
+        with _at("field click", 13.0):
+            control.click(timeout=min(remaining(), 5000))
         return
     tx = box["x"] + box["width"] / 2 + random.uniform(-box["width"] / 4, box["width"] / 4)
     ty = box["y"] + box["height"] / 2 + random.uniform(-4, 4)
     steps = random.randint(6, 18)
     sx, sy = tx - random.randint(100, 400), ty - random.randint(60, 200)
-    for i in range(1, steps + 1):
-        page.mouse.move(sx + (tx - sx) * i / steps, sy + (ty - sy) * i / steps)
-        page.wait_for_timeout(random.randint(8, 30))
-    page.mouse.click(tx, ty)
+    # Input dispatch is the class that wedges (playwright gives it no
+    # timeout of its own): the whole approach plus the press is one mark,
+    # threshold above its ~1.5s legitimate worst case.
+    with _at("pointer move"):
+        for i in range(1, steps + 1):
+            page.mouse.move(sx + (tx - sx) * i / steps, sy + (ty - sy) * i / steps)
+            page.wait_for_timeout(random.randint(8, 30))
+        page.mouse.click(tx, ty)
 
 
 def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
@@ -198,9 +224,9 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
 
     try:
         context.route("**/*", guard)
-        _mark("new page")
         log.info("form flow: new_page")
-        page = context.new_page()
+        with _at("new page"):
+            page = context.new_page()
         log.info("form flow: page ready")
         page.on("request", request_started)
         page.on("requestfailed", request_failed)
@@ -239,15 +265,15 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # every logged arrival — still marked, so a park on it keeps the
         # same 503-retryable contract: nothing touched, nothing POSTed.
         page.wait_for_timeout(min(random.randint(700, 2200), remaining()))
-        _mark(PRE_SUBMIT_STEP)
-        page.mouse.wheel(0, random.randint(200, 600))
-        reset_live_step()
+        with _at(PRE_SUBMIT_STEP):
+            page.mouse.wheel(0, random.randint(200, 600))
         log.info("form flow: scrolled")
         page.wait_for_timeout(min(random.randint(400, 1200), remaining()))
         log.info("form flow: dwell done; dismiss=%s", dismiss)
         for selector in dismiss or []:
             try:
-                page.locator(selector).first.click(timeout=remaining(2000))
+                with _at("dismiss click"):
+                    page.locator(selector).first.click(timeout=remaining(2000))
                 diagnostics["dismiss_clicked"].append(selector)
             except Exception:
                 pass  # Optional cookie banners; required fields below fail closed.
@@ -256,7 +282,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # whether the overlay was still up, without logging any page text.
         if dismiss:
             try:
-                diagnostics["banner_visible"] = bool(page.locator(dismiss[0]).first.is_visible())
+                with _at("banner check"):
+                    diagnostics["banner_visible"] = bool(page.locator(dismiss[0]).first.is_visible())
             except Exception:
                 diagnostics["banner_visible"] = None
         log.info("form flow: fields (%d)", len(fields))
@@ -274,12 +301,17 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 for _ in range(3):
                     human_click(page, control, remaining)
                     try:
-                        if control.is_checked(timeout=remaining(1000)):
-                            break
+                        with _at("field check"):
+                            if control.is_checked(timeout=remaining(1000)):
+                                break
                     except Exception:
                         break
             elif action == "select":
-                control.select_option(field.get("value"), timeout=remaining())
+                # Bounded at 10s (a control still unselectable then is a
+                # broken form), marked above the bound so a wedged driver
+                # surfaces as a hang instead of riding to deadline+grace.
+                with _at("field select", 18.0):
+                    control.select_option(field.get("value"), timeout=min(remaining(), 10000))
             elif action == "type":
                 human_click(page, control, remaining)
                 value = field.get("value") or ""
@@ -292,18 +324,28 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 # reads as not focused); the read-back below still fails loud
                 # if the text did not land either way.
                 try:
-                    focused = bool(control.is_focused())
+                    with _at("field focus read"):
+                        focused = bool(control.is_focused())
                 except Exception:
                     focused = False
                 if not focused:
-                    control.click(timeout=remaining())
-                page.keyboard.type(value, delay=random.randint(45, 120))
-                page.wait_for_timeout(min(random.randint(120, 420), remaining()))
+                    with _at("field focus click", 18.0):
+                        control.click(timeout=min(remaining(), 10000))
+                # Keystroke delay is client-side and scales with the value:
+                # the mark's threshold is the worst case + margin, so a slow
+                # type is never mistaken for a park.
+                with _at("field type", len(value) * 0.13 + 8.0):
+                    page.keyboard.type(value, delay=random.randint(45, 120))
+                with _at("field pause"):
+                    page.wait_for_timeout(min(random.randint(120, 420), remaining()))
                 # Typed into the void is the silent killer (empty fields trip
                 # HTML5 validation, which blocks the submit with no POST and
                 # no error). Read back what landed and fail loud on a miss.
-                if value and control.input_value(timeout=remaining()) != value:
-                    raise ValueError("typed text did not land in the field")
+                if value:
+                    with _at("field read-back", 16.0):
+                        landed = control.input_value(timeout=min(remaining(), 8000))
+                    if landed != value:
+                        raise ValueError("typed text did not land in the field")
             else:
                 raise ValueError("Unknown field action")
         diagnostics["field_attempt"] = None
@@ -313,8 +355,15 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             diagnostics["ready_condition_met"] = False
             # Camoufox isolates ordinary evaluation from the page's globals.
             # The prefix opts into its main world (a JS label in other engines).
-            while page.evaluate("mw:(" + ready_expression + ")") is not True:
-                page.wait_for_timeout(remaining(100))
+            # Each iteration re-marks, so the loop may legitimately run for
+            # minutes without ever looking parked — only one stuck call does.
+            while True:
+                with _at("ready check"):
+                    met = page.evaluate("mw:(" + ready_expression + ")") is True
+                if met:
+                    break
+                with _at("ready pause"):
+                    page.wait_for_timeout(remaining(100))
             diagnostics["ready_condition_met"] = True
         phase = "submit"
         log.info("form flow: submit click")
