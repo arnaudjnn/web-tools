@@ -98,5 +98,41 @@ class DeadBrowserPatternTests(unittest.TestCase):
         self.assertTrue(app._DEAD_BROWSER.search("sync api inside the asyncio loop"))
 
 
+class RetryableZeroPostTests(unittest.TestCase):
+    """Which failures the caller may replay (HTTP 503, retryable: true)."""
+
+    def test_pre_submit_failures_with_zero_posts_qualify(self):
+        for error in ("fields_failed", "browser_launch_failed", "navigation_failed"):
+            with self.subTest(error=error):
+                self.assertTrue(app._retryable_zero_post({
+                    "error": error, "form_submissions": 0,
+                    "diagnostics": {"submit_click_attempted": False},
+                }))
+
+    def test_any_post_or_any_click_disqualifies(self):
+        for data in (
+            {"error": "fields_failed", "form_submissions": 1,
+             "diagnostics": {"submit_click_attempted": False}},
+            {"error": "fields_failed", "form_submissions": 0,
+             "diagnostics": {"submit_click_attempted": True}},
+            {"error": "no_submission", "form_submissions": 0,
+             "diagnostics": {"submit_click_attempted": True}},
+            {"error": "outcome_unknown", "form_submissions": 0,
+             "diagnostics": {"submit_click_attempted": True}},
+            {"error": "captcha_token_missing", "form_submissions": 0,
+             "diagnostics": {"submit_click_attempted": True}},
+        ):
+            with self.subTest(error=data["error"], subs=data["form_submissions"]):
+                self.assertFalse(app._retryable_zero_post(data))
+
+    def test_missing_diagnostics_never_replays_a_posted_outcome(self):
+        # launch/parse paths can omit diagnostics; the error allowlist plus
+        # a zero submission count is still the proof.
+        self.assertTrue(app._retryable_zero_post(
+            {"error": "browser_launch_failed", "form_submissions": 0}))
+        self.assertFalse(app._retryable_zero_post(
+            {"error": "outcome_unknown", "form_submissions": 0}))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -960,7 +960,33 @@ async def form_submit(req: FormSubmitRequest):
     except Exception as e:
         log.warning("form-submit unavailable (%s); not retried", type(e).__name__)
         raise HTTPException(status_code=502, detail="Form outcome unavailable; do not automatically retry")
+    if _retryable_zero_post(data):
+        # Provably nothing left this machine: the failure predates the submit
+        # click (or the browser) and the guard saw no submission. Same
+        # contract as the park above — replay the identity.
+        log.warning("form-submit retryable: %s with zero POSTs", data.get("error"))
+        raise HTTPException(status_code=503, detail={
+            "message": "Form never submitted (%s); safe to retry" % data.get("error"),
+            "retryable": True,
+        })
     return FormSubmitResponse(**data, exit_session=req.exit_session or "")
+
+
+def _retryable_zero_post(data: dict) -> bool:
+    """A failed run the caller may safely replay.
+
+    Only failures that PROVE no submission happened qualify: an error raised
+    before the submit click (or before a browser existed), with the guard's
+    submission count still zero. Anything after the click — no_submission,
+    outcome_unknown, a captcha verdict — carries the identity with it and
+    must never be replayed automatically.
+    """
+    diagnostics = data.get("diagnostics") or {}
+    return (
+        data.get("error") in ("fields_failed", "browser_launch_failed", "navigation_failed")
+        and data.get("form_submissions") == 0
+        and not diagnostics.get("submit_click_attempted")
+    )
 
 
 class BytesRequest(BaseModel):

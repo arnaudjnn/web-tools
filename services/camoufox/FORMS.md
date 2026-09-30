@@ -36,7 +36,13 @@ every timeout. A mark older than its threshold means the call never
 returned, and the worker answers **503** with
 `detail = {message, retryable: true}`
 within seconds — no field was touched, no POST left the machine, so that
-attempt's identity may be replayed. The leaked browser is shed with the
+attempt's identity may be replayed. The same 503 answers the structured
+failures that prove the same thing (`_retryable_zero_post`): `fields_failed`
+(died before the submit click), `navigation_failed`, or
+`browser_launch_failed`, each with the guard's submission count still zero.
+After the click nothing is provable — `no_submission` in particular can still
+have the page's native submit in flight when the wait expires — so those stay
+unknown and are never replayed. The leaked browser is shed with the
 process (`FORM_WEDGE_EXIT_S`, 3 in the image), so the retry lands on a
 restarted container. Cleanup failure cannot overwrite an already captured form
 result. A host that cannot launch at all (user namespaces revoked — every
