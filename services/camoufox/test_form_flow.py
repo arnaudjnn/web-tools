@@ -90,6 +90,16 @@ class FormTests(unittest.TestCase):
         result = run_form(self.context, **self.params, captcha_field="0-captcha")
         self.assertIs(result["diagnostics"]["token_present"], False)
 
+    def test_captcha_field_lengths_expose_shape_not_values(self):
+        # Which captcha field the server could be validating: the custom
+        # input (minted) vs the standard response textarea (possibly carried
+        # empty). Lengths only — the token never leaves the wire.
+        self.request.post_data = "0-captcha=private-token&g-recaptcha-response="
+        result = run_form(self.context, **self.params, captcha_field="0-captcha")
+        self.assertEqual(result["diagnostics"]["captcha_field_lengths"],
+                         {"0-captcha": [13], "g-recaptcha-response": [0]})
+        self.assertNotIn("private-token", str(result))
+
     def test_required_missing_token_blocks_every_attempt_without_sending(self):
         self.request.post_data = "email=private-email"
         result = run_form(self.context, **self.params, captcha_field="0-captcha", require_captcha_token=True)

@@ -152,7 +152,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
     diagnostics = {"inspection_only": inspect_only, "captcha_script_requests": 0,
                    "captcha_script_responses": 0, "captcha_script_http_errors": [],
                    "captcha_network_failures": 0, "submit_click_attempted": False,
-                   "token_present": None, "blocked_mutations": 0, "page_script_errors": 0,
+                   "token_present": None, "captcha_field_lengths": None,
+                   "blocked_mutations": 0, "page_script_errors": 0,
                    "navigation_status": None, "captcha_guard_blocked": False,
                    "ready_condition_met": None, "field_attempt": None,
                    "phase": None, "failure_class": None, "dismiss_clicked": [],
@@ -186,12 +187,20 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 return
             # Observe presence only. Never retain, log or return the token/body.
             try:
-                values = parse_qs(route.request.post_data or "")
+                # keep_blank_values: an absent key then means "not in the
+                # form", [''] means "carried but empty" — the distinction
+                # between a server reading the custom field (minted) and the
+                # standard one (which the page may leave blank).
+                values = parse_qs(route.request.post_data or "", keep_blank_values=True)
                 names = [captcha_field] if captcha_field else ["g-recaptcha-response"]
                 diagnostics["token_present"] = any(
                     len(values.get(name, [])) == 1 and
                     values[name][0].strip().lower() not in ("", "null", "undefined", "false")
                     for name in names)
+                watch = sorted({n for n in (captcha_field, "g-recaptcha-response") if n})
+                diagnostics["captcha_field_lengths"] = {
+                    name: [len(v) for v in values.get(name, [])] for name in watch
+                }
             except Exception:
                 diagnostics["token_present"] = None
             if require_captcha_token and diagnostics["token_present"] is not True:
