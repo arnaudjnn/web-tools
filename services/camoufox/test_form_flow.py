@@ -232,6 +232,33 @@ class FormTests(unittest.TestCase):
         self.assertEqual(d["dismiss_clicked"], [])
         self.assertTrue(d["banner_visible"])
 
+    def test_dismiss_retries_when_banner_survives_the_first_click(self):
+        # A click that does not clear the overlay (render race) must be
+        # retried — check-once sent the fields into a covered form (the
+        # 2026-09-29 failure: banner_visible=True, first field timed out).
+        params = dict(self.params, dismiss=["button.accept-cookies"])
+        self.page.locator.return_value.first.is_visible.side_effect = [True, False]
+        result = run_form(self.context, **params)
+        self.assertTrue(result["ok"])
+        d = result["diagnostics"]
+        self.assertEqual(d["dismiss_clicked"],
+                         ["button.accept-cookies", "button.accept-cookies"])
+        self.assertFalse(d["banner_visible"])
+
+    def test_dismiss_catches_a_banner_that_arrives_after_the_click_window(self):
+        # Slow third-party load: nothing to click in round one, the banner
+        # is visible at the check — round two must find and click it (the
+        # 2026-09-30 failure: dismiss_clicked=[] yet banner_visible=True).
+        params = dict(self.params, dismiss=["button.accept-cookies"])
+        first = self.page.locator.return_value.first
+        first.wait_for.side_effect = [TimeoutError("not yet"), None]
+        first.is_visible.side_effect = [True, False]
+        result = run_form(self.context, **params)
+        self.assertTrue(result["ok"])
+        d = result["diagnostics"]
+        self.assertEqual(d["dismiss_clicked"], ["button.accept-cookies"])
+        self.assertFalse(d["banner_visible"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -273,22 +273,39 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         log.info("form flow: scrolled")
         page.wait_for_timeout(min(random.randint(400, 1200), remaining()))
         log.info("form flow: dwell done; dismiss=%s", dismiss)
-        for selector in dismiss or []:
-            try:
-                with _at("dismiss click"):
-                    page.locator(selector).first.click(timeout=remaining(2000))
-                diagnostics["dismiss_clicked"].append(selector)
-            except Exception:
-                pass  # Optional cookie banners; required fields below fail closed.
-        # A banner left covering the form makes the first human_click wait out
-        # its actionability timeout — recorded so a fields_failed can say
-        # whether the overlay was still up, without logging any page text.
-        if dismiss:
+        # The banner can arrive AFTER this moment (slow third-party load) or
+        # survive the first click (render race) — a banner left covering the
+        # form burns the first human_click's whole bounded timeout at the
+        # field. So dismiss is a bounded LOOP: wait for the target, click,
+        # settle, re-check, retry. Check-once let both observed failures
+        # through: a click that did not clear the overlay (2026-09-29), and
+        # a banner that had not loaded at click time yet was visible right
+        # before fields (2026-09-30) — diagnostics recorded the truth and
+        # the fields failed anyway.
+        for _ in range(3 if dismiss else 0):
+            clicked = False
+            for selector in dismiss or []:
+                target = page.locator(selector).first
+                try:
+                    target.wait_for(state="visible", timeout=remaining(3000))
+                except Exception:
+                    continue  # not here (yet) — a late arrival is next round
+                try:
+                    with _at("dismiss click"):
+                        target.click(timeout=remaining(2000))
+                    diagnostics["dismiss_clicked"].append(selector)
+                    clicked = True
+                except Exception:
+                    pass  # Optional cookie banners; required fields below fail closed.
+            if clicked:
+                page.wait_for_timeout(min(random.randint(400, 900), remaining()))
             try:
                 with _at("banner check"):
                     diagnostics["banner_visible"] = bool(page.locator(dismiss[0]).first.is_visible())
             except Exception:
                 diagnostics["banner_visible"] = None
+            if not diagnostics["banner_visible"]:
+                break
         log.info("form flow: fields (%d)", len(fields))
         phase = "fields"
         for field in fields:
