@@ -100,6 +100,23 @@ class FormTests(unittest.TestCase):
                          {"0-captcha": [13], "g-recaptcha-response": [0]})
         self.assertNotIn("private-token", str(result))
 
+    def test_egress_records_country_and_isp_of_the_real_exit(self):
+        # The proxy contract is only checkable from inside the page: which
+        # IP actually minted the token. Shape only, never a body.
+        self.page.evaluate.side_effect = lambda expression, *args, **kwargs: (
+            {"success": True, "country": "Italy",
+             "connection": {"isp": "Vodafone Italia", "asn": 30722}}
+            if "ipwho.is" in expression else True)
+        result = run_form(self.context, **self.params)
+        self.assertEqual(result["diagnostics"]["egress"],
+                         {"country": "Italy", "isp": "Vodafone Italia", "asn": 30722})
+
+    def test_egress_failure_stays_absent_and_does_not_fail_the_run(self):
+        self.page.evaluate.side_effect = RuntimeError("network down")
+        result = run_form(self.context, **self.params)
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["diagnostics"]["egress"])
+
     def test_required_missing_token_blocks_every_attempt_without_sending(self):
         self.request.post_data = "email=private-email"
         result = run_form(self.context, **self.params, captcha_field="0-captcha", require_captcha_token=True)

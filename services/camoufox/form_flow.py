@@ -156,8 +156,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                    "blocked_mutations": 0, "page_script_errors": 0,
                    "navigation_status": None, "captcha_guard_blocked": False,
                    "ready_condition_met": None, "field_attempt": None,
-                   "phase": None, "failure_class": None, "dismiss_clicked": [],
-                   "banner_visible": None, "field_state": None}
+                    "phase": None, "failure_class": None, "dismiss_clicked": [],
+                    "banner_visible": None, "field_state": None, "egress": None}
     result["diagnostics"] = diagnostics
     page = None
     control = None
@@ -258,6 +258,23 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # between this line and a later marker and could not say which call
         # never returned).
         log.info("form flow: wait done")
+        # Which IP does this browser ACTUALLY egress from? The contract says
+        # every run is pinned to the residential pool by PROXY_URL — but a
+        # datacenter or direct egress mints reCAPTCHA tokens from the worst
+        # possible IP and reads exactly like the 2026-09-29 collapse. Fetched
+        # from inside the page, so it traverses the same proxy the form will.
+        try:
+            with _at("egress check", 12.0):
+                egress = page.evaluate(
+                    "fetch('https://ipwho.is/?fields=success,country,connection',"
+                    "{signal:AbortSignal.timeout(8000)}).then(r=>r.json()).catch(()=>null)")
+            if isinstance(egress, dict) and egress.get("success"):
+                connection = egress.get("connection") or {}
+                diagnostics["egress"] = {"country": egress.get("country"),
+                                         "isp": connection.get("isp"),
+                                         "asn": connection.get("asn")}
+        except Exception:
+            diagnostics["egress"] = None
         if inspect_only:
             result["url"] = page.url
             # No page contents/hidden tokens in an inspection response.
