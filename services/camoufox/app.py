@@ -949,7 +949,7 @@ class FormSubmitRequest(BaseModel):
     wait_until: str = Field("domcontentloaded")
     wait_ms: int = Field(4000, ge=0, le=60_000)
     settle_ms: int = Field(20_000, ge=1000, le=120_000)
-    timeout_ms: int = Field(120_000, ge=1000, le=180_000)
+    timeout_ms: int = Field(120_000, ge=1000, le=240_000)
     fresh_ip: bool = Field(True, description="new context + new exit IP (scoring anti-bot is per-IP)")
     exit_session: str | None = Field(None, description="pin the exit: same token = same IP, so a passing exit can be REUSED instead of re-searched")
     gate_text: str | None = Field(None, max_length=300, description="regex on button/link text; after step0, a matching gate is clicked ONCE (atoka business-email gate)")
@@ -1025,7 +1025,13 @@ def _retryable_zero_post(data: dict) -> bool:
     """
     diagnostics = data.get("diagnostics") or {}
     return (
-        data.get("error") in ("fields_failed", "browser_launch_failed", "navigation_failed")
+        data.get("error") in (
+            # Pre-click failures: nothing left this machine (fields, context,
+            # navigation, the readiness gate) — the caller may replay.
+            "fields_failed", "browser_launch_failed", "navigation_failed",
+            "browser_context_failed", "readiness_failed",
+            "deadline_before_browser", "deadline_before_navigation",
+        )
         and data.get("form_submissions") == 0
         and not diagnostics.get("submit_click_attempted")
     )

@@ -104,7 +104,9 @@ class RetryableZeroPostTests(unittest.TestCase):
     """Which failures the caller may replay (HTTP 503, retryable: true)."""
 
     def test_pre_submit_failures_with_zero_posts_qualify(self):
-        for error in ("fields_failed", "browser_launch_failed", "navigation_failed"):
+        for error in ("fields_failed", "browser_launch_failed", "navigation_failed",
+                      "browser_context_failed", "readiness_failed",
+                      "deadline_before_browser", "deadline_before_navigation"):
             with self.subTest(error=error):
                 self.assertTrue(app._retryable_zero_post({
                     "error": error, "form_submissions": 0,
