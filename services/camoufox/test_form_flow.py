@@ -506,6 +506,23 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(result["form_submissions"], 1)
         self.assertTrue(result["html"])
 
+    def test_stop_after_posts_halts_after_the_verifying_step0_post(self):
+        # Warm-up mode: a real step0 POST (that is where the score the
+        # rejects cite gets verified) and then stop — the gate and step2 are
+        # where identities complete, and a warm run must not reach them.
+        # An inspect-only warm never POSTs and so never verifies.
+        self.locator("button, a").is_visible.return_value = False
+        self.locator("#id_1-company_name").is_visible.return_value = False
+        result = run_form(self.context, **{**self.params, "stop_after_posts": 1})
+        self.assertEqual(result["error"], "stopped_after_posts")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["form_submissions"], 1)
+        self.assertFalse(result["diagnostics"]["wizard_gate_clicked"])
+        self.assertFalse(result["diagnostics"]["wizard_step2"])
+        self.assertEqual(self.locs["button, a"].click.call_count, 0)
+        self.assertEqual(self.route.continue_.call_count, 1)  # step0 only
+        self.assertEqual(self.route.abort.call_count, 1)      # its double-fire
+
     def test_gate_and_marker_patterns_must_compile(self):
         with self.assertRaises(re.error):
             validate_form(self.request.url, None, None, gate_text="[", completion_markers=None)

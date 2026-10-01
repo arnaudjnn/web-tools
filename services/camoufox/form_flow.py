@@ -187,7 +187,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              submission_urls=None, wait_until="domcontentloaded", wait_ms=0,
              settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
              require_captcha_token=False, ready_expression=None,
-             gate_text=None, step2=None, step2_submit=None, completion_markers=None):
+             gate_text=None, step2=None, step2_submit=None, completion_markers=None,
+             stop_after_posts=None):
     targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
     deadline = time.monotonic() + timeout_ms / 1000
     result = {"contract_version": 2, "status": 0, "url": url, "html": "",
@@ -555,6 +556,20 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             # context (measured 2026-10-01: first tick, phase=outcome,
             # class=Error). One settle, then every tick tolerates the race.
             page.wait_for_timeout(min(random.randint(700, 1500), remaining()))
+            if stop_after_posts is not None and result["form_submissions"] >= stop_after_posts:
+                # Warm-up mode: the step0 POST is what VERIFIES (the score the
+                # reject cites), so a warm run does a real POST and stops here
+                # — the gate/step2 are where identities complete, and they are
+                # deliberately not reached. An inspect-only warm never POSTs
+                # and so never verifies; measured weaker (a1 stays cold).
+                log.info("form flow: stop_after_posts=%s reached (subs=%s)",
+                         stop_after_posts, result["form_submissions"])
+                try:
+                    result["html"] = page.content()
+                except Exception:
+                    pass
+                result["error"] = "stopped_after_posts"
+                return result
             while True:
                 if time.monotonic() >= deadline:
                     break

@@ -939,6 +939,7 @@ class FormSubmitRequest(BaseModel):
     require_captcha_token: bool = Field(False, description="Abort the form POST if its CAPTCHA field is empty/unreadable; never retry")
     captcha_field: str | None = Field(None, max_length=100, description="POST field checked for token presence only; value is never returned")
     inspect_only: bool = Field(False, description="Navigate without filling/clicking; block same-origin mutating requests")
+    stop_after_posts: int | None = Field(None, ge=1, le=3, description="return right after this many wizard POSTs are sent — warm-up stops after the verifying step0 POST")
     headed: bool = Field(False, description="headed browser (under xvfb) for score-gated forms; headless fleets score 0 on reCAPTCHA v3")
     url: str
     fields: list[FormField] = Field(default_factory=list)
@@ -987,7 +988,7 @@ async def form_submit(req: FormSubmitRequest):
             inspect_only=req.inspect_only, require_captcha_token=req.require_captcha_token,
             ready_expression=req.ready_expression, gate_text=req.gate_text,
             step2=[f.model_dump() for f in req.step2], step2_submit=req.step2_submit,
-            completion_markers=req.completion_markers), url=req.url, deadline=deadline)
+            completion_markers=req.completion_markers, stop_after_posts=req.stop_after_posts), url=req.url, deadline=deadline)
     except FormRetryable as parked:
         # Parked on the one unbounded pre-POST call (the marker says where):
         # no field touched, no POST left this machine — the identity is
