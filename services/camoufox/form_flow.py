@@ -493,27 +493,40 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             def normalize(text):
                 return re.sub(r"\s+", " ", text or "")
 
+            # The POST's own response navigates the page; polling before it
+            # lands races the navigation and dies with a destroyed execution
+            # context (measured 2026-10-01: first tick, phase=outcome,
+            # class=Error). One settle, then every tick tolerates the race.
+            page.wait_for_timeout(min(random.randint(700, 1500), remaining()))
             while True:
                 if time.monotonic() >= deadline:
                     break
                 # One evaluate per tick: url, both step detectors, the error
                 # nodes, the gate button, and the body text (completion
                 # markers live in the text, not the url).
-                state = page.evaluate("""(sel) => {
-                    const q = (s) => s ? document.querySelector(s) : null;
-                    const visible = (el) => !!el && el.getBoundingClientRect().width > 0;
-                    const errs = [...document.querySelectorAll(
-                        '.error-msg,.invalid-feedback,.errorlist')]
-                        .map((e) => (e.textContent || '').replace(/\\s+/g, ' ').trim())
-                        .filter(Boolean);
-                    return {
-                        url: location.href,
-                        step0: visible(q(sel.step0)),
-                        step2: visible(q(sel.step2)),
-                        errs,
-                        text: (document.body.innerText || '').replace(/\\s+/g, ' ')
-                    };
-                }""", {"step0": step0_sel, "step2": step2_sel})
+                try:
+                    state = page.evaluate("""(sel) => {
+                        const q = (s) => s ? document.querySelector(s) : null;
+                        const visible = (el) => !!el && el.getBoundingClientRect().width > 0;
+                        const errs = [...document.querySelectorAll(
+                            '.error-msg,.invalid-feedback,.errorlist')]
+                            .map((e) => (e.textContent || '').replace(/\\s+/g, ' ').trim())
+                            .filter(Boolean);
+                        return {
+                            url: location.href,
+                            step0: visible(q(sel.step0)),
+                            step2: visible(q(sel.step2)),
+                            errs,
+                            text: (document.body.innerText || '').replace(/\\s+/g, ' ')
+                        };
+                    }""", {"step0": step0_sel, "step2": step2_sel})
+                except Exception:
+                    # Mid-navigation: the context will be back next tick.
+                    try:
+                        page.wait_for_timeout(min(random.randint(600, 1200), remaining()))
+                    except TimeoutError:
+                        break
+                    continue
                 state["text"] = normalize(state["text"])
                 if success_url and re.search(success_url, state["url"]):
                     break
@@ -574,7 +587,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     break  # polled to the deadline: incomplete, not unknown
         result["url"] = page.url
         log.info("form flow: capturing content")
-        result["html"] = page.content()
+        try:
+            result["html"] = page.content()
+        except Exception:
+            # A page still navigating at the deadline yields no DOM; the
+            # url/status/error already captured stay valid evidence.
+            result["html"] = ""
         if wizard:
             try:
                 final_text = re.sub(r"\s+", " ",

@@ -380,14 +380,18 @@ class WizardTests(unittest.TestCase):
             guard(self.route)
         self.respond()
 
-    def run_wizard(self, states, final_text=""):
+    def run_wizard(self, states, final_text="", race_once=False):
         ticks = list(states)
+        raced = {"done": False}
 
         def evaluate(expression, *args, **kwargs):
             if expression.startswith("fetch("):
                 return None  # egress probe: absent, as when it fails
             if expression == "document.body.innerText":
                 return final_text
+            if race_once and not raced["done"]:
+                raced["done"] = True
+                raise RuntimeError("Execution context was destroyed")
             self.clock[0] += 2.0  # every poll tick costs two fake seconds
             if ticks:
                 return ticks.pop(0)
@@ -485,6 +489,22 @@ class WizardTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "wizard_incomplete")
         self.assertEqual(result["form_submissions"], 1)
+
+    def test_navigation_race_on_the_first_tick_tolerates_and_recovers(self):
+        # Measured 2026-10-01: the walk's first evaluate raced the step0
+        # POST's own navigation (destroyed execution context), the exception
+        # escaped as phase=outcome/class=Error, and a perfectly good
+        # rejection page was reported as outcome_unknown with no html.
+        self.locator("button, a").is_visible.return_value = False
+        self.locator("#id_1-company_name").is_visible.return_value = False
+        result = self.run_wizard(
+            [{"url": "https://example.test/try", "step0": True, "step2": False,
+              "errs": ["Invalid verification"], "text": "form"}],
+            final_text="Invalid verification", race_once=True)
+        self.assertEqual(result["error"], "wizard_rejected")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["form_submissions"], 1)
+        self.assertTrue(result["html"])
 
     def test_gate_and_marker_patterns_must_compile(self):
         with self.assertRaises(re.error):
