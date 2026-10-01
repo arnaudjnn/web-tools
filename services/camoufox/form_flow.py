@@ -81,7 +81,18 @@ def _at(name, stuck_s=PRE_SUBMIT_STUCK_S):
         reset_live_step()
 
 
-def validate_form(url, submission_urls, success_url):
+def _unmarked(name, stuck_s=PRE_SUBMIT_STUCK_S):
+    """A post-submission driver call: NO retryable mark.
+
+    The mark's whole promise is "no POST left this machine". The wizard's
+    gate and step2 clicks happen AFTER the step0 POST, so a park on one of
+    them must surface as an unknown outcome (never replayed), not as the
+    503-safe-to-retry contract.
+    """
+    return contextlib.nullcontext()
+
+
+def validate_form(url, submission_urls, success_url, gate_text=None, completion_markers=None):
     origin = urlsplit(url)
     if origin.scheme not in ("http", "https") or not origin.hostname or origin.username or origin.password:
         raise ValueError("Invalid form URL")
@@ -92,10 +103,14 @@ def validate_form(url, submission_urls, success_url):
             raise ValueError("Submission URLs must share the form origin")
     if success_url:
         re.compile(success_url)
+    if gate_text:
+        re.compile(gate_text, re.I)
+    for marker in completion_markers or []:
+        re.compile(marker, re.I)
     return {urlsplit(value)._replace(query="", fragment="").geturl() for value in urls}
 
 
-def human_click(page, control, remaining) -> None:
+def human_click(page, control, remaining, pre_submit=True) -> None:
     """Click a control the way a pointer does: bring it into view instantly,
     approach in steps, land off-centre, press and release. An identical
     dead-centre click on every control is its own pattern; a synthetic .click()
@@ -107,21 +122,25 @@ def human_click(page, control, remaining) -> None:
     fails on an overlay the way locator.click does — the miss is silent
     (measured 2026-09-26: every field typed into the void, HTML5 validation
     then blocked the submit with no POST and no error).
+
+    `pre_submit=False` (wizard steps after the first POST) drops the marks:
+    see `_unmarked`.
     """
-    with _at("field scroll"):
+    at = _at if pre_submit else _unmarked
+    with at("field scroll"):
         control.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
     # Instant scrolls do not animate, but layout may need a beat before the
     # rect is readable. Fixed margin, not a scrollY poll: polling would spend
     # page.evaluate calls that belong to the readiness gate.
-    with _at("field settle"):
+    with at("field settle"):
         page.wait_for_timeout(300)
     # Bounded, then marked above that bound: a form field that takes >5s to
     # appear is a broken page (fail fast as fields_failed), and a driver
     # roundtrip that never returns must surface as a hang, not deadline+grace.
-    with _at("field geometry", 13.0):
+    with at("field geometry", 13.0):
         box = control.bounding_box(timeout=min(remaining(), 5000))
     if not box:
-        with _at("field click", 13.0):
+        with at("field click", 13.0):
             control.click(timeout=min(remaining(), 5000))
         return
     tx = box["x"] + box["width"] / 2 + random.uniform(-box["width"] / 4, box["width"] / 4)
@@ -134,7 +153,7 @@ def human_click(page, control, remaining) -> None:
     # job alive, so the approach legitimately takes up to ~15s. 25s covers
     # 18 animated steps with margin; a true park still surfaces far before
     # deadline + grace.
-    with _at("pointer move", 25.0):
+    with at("pointer move", 25.0):
         for i in range(1, steps + 1):
             page.mouse.move(sx + (tx - sx) * i / steps, sy + (ty - sy) * i / steps)
             page.wait_for_timeout(random.randint(8, 30))
@@ -144,8 +163,9 @@ def human_click(page, control, remaining) -> None:
 def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              submission_urls=None, wait_until="domcontentloaded", wait_ms=0,
              settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
-             require_captcha_token=False, ready_expression=None):
-    targets = validate_form(url, submission_urls, success_url)
+             require_captcha_token=False, ready_expression=None,
+             gate_text=None, step2=None, step2_submit=None, completion_markers=None):
+    targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
     deadline = time.monotonic() + timeout_ms / 1000
     result = {"contract_version": 2, "status": 0, "url": url, "html": "",
               "ok": False, "form_submissions": 0, "error": None}
@@ -157,11 +177,14 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                    "navigation_status": None, "captcha_guard_blocked": False,
                    "ready_condition_met": None, "field_attempt": None,
                     "phase": None, "failure_class": None, "dismiss_clicked": [],
-                    "banner_visible": None, "field_state": None, "egress": None}
+                    "banner_visible": None, "field_state": None, "egress": None,
+                    "wizard_gate_clicked": False, "wizard_step2": False}
     result["diagnostics"] = diagnostics
     page = None
     control = None
     phase = "navigation"
+    wizard = bool(gate_text or step2 or completion_markers)
+    last_submission_at = 0.0
 
     def remaining(cap=None):
         value = int((deadline - time.monotonic()) * 1000)
@@ -174,6 +197,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         return request.method == "POST" and target in targets
 
     def guard(route):
+        nonlocal last_submission_at
         target = urlsplit(route.request.url)
         origin = urlsplit(url)
         if inspect_only and route.request.method not in ("GET", "HEAD", "OPTIONS") and (
@@ -182,33 +206,42 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             route.abort("blockedbyclient")
             return
         if is_submission(route.request):
-            if result["form_submissions"] or diagnostics["captcha_guard_blocked"]:
+            # A wizard legitimately POSTs up to three times (step0, the
+            # business-email gate, step2) — seconds apart. What is blocked is
+            # a double-fire of ONE click and a runaway loop past the wizard.
+            now = time.monotonic()
+            if (result["form_submissions"] >= 3 or
+                    (result["form_submissions"] and now - last_submission_at < 1.2) or
+                    diagnostics["captcha_guard_blocked"]):
                 route.abort("blockedbyclient")
                 return
-            # Observe presence only. Never retain, log or return the token/body.
-            try:
-                # keep_blank_values: an absent key then means "not in the
-                # form", [''] means "carried but empty" — the distinction
-                # between a server reading the custom field (minted) and the
-                # standard one (which the page may leave blank).
-                values = parse_qs(route.request.post_data or "", keep_blank_values=True)
-                names = [captcha_field] if captcha_field else ["g-recaptcha-response"]
-                diagnostics["token_present"] = any(
-                    len(values.get(name, [])) == 1 and
-                    values[name][0].strip().lower() not in ("", "null", "undefined", "false")
-                    for name in names)
-                watch = sorted({n for n in (captcha_field, "g-recaptcha-response") if n})
-                diagnostics["captcha_field_lengths"] = {
-                    name: [len(v) for v in values.get(name, [])] for name in watch
-                }
-            except Exception:
-                diagnostics["token_present"] = None
-            if require_captcha_token and diagnostics["token_present"] is not True:
-                diagnostics["captcha_guard_blocked"] = True
-                result["error"] = "captcha_token_missing"
-                route.abort("blockedbyclient")
-                return
-            result["form_submissions"] = 1
+            if result["form_submissions"] == 0:
+                # Token forensics belong to the FIRST (only tokened) POST;
+                # the gate and step2 POSTs carry no captcha field and must
+                # not overwrite or fail the record.
+                try:
+                    # keep_blank_values: an absent key then means "not in the
+                    # form", [''] means "carried but empty" — the distinction
+                    # between a server reading the custom field (minted) and
+                    # the standard one (which the page may leave blank).
+                    values = parse_qs(route.request.post_data or "", keep_blank_values=True)
+                    names = [captcha_field] if captcha_field else ["g-recaptcha-response"]
+                    diagnostics["token_present"] = any(
+                        len(values.get(name, [])) == 1 and
+                        values[name][0].strip().lower() not in ("", "null", "undefined", "false")
+                        for name in names)
+                    watch = sorted({n for n in (captcha_field, "g-recaptcha-response") if n})
+                    diagnostics["captcha_field_lengths"] = {
+                        name: [len(v) for v in values.get(name, [])] for name in watch}
+                except Exception:
+                    diagnostics["token_present"] = None
+                if require_captcha_token and diagnostics["token_present"] is not True:
+                    diagnostics["captcha_guard_blocked"] = True
+                    result["error"] = "captcha_token_missing"
+                    route.abort("blockedbyclient")
+                    return
+            result["form_submissions"] += 1
+            last_submission_at = now
         route.continue_()
 
     def captcha_request(request):
@@ -333,69 +366,75 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             if not diagnostics["banner_visible"]:
                 break
         log.info("form flow: fields (%d)", len(fields))
-        phase = "fields"
-        for field in fields:
-            # Selector only — never the value. On an exception this is the
-            # field that was in flight, which is otherwise invisible (the
-            # outer handler deliberately swallows the message).
-            diagnostics["field_attempt"] = field["selector"]
-            control = page.locator(field["selector"])
-            action = field.get("action", "type")
-            if action == "check":
-                # A human click toggles: ensure the checked state rather than
-                # assuming it, but keep the pointer real throughout.
-                for _ in range(3):
-                    human_click(page, control, remaining)
+
+        def fill_fields(field_list, pre_submit=True):
+            nonlocal control, phase
+            at = _at if pre_submit else _unmarked
+            for field in field_list:
+                # Selector only — never the value. On an exception this is the
+                # field that was in flight, which is otherwise invisible (the
+                # outer handler deliberately swallows the message).
+                diagnostics["field_attempt"] = field["selector"]
+                control = page.locator(field["selector"])
+                action = field.get("action", "type")
+                if action == "check":
+                    # A human click toggles: ensure the checked state rather than
+                    # assuming it, but keep the pointer real throughout.
+                    for _ in range(3):
+                        human_click(page, control, remaining, pre_submit=pre_submit)
+                        try:
+                            with at("field check"):
+                                if control.is_checked(timeout=remaining(1000)):
+                                    break
+                        except Exception:
+                            break
+                elif action == "select":
+                    # Bounded at 10s (a control still unselectable then is a
+                    # broken form), marked above the bound so a wedged driver
+                    # surfaces as a hang instead of riding to deadline+grace.
+                    with at("field select", 18.0):
+                        control.select_option(field.get("value"), timeout=min(remaining(), 10000))
+                elif action == "type":
+                    human_click(page, control, remaining, pre_submit=pre_submit)
+                    value = field.get("value") or ""
+                    # The human click aims by geometry. When focus never landed
+                    # (an overlay swallowed the click, the rect was stale), the
+                    # keystrokes go to whatever already had focus — measured
+                    # 2026-09-29 as a recurring first-field fields_failed. One
+                    # actionability-aware retry: it waits out an overlay instead
+                    # of clicking through it. is_focused is advisory (a raise
+                    # reads as not focused); the read-back below still fails loud
+                    # if the text did not land either way.
                     try:
-                        with _at("field check"):
-                            if control.is_checked(timeout=remaining(1000)):
-                                break
+                        with at("field focus read"):
+                            focused = bool(control.is_focused())
                     except Exception:
-                        break
-            elif action == "select":
-                # Bounded at 10s (a control still unselectable then is a
-                # broken form), marked above the bound so a wedged driver
-                # surfaces as a hang instead of riding to deadline+grace.
-                with _at("field select", 18.0):
-                    control.select_option(field.get("value"), timeout=min(remaining(), 10000))
-            elif action == "type":
-                human_click(page, control, remaining)
-                value = field.get("value") or ""
-                # The human click aims by geometry. When focus never landed
-                # (an overlay swallowed the click, the rect was stale), the
-                # keystrokes go to whatever already had focus — measured
-                # 2026-09-29 as a recurring first-field fields_failed. One
-                # actionability-aware retry: it waits out an overlay instead
-                # of clicking through it. is_focused is advisory (a raise
-                # reads as not focused); the read-back below still fails loud
-                # if the text did not land either way.
-                try:
-                    with _at("field focus read"):
-                        focused = bool(control.is_focused())
-                except Exception:
-                    focused = False
-                if not focused:
-                    with _at("field focus click", 18.0):
-                        control.click(timeout=min(remaining(), 10000))
-                # Keystroke delay is client-side and scales with the value;
-                # dispatch itself is animated in camoufox. The mark's
-                # threshold is the worst case + margin, so a slow type is
-                # never mistaken for a park.
-                with _at("field type", len(value) * 0.25 + 10.0):
-                    page.keyboard.type(value, delay=random.randint(45, 120))
-                with _at("field pause"):
-                    page.wait_for_timeout(min(random.randint(120, 420), remaining()))
-                # Typed into the void is the silent killer (empty fields trip
-                # HTML5 validation, which blocks the submit with no POST and
-                # no error). Read back what landed and fail loud on a miss.
-                if value:
-                    with _at("field read-back", 16.0):
-                        landed = control.input_value(timeout=min(remaining(), 8000))
-                    if landed != value:
-                        raise ValueError("typed text did not land in the field")
-            else:
-                raise ValueError("Unknown field action")
-        diagnostics["field_attempt"] = None
+                        focused = False
+                    if not focused:
+                        with at("field focus click", 18.0):
+                            control.click(timeout=min(remaining(), 10000))
+                    # Keystroke delay is client-side and scales with the value;
+                    # dispatch itself is animated in camoufox. The mark's
+                    # threshold is the worst case + margin, so a slow type is
+                    # never mistaken for a park.
+                    with at("field type", len(value) * 0.25 + 10.0):
+                        page.keyboard.type(value, delay=random.randint(45, 120))
+                    with at("field pause"):
+                        page.wait_for_timeout(min(random.randint(120, 420), remaining()))
+                    # Typed into the void is the silent killer (empty fields trip
+                    # HTML5 validation, which blocks the submit with no POST and
+                    # no error). Read back what landed and fail loud on a miss.
+                    if value:
+                        with at("field read-back", 16.0):
+                            landed = control.input_value(timeout=min(remaining(), 8000))
+                        if landed != value:
+                            raise ValueError("typed text did not land in the field")
+                else:
+                    raise ValueError("Unknown field action")
+            diagnostics["field_attempt"] = None
+
+        phase = "fields"
+        fill_fields(fields)
         if ready_expression:
             phase = "readiness"
             log.info("form flow: readiness")
@@ -422,24 +461,143 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         diagnostics["submit_click_attempted"] = True
         page.locator(submit).click(timeout=remaining())
         phase = "outcome"
-        log.info("form flow: waiting for outcome (success_url=%s)", bool(success_url))
-        try:
-            if success_url:
-                page.wait_for_url(re.compile(success_url), timeout=remaining(settle_ms))
-            else:
-                page.wait_for_load_state("networkidle", timeout=remaining(settle_ms))
-        except Exception:
-            pass  # Rejections stay on the form. Capture them, don't resubmit.
+        if not wizard:
+            log.info("form flow: waiting for outcome (success_url=%s)", bool(success_url))
+            try:
+                if success_url:
+                    page.wait_for_url(re.compile(success_url), timeout=remaining(settle_ms))
+                else:
+                    page.wait_for_load_state("networkidle", timeout=remaining(settle_ms))
+            except Exception:
+                pass  # Rejections stay on the form. Capture them, don't resubmit.
+        else:
+            # Wizard outcome walk. step0's answer is one of four shapes and
+            # only the URL sometimes distinguishes them: the next step, a
+            # business-email gate needing a click, a rejection rendered as
+            # errors ON the form, or completion whose body copy (manual
+            # review, same URL) is the ONLY signal. So: poll, act once per
+            # wizard step, never re-POST (the guard allows exactly the
+            # wizard's own three: step0, gate, step2).
+            log.info("form flow: wizard outcome walk (gate=%s step2=%s success_url=%s)",
+                     bool(gate_text), bool(step2), bool(success_url))
+            gate_re = re.compile(gate_text, re.I) if gate_text else None
+            marker_res = [re.compile(m, re.I) for m in (completion_markers or [])]
+            # "still on step0" detector = the first field of the real form.
+            step0_sel = fields[0]["selector"] if fields else None
+            step2_sel = step2[0]["selector"] if step2 else None
+            step2_submit_sel = step2_submit or "form button"
+            gate_clicked = False
+            step2_done = False
+            wizard_error = None
+
+            def normalize(text):
+                return re.sub(r"\s+", " ", text or "")
+
+            while True:
+                if time.monotonic() >= deadline:
+                    break
+                # One evaluate per tick: url, both step detectors, the error
+                # nodes, the gate button, and the body text (completion
+                # markers live in the text, not the url).
+                state = page.evaluate("""(sel) => {
+                    const q = (s) => s ? document.querySelector(s) : null;
+                    const visible = (el) => !!el && el.getBoundingClientRect().width > 0;
+                    const errs = [...document.querySelectorAll(
+                        '.error-msg,.invalid-feedback,.errorlist')]
+                        .map((e) => (e.textContent || '').replace(/\\s+/g, ' ').trim())
+                        .filter(Boolean);
+                    return {
+                        url: location.href,
+                        step0: visible(q(sel.step0)),
+                        step2: visible(q(sel.step2)),
+                        errs,
+                        text: (document.body.innerText || '').replace(/\\s+/g, ' ')
+                    };
+                }""", {"step0": step0_sel, "step2": step2_sel})
+                state["text"] = normalize(state["text"])
+                if success_url and re.search(success_url, state["url"]):
+                    break
+                if any(m.search(state["text"]) for m in marker_res):
+                    break
+                if gate_re and not gate_clicked:
+                    # The gate is a BUTTON (not a link) inside the warning.
+                    # Once only: a second click would be a duplicate POST.
+                    gate_loc = page.locator(
+                        "button, a", has_text=gate_re).first
+                    try:
+                        if gate_loc.is_visible():
+                            log.info("form flow: clicking business-email gate")
+                            page.wait_for_timeout(min(random.randint(400, 900), remaining()))
+                            human_click(page, gate_loc, remaining, pre_submit=False)
+                            gate_clicked = True
+                            diagnostics["wizard_gate_clicked"] = True
+                            page.wait_for_timeout(min(random.randint(700, 1500), remaining()))
+                            continue
+                    except Exception:
+                        pass  # not rendered (yet) — next tick
+                if step2_sel and not step2_done:
+                    probe = page.locator(step2_sel).first
+                    try:
+                        step2_visible = probe.is_visible()
+                    except Exception:
+                        step2_visible = False
+                    if step2_visible:
+                        log.info("form flow: step2 — filling %d field(s)", len(step2 or []))
+                        # phase marks WHERE a raise happened, not retryability:
+                        # step0's POST is already out, so any later failure
+                        # stays outcome_unknown (never replayed) while the
+                        # diagnostics still name the field.
+                        phase = "fields"
+                        fill_fields(step2 or [], pre_submit=False)
+                        page.wait_for_timeout(min(random.randint(500, 1100), remaining()))
+                        phase = "outcome"
+                        human_click(page, page.locator(step2_submit_sel).first,
+                                    remaining, pre_submit=False)
+                        step2_done = True
+                        diagnostics["wizard_step2"] = True
+                        page.wait_for_timeout(min(random.randint(700, 1500), remaining()))
+                        continue
+                # Terminal rejections: the form reset to step0 after step2, or
+                # an error that is NOT the gate's own message (a captcha or
+                # server rejection stays on the form — capture, never re-POST).
+                business_only = bool(state["errs"]) and all(
+                    re.search(r"business email", e, re.I) for e in state["errs"])
+                if step2_done and state["step0"] and not state["step2"]:
+                    wizard_error = "wizard_reset"
+                    break
+                if state["errs"] and not business_only:
+                    wizard_error = "wizard_rejected"
+                    break
+                try:
+                    page.wait_for_timeout(min(random.randint(700, 1300), remaining()))
+                except TimeoutError:
+                    break  # polled to the deadline: incomplete, not unknown
         result["url"] = page.url
         log.info("form flow: capturing content")
         result["html"] = page.content()
-        result["ok"] = bool(result["form_submissions"] == 1 and
-                            200 <= result["status"] < 400 and success_url and
-                            re.search(success_url, result["url"]))
+        if wizard:
+            try:
+                final_text = re.sub(r"\s+", " ",
+                                    page.evaluate("document.body.innerText") or "")
+            except Exception:
+                final_text = ""
+            marker_hit = any(m.search(final_text) for m in marker_res)
+            url_hit = bool(success_url and re.search(success_url, result["url"]))
+            status_ok = bool(result["status"]) and 200 <= result["status"] < 400
+            result["ok"] = bool(result["form_submissions"] >= 1 and status_ok and
+                                (url_hit or marker_hit))
+            if wizard_error and not result["error"]:
+                result["error"] = wizard_error
+        else:
+            result["ok"] = bool(result["form_submissions"] == 1 and
+                                200 <= result["status"] < 400 and success_url and
+                                re.search(success_url, result["url"]))
         if not result["form_submissions"] and not result["error"]:
             result["error"] = "no_submission"
         elif result["form_submissions"] and not result["status"]:
             result["error"] = "outcome_unknown"
+        elif wizard and not result["ok"] and not result["error"]:
+            result["error"] = "wizard_incomplete"
     except Exception as error:
         # Never expose field values, page exception text or proxy credentials.
         # The CLASS name is not text — it separates a click that timed out from

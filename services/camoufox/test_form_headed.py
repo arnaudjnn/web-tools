@@ -11,8 +11,11 @@ construction-time kwargs with no runtime dependency on them.
 """
 import os
 import sys
+import json
+import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 RECORDED = []
 
@@ -65,6 +68,8 @@ def _install_stubs():
             raise AssertionError("must not launch in this test")
 
     sync_api.Camoufox = _Camoufox
+    utils = _stub_module("camoufox.utils")
+    utils.launch_options = lambda **kwargs: {**kwargs}
 
 
 _install_stubs()
@@ -97,6 +102,37 @@ class HeadedFormBrowserTests(unittest.TestCase):
         # pydantic is stubbed out, so assert the field declaration survives on
         # the model rather than validating (annotations are strings here).
         self.assertIn("headed", app.FormSubmitRequest.__annotations__)
+
+    def test_profile_reuses_fingerprint_and_overrides_per_request(self):
+        # A named profile persists ONE launch's options (fingerprint drawn
+        # once); later launches reload them and override only what belongs to
+        # the request — exit, headless — never what is on disk.
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"FORM_PROFILE_DIR": root}):
+            app._form_browser("s-p1", False, False, "bat-1")
+            first = RECORDED[0]
+            self.assertTrue(first["persistent_context"])
+            opts1 = first["from_options"]
+            self.assertTrue(opts1["headless"])
+            self.assertEqual(opts1["user_data_dir"], os.path.join(root, "bat-1"))
+            app._form_browser("s-p2", False, True, "bat-1")
+            opts2 = RECORDED[1]["from_options"]
+            self.assertFalse(opts2["headless"])
+            self.assertNotEqual(opts2["proxy"]["password"], opts1["proxy"]["password"])
+            self.assertEqual(opts2["user_data_dir"], opts1["user_data_dir"])
+            with open(os.path.join(root, "bat-1", "fingerprint.json")) as handle:
+                disk = json.load(handle)
+            self.assertEqual(disk["proxy"], opts1["proxy"])
+
+    def test_profile_is_the_request_scoped_name(self):
+        with tempfile.TemporaryDirectory() as root, \
+                patch.dict(os.environ, {"FORM_PROFILE_DIR": root}):
+            app._form_browser("s-p3", False, False, "bat-a")
+            app._form_browser("s-p4", False, False, "bat-b")
+            self.assertNotEqual(RECORDED[0]["from_options"]["user_data_dir"],
+                                RECORDED[1]["from_options"]["user_data_dir"])
+            self.assertTrue(os.path.isdir(os.path.join(root, "bat-a")))
+            self.assertTrue(os.path.isdir(os.path.join(root, "bat-b")))
 
 
 if __name__ == "__main__":

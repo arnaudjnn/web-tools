@@ -71,6 +71,7 @@ def run_isolated_form(browser_factory, *, deadline, **params):
     """No request can reach the target until browser and context are ready."""
     validate_form(params["url"], params.get("submission_urls"), params.get("success_url"))
     manager = context = None
+    context_owned = True
     try:
         # One launch retry: the first launch of a fresh process (tunnel still
         # coming up, proxy exit cycling) fails transiently, and today that
@@ -107,7 +108,15 @@ def run_isolated_form(browser_factory, *, deadline, **params):
                     return not_started(params["url"], "browser_launch_failed")
                 time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
         try:
-            context = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
+            if hasattr(browser, "new_context"):
+                context = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
+            else:
+                # A persistent profile launches straight into ONE context —
+                # there is no Browser to derive a fresh one from, and the
+                # profile IS the identity (closing it here would burn the
+                # warmth).
+                context = browser
+                context_owned = False
             log.info("form phase: context ready")
         except Exception as error:
             log.warning("form context failed (%s); no submission", type(error).__name__)
@@ -120,8 +129,12 @@ def run_isolated_form(browser_factory, *, deadline, **params):
         log.info("form phase: entering run_form (budget=%sms)", budget)
         return run_form(context, timeout_ms=budget, **params)
     finally:
-        for close in ([context.close] if context is not None else []) + (
-                [lambda: manager.__exit__(None, None, None)] if manager is not None else []):
+        closes = []
+        if context is not None and context_owned:
+            closes.append(context.close)
+        if manager is not None:
+            closes.append(lambda: manager.__exit__(None, None, None))
+        for close in closes:
             try:
                 close()
             except Exception as error:

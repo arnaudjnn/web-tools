@@ -588,6 +588,11 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       freshIp: params.fresh_ip !== false,
       exitSession: params.exit_session as string | undefined,
       headed: params.headed === true,
+      gateText: params.gate_text as string | undefined,
+      step2: params.step2 as never,
+      step2Submit: params.step2_submit as string | undefined,
+      completionMarkers: params.completion_markers as string[] | undefined,
+      profile: params.profile as string | undefined,
     });
     return trace('web_form_submit', {
       content: [

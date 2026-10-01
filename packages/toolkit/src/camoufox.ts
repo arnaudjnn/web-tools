@@ -161,6 +161,17 @@ export function camoufoxFormSubmit(params: {
   /** Headed browser under xvfb for score-gated forms (reCAPTCHA v3 refuses
    *  the headless fingerprint). Default headless; other readers unaffected. */
   headed?: boolean;
+  /** Wizard: regex on the business-email gate's button text — clicked ONCE
+   *  after step0 when it renders. */
+  gateText?: string;
+  /** Wizard: the second step's fields, filled+submitted only when it renders. */
+  step2?: FormFieldSpec[];
+  /** Wizard: step2's submit selector (default 'form button'). */
+  step2Submit?: string;
+  /** Wizard: body-text regexes; a match is completion even on the same URL. */
+  completionMarkers?: string[];
+  /** Named persistent profile (warm cookies/fingerprint); omit = isolated. */
+  profile?: string;
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 120_000;
   return call<CamoufoxFormSubmit>(
@@ -183,6 +194,11 @@ export function camoufoxFormSubmit(params: {
       fresh_ip: params.freshIp !== false,
       ...(params.exitSession ? { exit_session: params.exitSession } : {}),
       ...(params.headed ? { headed: true } : {}),
+      ...(params.gateText ? { gate_text: params.gateText } : {}),
+      ...(params.step2 ? { step2: params.step2 } : {}),
+      ...(params.step2Submit ? { step2_submit: params.step2Submit } : {}),
+      ...(params.completionMarkers ? { completion_markers: params.completionMarkers } : {}),
+      ...(params.profile ? { profile: params.profile } : {}),
     },
     timeoutMs + 60_000,
   );

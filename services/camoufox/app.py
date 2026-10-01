@@ -69,6 +69,7 @@ import random
 import re
 import secrets
 import threading
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -78,6 +79,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from camoufox.sync_api import Camoufox
+from camoufox.utils import launch_options
 from form_worker import FormRetryable, FormWorker, run_isolated_form
 import launch_health
 
@@ -613,7 +615,13 @@ _form_worker = FormWorker()
 _form_proxy_session = secrets.token_hex(6)
 
 
-def _form_browser(session, main_world_eval=False, headed=False):
+def _profile_dir(profile: str) -> str:
+    root = os.environ.get("FORM_PROFILE_DIR") or os.path.join(
+        tempfile.gettempdir(), "form-profiles")
+    return os.path.join(root, profile)
+
+
+def _form_browser(session, main_world_eval=False, headed=False, profile=None):
     proxy = parse_proxy(PROXY_URL, session)
     if proxy is None:
         raise RuntimeError("PROXY_URL is required")
@@ -621,8 +629,34 @@ def _form_browser(session, main_world_eval=False, headed=False):
     # headless fingerprint while the isolated per-submit browser keeps it from
     # disturbing the shared headless readers. Needs a display — the image runs
     # under xvfb-run (see Dockerfile), so :99 is always there.
-    return Camoufox(headless=not headed, geoip=True, humanize=True, proxy=proxy, timeout=30000,
-                    main_world_eval=main_world_eval)
+    headless = not headed
+    if not profile:
+        return Camoufox(headless=headless, geoip=True, humanize=True, proxy=proxy, timeout=30000,
+                        main_world_eval=main_world_eval)
+    # Named persistent profile: cookies + fingerprint the target has already
+    # seen (the reCAPTCHA verdict is per-session, not per-IP alone). The FIRST
+    # launch's options are saved verbatim (fingerprint drawn once); later
+    # launches reload them and override only what belongs to the request —
+    # the exit (rotating it must not carry the old identity's geo) and the
+    # headless flag. Sequential runs share one process under the form
+    # worker's single admission, so the profile dir is never opened twice.
+    directory = _profile_dir(profile)
+    os.makedirs(directory, exist_ok=True)
+    opts_file = os.path.join(directory, "fingerprint.json")
+    if os.path.exists(opts_file):
+        with open(opts_file) as handle:
+            opts = json.load(handle)
+    else:
+        opts = launch_options(headless=headless, geoip=True, humanize=True, proxy=proxy,
+                              timeout=30000, main_world_eval=main_world_eval,
+                              user_data_dir=directory)
+        with open(opts_file, "w") as handle:
+            json.dump(opts, handle)
+    opts["proxy"] = proxy
+    opts["headless"] = headless
+    opts["user_data_dir"] = directory
+    opts["service_workers"] = "block"
+    return Camoufox(from_options=opts, persistent_context=True)
 
 
 def _do_bytes(url, timeout_ms) -> dict:
@@ -918,6 +952,11 @@ class FormSubmitRequest(BaseModel):
     timeout_ms: int = Field(120_000, ge=1000, le=180_000)
     fresh_ip: bool = Field(True, description="new context + new exit IP (scoring anti-bot is per-IP)")
     exit_session: str | None = Field(None, description="pin the exit: same token = same IP, so a passing exit can be REUSED instead of re-searched")
+    gate_text: str | None = Field(None, max_length=300, description="regex on button/link text; after step0, a matching gate is clicked ONCE (atoka business-email gate)")
+    step2: list[FormField] = Field(default_factory=list, description="fields of the wizard's second step, filled+submitted only when that step renders")
+    step2_submit: str | None = Field(None, max_length=300, description="CSS selector of step2's submit control; defaults to 'form button'")
+    completion_markers: list[str] = Field(default_factory=list, max_length=10, description="regexes on body text; a match counts as completion even when the URL does not change")
+    profile: str | None = Field(None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$", description="named persistent profile: warm cookies/fingerprint reused across submissions (empty = isolated, default)")
 
 
 class FormSubmitResponse(BaseModel):
@@ -939,13 +978,16 @@ async def form_submit(req: FormSubmitRequest):
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
         data = await _form_worker.run(partial(run_isolated_form,
-            partial(_form_browser, session, bool(req.ready_expression), req.headed), deadline=deadline, url=req.url,
+            partial(_form_browser, session, bool(req.ready_expression), req.headed, req.profile),
+            deadline=deadline, url=req.url,
             fields=[f.model_dump() for f in req.fields], submit=req.submit,
             dismiss=req.dismiss, success_url=req.success_url,
             wait_until=req.wait_until, wait_ms=req.wait_ms, settle_ms=req.settle_ms,
             submission_urls=req.submission_urls, captcha_field=req.captcha_field,
             inspect_only=req.inspect_only, require_captcha_token=req.require_captcha_token,
-            ready_expression=req.ready_expression), url=req.url, deadline=deadline)
+            ready_expression=req.ready_expression, gate_text=req.gate_text,
+            step2=[f.model_dump() for f in req.step2], step2_submit=req.step2_submit,
+            completion_markers=req.completion_markers), url=req.url, deadline=deadline)
     except FormRetryable as parked:
         # Parked on the one unbounded pre-POST call (the marker says where):
         # no field touched, no POST left this machine — the identity is

@@ -189,6 +189,39 @@ export const WebFormSubmitInput = z.object({
     .boolean()
     .optional()
     .describe('Headed browser under xvfb for score-gated forms; headless fleets score 0 on reCAPTCHA v3'),
+  gate_text: z
+    .string()
+    .min(1)
+    .max(300)
+    .optional()
+    .describe('Regex on button/link text; after step0 a matching gate (e.g. business-email warning) is clicked ONCE'),
+  step2: z
+    .array(
+      z.object({
+        selector: z.string().describe('CSS selector of the control'),
+        value: z.string().optional().describe('text to type, or option value for action=select'),
+        action: z.enum(['type', 'check', 'select']).optional().describe('default: type'),
+      }),
+    )
+    .optional()
+    .describe("A wizard's second step: filled and submitted only if/when that step renders"),
+  step2_submit: z
+    .string()
+    .min(1)
+    .max(300)
+    .optional()
+    .describe("CSS selector of step2's submit control (default: 'form button')"),
+  completion_markers: z
+    .array(z.string().min(1))
+    .max(10)
+    .optional()
+    .describe('Regexes on body text; a match counts as completion even when the URL never changes'),
+  profile: z
+    .string()
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
+    .max(64)
+    .optional()
+    .describe('Named persistent profile: warm cookies + fingerprint reused across submissions (empty = isolated)'),
 });
 
 export const WebEvalInput = z.object({

@@ -6,11 +6,27 @@ owns navigation, required-field filling, isolated cookies, cleanup and a
 context-wide one-POST guard. It lets the page's own submit handler run and
 supplies no CAPTCHA answer itself; it never promises provider acceptance.
 
-Version 2 adds `contract_version: 2`, `form_submissions: 0 | 1`, and nullable
+Version 2 adds `contract_version: 2`, `form_submissions`, and nullable
 `error`. `status` is the actual matching POST response, not the initial GET.
 `submission_urls` optionally names same-origin POST endpoints sharing the same
-budget (defaults to `url`; query strings are ignored). `ok` requires one POST,
-a 2xx/3xx response and a matching `success_url`.
+budget (defaults to `url`; query strings are ignored). `ok` requires at least
+one POST, a 2xx/3xx response and a matching `success_url` — or, on a wizard
+(below), a completion marker in the body text.
+
+A wizard (`gate_text`, `step2`, `step2_submit`, `completion_markers`) is a
+multi-step form: after the single fill+submit, the answer may be a gate
+button (`gate_text`, a regex on its text — clicked ONCE, never twice), a
+second step whose own fields+submit (`step2`, default selector `form
+button`) are filled only when that step renders, or a completion that never
+changes the URL (`completion_markers`: regexes on body text — the site's
+manual-review end state). The POST guard therefore allows up to three
+POSTs, seconds apart; a same-click double-fire or a fourth aborts. Step0
+rejections render as errors ON the form and return `wizard_rejected` (a
+real answer: replayable under the caller's own rejection rules); a reset
+after step2 is `wizard_reset` and a deadline mid-wizard is
+`wizard_incomplete` — both may conceal a performed POST and are never
+replayed. All driver calls AFTER step0's POST run without retryable marks:
+a park there is an unknown outcome, never a 503.
 
 Required field errors prevent the click. Form jobs never use the read-only
 browser recovery/retry wrapper. Their deadline starts before queueing; expired
@@ -115,6 +131,16 @@ submission, but cannot determine whether a populated token will be accepted.
 mutating requests. It returns no HTML and never reports form success. Use this
 to check script delivery without consuming a mailbox or creating an account.
 It cannot measure a token generated only on submit: `token_present` stays null.
+
+`profile: "<name>"` launches the form in a NAMED persistent context
+(`FORM_PROFILE_DIR/<name>/`, default under the system temp dir): cookies and
+a fingerprint the target has already seen are reused across submissions,
+which is what a per-session score (reCAPTCHA v3) responds to. The first
+launch's options are persisted to `fingerprint.json`; later launches reload
+them and override only the request-scoped fields (exit/proxy, headless).
+Omit `profile` for the default isolated browser per submit. Profiles are
+per-replica (ephemeral filesystem) and never opened concurrently — the form
+worker's admission is serial.
 
 Tests (only our loopback fixture receives submissions):
 

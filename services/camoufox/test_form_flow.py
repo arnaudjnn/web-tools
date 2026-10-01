@@ -1,9 +1,11 @@
 import ast
 import pathlib
+import re
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+import form_flow
 from form_flow import run_form, validate_form
 
 
@@ -285,6 +287,210 @@ class FormTests(unittest.TestCase):
         d = result["diagnostics"]
         self.assertEqual(d["dismiss_clicked"], ["button.accept-cookies"])
         self.assertFalse(d["banner_visible"])
+
+
+class WizardTests(unittest.TestCase):
+    """atoka's wizard: step0 -> business-email gate -> step2 -> completion.
+
+    step0's answer is one of four shapes and only the URL sometimes
+    distinguishes them: the next step, a gate needing one click, a
+    rejection rendered as errors ON the form, or completion whose body
+    copy is the only signal (manual review stays on the same URL). The
+    guard allows exactly the wizard's own three POSTs, seconds apart —
+    a same-click double-fire or a fourth aborts. The clock is fake so
+    those gaps are deterministic.
+    """
+
+    def setUp(self):
+        self.clock = [1_000.0]
+        patcher = patch.object(form_flow.time, "monotonic", lambda: self.clock[0])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.locs = {}
+        self.clicks = 0
+
+        class Loc(Mock):
+            @property
+            def first(self):
+                return self
+
+        def locator(selector, **kwargs):
+            loc = self.locs.get(selector)
+            if loc is None:
+                loc = self.locs[selector] = Loc()
+                loc.bounding_box.return_value = {"x": 10, "y": 10,
+                                                 "width": 100, "height": 20}
+            return loc
+
+        self.locator = locator
+
+        def mouse_click(*args, **kwargs):
+            # human_click ends in a pointer click; the wizard's own POSTs
+            # hang off clicks 2 (gate) and 5 (step2 submit).
+            self.clicks += 1
+            if self.clicks == 2:
+                self.fire_post()
+            elif self.clicks == 5:
+                self.fire_post(double=True)
+
+        self.page = Mock()
+        self.page.url = "https://example.test/try"
+        self.page.content.return_value = "<html>wizard</html>"
+        self.page.locator.side_effect = locator
+        self.page.mouse.click.side_effect = mouse_click
+        self.context = Mock()
+        self.context.new_page.return_value = self.page
+        self.request = SimpleNamespace(method="POST", url="https://example.test/try")
+        self.route = Mock(request=self.request)
+        self.locator("#name").input_value.return_value = "private-value"
+        self.locator("#id_1-company_name").input_value.return_value = "Verdi Consulenza"
+        self.locator("#id_1-tos").is_checked.return_value = True
+        self.locator("#submit").click.side_effect = self.post_step0
+        self.params = dict(
+            url="https://example.test/try",
+            fields=[{"selector": "#name", "value": "private-value"}],
+            submit="#submit",
+            success_url=r"^https://example\.test/complete$",
+            gate_text="To complete the registration click here",
+            step2=[{"selector": "#id_1-company_name", "value": "Verdi Consulenza"},
+                   {"selector": "#id_1-tos", "action": "check"}],
+            completion_markers=[r"And now, what happens\?"],
+            timeout_ms=120_000,
+        )
+
+    def guard(self):
+        return self.context.route.call_args.args[1]
+
+    def respond(self, status=200):
+        self.page.on.call_args.args[1](
+            SimpleNamespace(request=self.request, status=status))
+
+    def post_step0(self, **kwargs):
+        self.clock[0] += 5.0
+        guard = self.guard()
+        guard(self.route)
+        guard(self.route)  # A second page handler tries the same POST.
+        self.respond()
+
+    def fire_post(self, double=False):
+        self.clock[0] += 5.0
+        guard = self.guard()
+        guard(self.route)
+        if double:
+            guard(self.route)
+        self.respond()
+
+    def run_wizard(self, states, final_text=""):
+        ticks = list(states)
+
+        def evaluate(expression, *args, **kwargs):
+            if expression.startswith("fetch("):
+                return None  # egress probe: absent, as when it fails
+            if expression == "document.body.innerText":
+                return final_text
+            self.clock[0] += 2.0  # every poll tick costs two fake seconds
+            if ticks:
+                return ticks.pop(0)
+            return {"url": "https://example.test/try", "step0": True,
+                    "step2": False, "errs": [], "text": "wizard form"}
+
+        self.page.evaluate.side_effect = evaluate
+        return run_form(self.context, **self.params)
+
+    def gate_warning(self, **over):
+        state = {"url": "https://example.test/try", "step0": True, "step2": False,
+                 "errs": ["Please use a business email address"],
+                 "text": "To complete the registration click here"}
+        state.update(over)
+        return state
+
+    def test_wizard_completes_on_body_copy_after_three_posts(self):
+        # Manual review: same URL, no form, the body copy is the ONLY signal.
+        self.locator("button, a").is_visible.return_value = True
+        self.locator("#id_1-company_name").is_visible.return_value = True
+        result = self.run_wizard(
+            [self.gate_warning(),
+             {"url": "https://example.test/try", "step0": True, "step2": True,
+              "errs": [], "text": "company step"},
+             {"url": "https://example.test/try", "step0": False, "step2": False,
+              "errs": [],
+              "text": "And now, what happens? you will receive a notification"}],
+            final_text="And now, what happens? you will receive a notification at"
+                       " the email address you provided")
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(result["form_submissions"], 3)  # step0, gate, step2
+        # The same-click double-fires aborted (step0 and step2) while the
+        # wizard's own three POSTs passed the guard.
+        self.assertEqual(self.route.continue_.call_count, 3)
+        self.assertEqual(self.route.abort.call_count, 2)
+        d = result["diagnostics"]
+        self.assertTrue(d["wizard_gate_clicked"])
+        self.assertTrue(d["wizard_step2"])
+        self.assertEqual(self.clicks, 5)
+        self.assertEqual(self.locs["button, a"].bounding_box.call_count, 1)
+
+    def test_gate_clicks_once_even_when_the_warning_persists(self):
+        # The business-email error stays rendered across ticks; the gate is
+        # clicked exactly once — a second click would be a duplicate POST.
+        self.locator("button, a").is_visible.return_value = True
+        self.locator("#id_1-company_name").is_visible.return_value = False
+        result = self.run_wizard(
+            [self.gate_warning(), self.gate_warning(),
+             {"url": "https://example.test/try", "step0": True, "step2": False,
+              "errs": [], "text": "And now, what happens?"}],
+            final_text="And now, what happens?")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["form_submissions"], 2)  # step0 + gate only
+        self.assertEqual(self.locs["button, a"].bounding_box.call_count, 1)
+        self.assertTrue(result["diagnostics"]["wizard_gate_clicked"])
+        self.assertFalse(result["diagnostics"]["wizard_step2"])
+
+    def test_rejection_after_step0_is_captured_and_never_reposted(self):
+        # A captcha/server rejection renders as errors on the form: capture
+        # them, never re-POST the identity.
+        self.locator("button, a").is_visible.return_value = False
+        self.locator("#id_1-company_name").is_visible.return_value = False
+        result = self.run_wizard(
+            [{"url": "https://example.test/try", "step0": True, "step2": False,
+              "errs": ["Invalid verification"], "text": "form"}],
+            final_text="Invalid verification")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "wizard_rejected")
+        self.assertEqual(result["form_submissions"], 1)
+        self.assertEqual(self.route.continue_.call_count, 1)  # step0 only
+
+    def test_step0_reset_after_step2_is_a_rejection(self):
+        # step2 POST answered by the form rendered from scratch: the wizard
+        # reset — never a completion, never another POST.
+        self.locator("button, a").is_visible.return_value = True
+        self.locator("#id_1-company_name").is_visible.return_value = True
+        result = self.run_wizard(
+            [self.gate_warning(),
+             {"url": "https://example.test/try", "step0": True, "step2": True,
+              "errs": [], "text": "company step"},
+             {"url": "https://example.test/try", "step0": True, "step2": False,
+              "errs": [], "text": "wizard form"}],
+            final_text="wizard form")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "wizard_reset")
+        self.assertEqual(result["form_submissions"], 3)
+
+    def test_deadline_without_any_completion_is_wizard_incomplete(self):
+        # Idle ticks run the fake clock to the deadline; nothing completed.
+        self.locator("button, a").is_visible.return_value = False
+        self.locator("#id_1-company_name").is_visible.return_value = False
+        result = self.run_wizard([], final_text="")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "wizard_incomplete")
+        self.assertEqual(result["form_submissions"], 1)
+
+    def test_gate_and_marker_patterns_must_compile(self):
+        with self.assertRaises(re.error):
+            validate_form(self.request.url, None, None, gate_text="[", completion_markers=None)
+        with self.assertRaises(re.error):
+            validate_form(self.request.url, None, None, completion_markers=["("])
 
 
 if __name__ == "__main__":

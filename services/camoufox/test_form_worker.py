@@ -54,6 +54,21 @@ class IsolatedFormTests(unittest.TestCase):
         execute.assert_not_called()
 
     @patch("form_worker.run_form")
+    def test_persistent_profile_context_is_managed_by_the_manager(self, execute):
+        # A persistent profile's __enter__ IS the context (no new_context):
+        # run_form receives it, and only the manager closes it — closing the
+        # same object as an "owned" context would burn the warm profile (and
+        # log a spurious cleanup failure on the double close).
+        execute.return_value = {"ok": True, "form_submissions": 1}
+        persistent = Mock(spec=["close", "on", "route"])
+        persistent.close = Mock()
+        self.manager.__enter__.return_value = persistent
+        self.assertEqual(self.run_form(), execute.return_value)
+        self.assertIs(execute.call_args.args[0], persistent)
+        persistent.close.assert_not_called()
+        self.manager.__exit__.assert_called_once()
+
+    @patch("form_worker.run_form")
     def test_cleanup_failure_preserves_submission_evidence(self, execute):
         execute.return_value = {"ok": True, "form_submissions": 1}
         self.manager.__exit__.side_effect = RuntimeError()

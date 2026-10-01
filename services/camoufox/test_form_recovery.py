@@ -54,6 +54,8 @@ def _install_stubs():
     camoufox = _stub_module("camoufox")
     sync_api = _stub_module("camoufox.sync_api")
     sync_api.Camoufox = object
+    utils = _stub_module("camoufox.utils")
+    utils.launch_options = lambda **kwargs: {**kwargs}
     # form_worker is NOT stubbed: it imports nothing beyond stdlib + form_flow,
     # so the real module loads and stays importable for the other test files
     # sharing this unittest process.
