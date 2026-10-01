@@ -584,6 +584,17 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             while True:
                 if time.monotonic() >= deadline:
                     break
+                if stop_after_posts is not None and result["form_submissions"] >= stop_after_posts:
+                    # The POST landed mid-walk (the pre-walk wait timed out
+                    # with it still in flight): stop before any gate action.
+                    log.info("form flow: stop_after_posts=%s reached mid-walk (subs=%s)",
+                             stop_after_posts, result["form_submissions"])
+                    try:
+                        result["html"] = page.content()
+                    except Exception:
+                        pass
+                    result["error"] = "stopped_after_posts"
+                    return result
                 # One evaluate per tick: url, both step detectors, the error
                 # nodes, the gate button, and the body text (completion
                 # markers live in the text, not the url).
