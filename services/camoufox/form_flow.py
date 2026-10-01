@@ -556,6 +556,17 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             # context (measured 2026-10-01: first tick, phase=outcome,
             # class=Error). One settle, then every tick tolerates the race.
             page.wait_for_timeout(min(random.randint(700, 1500), remaining()))
+            # The step0 POST fires from the PAGE's own submit handler after
+            # our click — it may not be on the wire when we get here (the
+            # first warm runs raced: the check saw 0, the walk then clicked
+            # the gate and completed the whole wizard). Poll for it before
+            # deciding; a POST that never arrives falls through to the walk.
+            stop_waited = 0.0
+            while (stop_after_posts is not None
+                   and result["form_submissions"] < stop_after_posts
+                   and stop_waited < 20.0):
+                page.wait_for_timeout(min(500, remaining()))
+                stop_waited += 0.5
             if stop_after_posts is not None and result["form_submissions"] >= stop_after_posts:
                 # Warm-up mode: the step0 POST is what VERIFIES (the score the
                 # reject cites), so a warm run does a real POST and stops here
