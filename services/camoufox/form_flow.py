@@ -238,6 +238,26 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     diagnostics["captcha_guard_blocked"]):
                 route.abort("blockedbyclient")
                 return
+            # Per-POST token forensics: what did THIS post carry, and from
+            # which URL? The gate rejections read "Error verifying reCAPTCHA"
+            # while the comment below claimed gate/step2 carry no field —
+            # an assumption no measurement had tested. Record every POST.
+            try:
+                values = parse_qs(route.request.post_data or "", keep_blank_values=True)
+                watch = sorted({n for n in (captcha_field, "g-recaptcha-response") if n})
+                token_ok = any(
+                    len(values.get(name, [])) == 1 and
+                    values[name][0].strip().lower() not in ("", "null", "undefined", "false")
+                    for name in watch)
+                diagnostics.setdefault("submission_tokens", []).append({
+                    "n": result["form_submissions"],
+                    "path": urlsplit(route.request.url).path,
+                    "token": token_ok,
+                    "lengths": {name: [len(v) for v in values.get(name, [])]
+                                for name in watch},
+                })
+            except Exception:
+                pass
             if result["form_submissions"] == 0:
                 # Token forensics belong to the FIRST (only tokened) POST;
                 # the gate and step2 POSTs carry no captcha field and must

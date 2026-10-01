@@ -1,5 +1,6 @@
 """Opt-in real-browser test; submits only to a loopback fixture we own."""
 import os
+import signal
 import threading
 import time
 import unittest
@@ -41,9 +42,32 @@ class BrowserTests(unittest.TestCase):
         self.exercise(False, missing_token=True)
 
     def test_repeated_isolated_browser_lifetimes(self):
+        # Each attempt is bounded by SIGALRM (POSIX, main thread): camoufox's
+        # launch or __exit__ has been observed to block forever — one stuck
+        # close hung this whole job in CI (2026-10-01) with no output after
+        # the fourth test. The alarm raises inside the blocking call; a rare
+        # uninterruptible state still hangs, and the workflow's job timeout
+        # is the backstop for that.
         for attempt in range(5):
             with self.subTest(attempt=attempt):
                 self.exercise(False, isolated=True)
+
+    def _run_isolated_bounded(self, **params):
+        """run_isolated_form under a SIGALRM bound; raises inside a stuck launch/close."""
+        deadline = time.monotonic() + 30
+        if not hasattr(signal, "setitimer"):
+            return run_isolated_form(browser_engine, deadline=deadline, **params)
+
+        def _alarm(_signum, _frame):
+            raise TimeoutError("isolated attempt exceeded the SIGALRM bound")
+
+        previous = signal.signal(signal.SIGALRM, _alarm)
+        signal.setitimer(signal.ITIMER_REAL, 90)
+        try:
+            return run_isolated_form(browser_engine, deadline=deadline, **params)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
 
     def exercise(self, duplicate, inspect_only=False, isolated=False, missing_token=False):
         posts = []
@@ -92,7 +116,7 @@ class BrowserTests(unittest.TestCase):
                     ready_expression="window.formReady === true", require_captcha_token=not duplicate)
             if isolated:
                 params.pop("timeout_ms")
-                result = run_isolated_form(browser_engine, deadline=time.monotonic() + 30, **params)
+                result = self._run_isolated_bounded(**params)
             else:
                 with browser_engine() as browser:
                     context = browser.new_context(service_workers="block")
