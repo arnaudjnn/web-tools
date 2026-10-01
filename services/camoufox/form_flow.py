@@ -160,6 +160,29 @@ def human_click(page, control, remaining, pre_submit=True) -> None:
         page.mouse.click(tx, ty)
 
 
+def _skim(page, remaining, min_steps=6, max_steps=22) -> None:
+    """Best-effort reading pause: a short cursor wander, no click.
+
+    The wizard's gate page gets NO fill engagement — measured 2026-10-01,
+    the click landed ~4s after the page rendered and the gate's verify was
+    the most-failed of the wizard's three POSTs, while step0's verify (after
+    a ~60-140s fill) passed often. A human reads the warning first. Steps,
+    not wall-clock, so a frozen test clock cannot spin; ~250-750ms each ⇒
+    roughly 4-12s. Best effort only: the click after this must still happen.
+    """
+    try:
+        x = random.randint(250, 800)
+        y = random.randint(180, 500)
+        page.mouse.move(x, y)
+        for _ in range(random.randint(min_steps, max_steps)):
+            remaining()  # a deadline mid-skim ends it; the click still follows
+            page.mouse.move(max(40, min(1360, x + random.randint(-180, 180))),
+                            max(40, min(860, y + random.randint(-120, 120))))
+            page.wait_for_timeout(random.randint(250, 750))
+    except Exception:
+        pass  # deadline or a closed page — proceed to the click itself
+
+
 def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              submission_urls=None, wait_until="domcontentloaded", wait_ms=0,
              settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
@@ -540,7 +563,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     try:
                         if gate_loc.is_visible():
                             log.info("form flow: clicking business-email gate")
-                            page.wait_for_timeout(min(random.randint(400, 900), remaining()))
+                            _skim(page, remaining)
                             human_click(page, gate_loc, remaining, pre_submit=False)
                             gate_clicked = True
                             diagnostics["wizard_gate_clicked"] = True
@@ -564,6 +587,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                         fill_fields(step2 or [], pre_submit=False)
                         page.wait_for_timeout(min(random.randint(500, 1100), remaining()))
                         phase = "outcome"
+                        _skim(page, remaining, 3, 8)
                         human_click(page, page.locator(step2_submit_sel).first,
                                     remaining, pre_submit=False)
                         step2_done = True
