@@ -193,7 +193,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
     result = {"contract_version": 2, "status": 0, "url": url, "html": "",
               "ok": False, "form_submissions": 0, "error": None}
     diagnostics = {"inspection_only": inspect_only, "captcha_script_requests": 0,
-                   "captcha_script_responses": 0, "captcha_script_http_errors": [],
+                   "captcha_script_responses": 0, "captcha_script_http_errors": [], "last_captcha_mint": None,
                    "captcha_network_failures": 0, "submit_click_attempted": False,
                    "token_present": None, "captcha_field_lengths": None,
                    "blocked_mutations": 0, "page_script_errors": 0,
@@ -249,10 +249,13 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     len(values.get(name, [])) == 1 and
                     values[name][0].strip().lower() not in ("", "null", "undefined", "false")
                     for name in watch)
+                minted = diagnostics.get("last_captcha_mint")
                 diagnostics.setdefault("submission_tokens", []).append({
                     "n": result["form_submissions"],
                     "path": urlsplit(route.request.url).path,
                     "token": token_ok,
+                    "mint_age_s": (round(now - minted, 1)
+                                   if minted is not None else None),
                     "lengths": {name: [len(v) for v in values.get(name, [])]
                                 for name in watch},
                 })
@@ -303,6 +306,17 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         diagnostics["page_script_errors"] += 1
 
     def response_received(response):
+        # A v3 token is minted by the api2/api3 reload POST — record when the
+        # LAST one landed, so each wizard POST can report the token's age.
+        # The step0 submit follows the fill (60-140s); v3 tokens expire at
+        # ~2 min, and an expired/aging token reads as a low score to the
+        # verifier. gate POSTs re-mint at gate-page load (measured: ~2.5k
+        # chars fresh), so their age should be seconds.
+        try:
+            if captcha_request(response.request) and "/reload" in urlsplit(response.url).path:
+                diagnostics["last_captcha_mint"] = time.monotonic()
+        except Exception:
+            pass
         if captcha_request(response.request) and response.request.resource_type == "script":
             diagnostics["captcha_script_responses"] += 1
             if response.status >= 400:
