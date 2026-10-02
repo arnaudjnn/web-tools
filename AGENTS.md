@@ -1,9 +1,8 @@
 # web-tools — the map
 
 Five Railway services: **Tools** (Next-less Node server: MCP + REST + CLI host),
-**Scrapling** sidecar, **Camoufox** sidecar, **SearXNG**, **Redis** — plus an
-optional sixth, **Camoufox-Forms** (the same Camoufox image with
-`CAMOUFOX_ROLE=forms`: form endpoints only, see below). Public endpoint
+**Scrapling** sidecar, **Camoufox** sidecar, **SearXNG**, **Redis**. Forms run
+on the one Camoufox (a forms-only role exists but measured no gain, below). Public endpoint
 is Tools only; the sidecars are internal. Auth is `Authorization: Bearer <API_KEY>`
 (the REST routes read only that header or `?api_key=` — `X-API-Key` does not work).
 
@@ -170,22 +169,20 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   rather than from caller-side bookkeeping. The live mark is per job
   (`FormLive`), not a module global.
 
-## Camoufox-Forms (`CAMOUFOX_ROLE=forms`, same image)
+## Forms on the shared Camoufox (`CAMOUFOX_ROLE`, measured)
 
-- **Forms get their own service.** On cf156g (2026-10-02) 12 of 18 form
-  failures were the shared host degrading under render/Akamai load (`can't
-  start new thread`, `Page crashed`, launch SIGSEGV) — nothing the form flow
-  can retry. `CAMOUFOX_ROLE=forms` skips the render prewarm, the Akamai
-  keepalive and the spa sessions; `/form-*` and `/healthz` work, every other
-  endpoint answers `503 {role:"forms"}`. The default role `all` is today's
-  Camoufox, unchanged.
-- **Routing**: Tools sends every form call (`form-submit`, `form-inspect`,
-  `form-score-probe`, `form-warm`, `form-exit-select`, `form-exits`) to
-  `CAMOUFOX_FORMS_URL`, falling back to `CAMOUFOX_URL`; it has its own
-  breaker. Scrapling's agent form bridge reads the same variable.
-- **It needs the forms' own env**: `PROXY_URL`, `FORM_PROFILE_DIR` + a volume
-  (profiles and the exit blocklist move with it), `FORM_WEDGE_EXIT_S`,
-  `LAUNCH_FAIL_STREAK` (image defaults). Keep `WORKERS=1`; scale by replicas.
+- **One Camoufox, on purpose.** A dedicated forms service was tried
+  2026-10-02/03 and removed: once the pre-POST fixes landed (exit rotation,
+  reCAPTCHA readiness gate, nav/launch retries), the SHARED replica reached a
+  POST on 30/30 oracle runs while serving 368 renders, 234 spa-fetches and 42
+  recycles in the same window — the dedicated one did 31/31. The earlier
+  "host degradation" (12/18 failures on cf156g) is gone with those fixes.
+- `CAMOUFOX_ROLE=forms` and `CAMOUFOX_FORMS_URL` (fallback `CAMOUFOX_URL`)
+  remain as an escape hatch: set both to split forms out again in minutes,
+  with the forms' env (`PROXY_URL`, `FORM_PROFILE_DIR` on the volume). Only
+  do it with an A/B like the one above.
+- Restart policy is `ALWAYS`: a parked form sheds the process with exit(1),
+  and `ON_FAILURE` (max 10) once left Camoufox permanently Crashed.
 - **Score-gated exits**: a headed `web_form_submit` without a pinned
   `exit_session` probes up to `score_gate_tries` (3) exits on our oracle with
   its own launch config and runs on the first scoring ≥ `score_threshold`

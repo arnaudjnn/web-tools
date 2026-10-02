@@ -67,7 +67,6 @@ Callers never choose a fetch engine. Which of the two browsers serves a URL, and
 | SearXNG | GitHub repo | `services/searxng` | Optional `PROXY_URL` |
 | Scrapling | GitHub repo | `services/scrapling` | `PROXY_URL` (US-geo), `PORT=8000` |
 | Camoufox | GitHub repo | `services/camoufox` | `PROXY_URL` (target-geo), `PORT=8000`, `WORKERS=1` |
-| Camoufox-Forms *(optional)* | GitHub repo | `services/camoufox` | As Camoufox, plus `CAMOUFOX_ROLE=forms`: form endpoints only |
 | Redis | Docker image | n/a | Used by SearXNG |
 
 **Set Root Directory before connecting a subfolder service to the repo.** Railway
@@ -119,7 +118,6 @@ SCRAPLING_URL = http://${{Scrapling.RAILWAY_PRIVATE_DOMAIN}}:${{Scrapling.PORT}}
 CAMOUFOX_URL  = http://${{Camoufox.RAILWAY_PRIVATE_DOMAIN}}:${{Camoufox.PORT}}
 SEARXNG_URL   = http://${{SearXNG.RAILWAY_PRIVATE_DOMAIN}}:8080
 # optional, on Tools and Scrapling (unset = forms use CAMOUFOX_URL):
-CAMOUFOX_FORMS_URL = http://${{Camoufox-Forms.RAILWAY_PRIVATE_DOMAIN}}:${{Camoufox-Forms.PORT}}
 ```
 
 Reference `${{Service.PORT}}` only where the service actually **binds** it and has
