@@ -47,46 +47,90 @@ INSPECT_JS = r"""
   const q = (s) => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const unique = (sel) => { try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
   const TEXTLIKE = /^(text|email|tel|url|number|search|password|date|datetime-local|month|week|time|textarea)$/;
-  const HONEY_NAME = /(honey|hpot|^hp_|_hp$|gotcha|trap|leave.?(this|it)?.?(blank|empty)|do.?not.?fill|email_?(last|confirm2)|^website$|^url$|^homepage$|^fax$|^nickname$|^b_[a-z0-9]+_[a-z0-9]+$)/i;
+  // A trap by name alone (strong), or only when also hidden (weak: "url" is
+  // also a legit hidden redirect field).
+  const STRONG_TRAP = /(honey|hpot|^hp[_-]|[_-]hp$|gotcha|trap|leave.?(this|it)?.?(blank|empty)|do.?not.?fill|^b_[a-z0-9]+_[a-z0-9]+$)/i;
+  const WEAK_TRAP = /^([\w]*[_-])?(website|url|homepage|fax|nickname)$/i;
+  // name = a visible field's name + one of these: the shadow nothing fills
+  // (atoka: 0-email_last beside 0-email).
+  const SHADOW_SUFFIX = /^[_-]?(last|confirm|confirmation|2|hp|check|again|repeat|verify)$/i;
+  const SHADOW_PREFIX = /^(hp|honeypot|fake|confirm)[_-]?$/i;
+  // The CAPTCHA widget's own response fields: never a honeypot, never a field.
+  const RESPONSE_FIELD = /^(g-recaptcha-response|h-captcha-response|cf-turnstile-response)([-_][\w-]*)?$/i;
+  // CSRF / state / wizard-management fields: hidden on purpose, never traps.
+  const STATE_FIELD = /^(csrfmiddlewaretoken|_?csrf[\w-]*|[\w-]*_token|authenticity_token|__[A-Z]+|[\w-]*current_step|wizard_goto_step|utm_[\w]+|[\w-]*captcha[\w-]*|[\w-]*(nonce|state|referr?er|redirect|next|return_?url)|g-recaptcha-response[\w-]*)$/i;
+  const CAPTCHA_MARKUP = '[data-sitekey], .g-recaptcha, .h-captcha, .cf-turnstile';
+  const CONSENT_SEL = '[id*="cookie" i],[class*="cookie" i],[id*="consent" i],[class*="consent" i],[id*="gdpr" i],[class*="gdpr" i],[id*="iubenda" i],[class*="iubenda" i],[class*="iub-" i],[id*="onetrust" i],[id*="didomi" i],[id*="cookiebot" i],[id*="cmp" i],[class*="cmp-" i]';
+  const CONSENT_PURPOSE = /^(strictly necessary|necessary|essential|functionality|functional|experience|measurement|marketing|analytics|statistics|preferences|advertising|targeting|personali[sz]ation|social|funzionalit[aà]|esperienza|misurazione|necessari|statistiche|preferenze|pubblicit[aà])\b/i;
   const SUBMIT_TEXT = /\b(submit|send|sign ?up|register|request|apply|subscribe|continue|next|confirm|invia|inviare|registrati|iscriviti|richiedi|continua|avanti|prosegui|conferma|envoyer|absenden|senden|weiter|enviar)\b/i;
   const NEXT_TEXT = /^\s*(next|continue|proceed|avanti|continua|prosegui|weiter|suivant|siguiente)\b/i;
 
-  const pathSelector = (el) => {
+  const is = (sel, el) => { try { const all = document.querySelectorAll(sel); return all.length === 1 && all[0] === el; } catch (e) { return false; } };
+  // Last resort, kept short: a nth-of-type chain anchored at the nearest
+  // uniquely-id'd ancestor or at `anchor` ({node, sel}, e.g. the form).
+  const pathSelector = (el, anchor) => {
     const parts = [];
     let node = el;
     while (node && node.nodeType === 1 && node !== document.documentElement) {
+      if (anchor && node === anchor.node && anchor.sel) { parts.unshift(anchor.sel); break; }
       if (node.id && unique('#' + esc(node.id))) { parts.unshift('#' + esc(node.id)); break; }
       const tag = node.tagName.toLowerCase();
+      if (tag === 'body') { parts.unshift('body'); break; }
       let k = 1;
       for (let s = node.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === node.tagName) k++;
       parts.unshift(tag + ':nth-of-type(' + k + ')');
       node = node.parentElement;
     }
     const sel = parts.join(' > ');
-    return unique(sel) ? sel : null;
+    return is(sel, el) ? sel : null;
   };
+  const formCache = new Map();
+  // form#id, form[action], form:has([name=first field]), form[name], path.
   const formSelector = (f) => {
     if (!f) return null;
-    if (f.id && unique('#' + esc(f.id))) return '#' + esc(f.id);
-    const name = f.getAttribute('name');
-    if (name && unique('form[name="' + q(name) + '"]')) return 'form[name="' + q(name) + '"]';
+    if (formCache.has(f)) return formCache.get(f);
+    let sel = null;
+    const tries = [];
+    if (f.id) tries.push('form#' + esc(f.id));
     const action = f.getAttribute('action');
-    if (action && unique('form[action="' + q(action) + '"]')) return 'form[action="' + q(action) + '"]';
-    return pathSelector(f);
+    if (action) tries.push('form[action="' + q(action) + '"]');
+    const named = [...f.elements].filter((e) => e.getAttribute('name') && !/^(BUTTON|FIELDSET)$/.test(e.tagName));
+    const first = named.find((e) => (e.getAttribute('type') || '').toLowerCase() !== 'hidden') || named[0];
+    if (first) tries.push('form:has([name="' + q(first.getAttribute('name')) + '"])');
+    const name = f.getAttribute('name');
+    if (name) tries.push('form[name="' + q(name) + '"]');
+    for (const t of tries) if (is(t, f)) { sel = t; break; }
+    if (!sel) sel = pathSelector(f);
+    formCache.set(f, sel);
+    return sel;
   };
+  const anchorOf = (el) => el.form ? { node: el.form, sel: formSelector(el.form) } : null;
   const selectorFor = (el, value) => {
-    if (value == null && el.id && unique('#' + esc(el.id))) return '#' + esc(el.id);
+    if (value == null && el.id && is('#' + esc(el.id), el)) return '#' + esc(el.id);
     const tag = el.tagName.toLowerCase();
     const name = el.getAttribute('name');
     if (name) {
       let s = tag + '[name="' + q(name) + '"]';
       if (value != null) s += '[value="' + q(value) + '"]';
-      if (unique(s)) return s;
+      if (is(s, el)) return s;
       const fs = formSelector(el.form);
-      if (fs && unique(fs + ' ' + s)) return fs + ' ' + s;
+      if (fs && is(fs + ' ' + s, el)) return fs + ' ' + s;
     }
-    if (value != null && el.id && unique('#' + esc(el.id))) return '#' + esc(el.id);
-    return pathSelector(el);
+    if (value != null && el.id && is('#' + esc(el.id), el)) return '#' + esc(el.id);
+    return pathSelector(el, anchorOf(el));
+  };
+  // Submit: #id, then "<form> button[type=submit]"-style short forms.
+  const submitSelector = (el) => {
+    if (el.id && is('#' + esc(el.id), el)) return '#' + esc(el.id);
+    const fs = formSelector(el.form);
+    if (fs) {
+      const tag = el.tagName.toLowerCase();
+      const name = el.getAttribute('name');
+      const tries = [fs + ' button[type="submit"]', fs + ' input[type="submit"]', fs + ' button:not([type])',
+        fs + ' [type="submit"]', ...(name ? [fs + ' ' + tag + '[name="' + q(name) + '"]'] : []), fs + ' button'];
+      for (const t of tries) if (is(t, el)) return t;
+    }
+    return selectorFor(el);
   };
 
   // Why el is not visible, and which element hides it (null = visible).
@@ -144,52 +188,99 @@ INSPECT_JS = r"""
     return t === 'submit' || t === 'image';
   };
 
-  const honeypotOf = (el) => {
+  // Inside a cookie/consent container (body/html excluded: a page-level
+  // "has-cookie-banner" class must not swallow the real form).
+  const inConsent = (el) => {
+    for (let n = el; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      if (n.nodeType === 1 && n.matches(CONSENT_SEL)) return true;
+    }
+    return false;
+  };
+  // The field the page's own CAPTCHA integration writes its token into.
+  // 1 = the integration's field (django-recaptcha V3: hidden `0-captcha`
+  // carrying .g-recaptcha/data-sitekey); 2 = the widget's response textarea.
+  const captchaRank = (el) => {
+    const name = el.getAttribute('name');
+    if (!name) return 0;
+    if (RESPONSE_FIELD.test(name)) return 2;
+    const hiddenType = controlType(el) === 'hidden';
+    if ((hiddenType || !visible(el)) && (el.matches(CAPTCHA_MARKUP) || /captcha/i.test(name))) return 1;
+    return 0;
+  };
+  const shadowOf = (name, bases) => {
+    for (const b of bases) {
+      if (!b || b === name) continue;
+      if (name.startsWith(b) && SHADOW_SUFFIX.test(name.slice(b.length))) return b;
+      if (name.endsWith(b) && SHADOW_PREFIX.test(name.slice(0, name.length - b.length))) return b;
+      // Step-prefixed shadow: 0-email -> 0-hp_email.
+      const m = b.match(/^(\d+-)(.+)$/);
+      if (m && name.startsWith(m[1]) && name.endsWith(m[2]) &&
+          SHADOW_PREFIX.test(name.slice(m[1].length, name.length - m[2].length))) return b;
+    }
+    return null;
+  };
+
+  // bases: names of the form's VISIBLE fields (what a shadow copies).
+  const honeypotOf = (el, bases) => {
     const type = controlType(el);
-    if (type === 'hidden' || !(TEXTLIKE.test(type) || type === 'checkbox')) return null;
+    const name = el.getAttribute('name') || el.id || '';
+    if (!name || RESPONSE_FIELD.test(name) || el.closest(CAPTCHA_MARKUP) || STATE_FIELD.test(name)) return null;
+    const shadow = shadowOf(name, bases);
+    const strong = STRONG_TRAP.test(name), weak = WEAK_TRAP.test(name);
     const reasons = [];
+    if (shadow) reasons.push('shadows:' + shadow);
+    if (strong || weak) reasons.push('trap_name');
+    const out = () => ({ selector: selectorFor(el), name: el.getAttribute('name'), type, reasons });
+    if (type === 'hidden') {
+      // Nothing fills a type=hidden input; only a name says it is a trap.
+      if (!(shadow || strong)) return null;
+      reasons.unshift('type_hidden');
+      return out();
+    }
+    if (!TEXTLIKE.test(type) && !(type === 'checkbox' && strong)) return null;
     const info = hiddenInfo(el);
     const hidden = info ? info.reason : null;
-    if (hidden) reasons.push(hidden);
-    if (el.getAttribute('tabindex') === '-1') reasons.push('tabindex_-1');
-    const name = el.getAttribute('name') || el.id || '';
-    const trapName = HONEY_NAME.test(name);
-    if (trapName) reasons.push('trap_name');
-    if ((el.getAttribute('autocomplete') || '').toLowerCase() === 'off' && reasons.length) reasons.push('autocomplete_off');
-    // A hidden native checkbox with a visible label is a styled control, not a trap.
-    if (hidden && type === 'checkbox' && el.labels && [...el.labels].some(visible)) return null;
-    if (!hidden) return reasons.includes('tabindex_-1') && trapName ? { selector: selectorFor(el), name: el.getAttribute('name'), type, reasons } : null;
+    const tabNeg = el.getAttribute('tabindex') === '-1';
+    const acOff = (el.getAttribute('autocomplete') || '').toLowerCase() === 'off';
+    if (tabNeg) reasons.push('tabindex_-1');
+    if (acOff) reasons.push('autocomplete_off');
+    if (!hidden) return tabNeg && (acOff || strong || weak || shadow) ? out() : null;
+    reasons.unshift(hidden);
     // A container hiding SEVERAL controls is a later wizard step or a closed
     // panel, not a trap — unless the name itself says trap.
-    if (!trapName && info.node !== el && /^(display_none|visibility_hidden|aria_hidden)$/.test(hidden)) {
-      const siblings = info.node.querySelectorAll('input:not([type="hidden"]),select,textarea').length;
-      if (siblings > 1) return null;
+    if (!(strong || weak || shadow) && info.node !== el && /^(display_none|visibility_hidden|aria_hidden)$/.test(hidden)) {
+      if (info.node.querySelectorAll('input:not([type="hidden"]),select,textarea').length > 1) return null;
     }
-    return { selector: selectorFor(el), name: el.getAttribute('name'), type, reasons };
+    return out();
   };
 
   const describeForm = (formEl, controls) => {
-    const fields = [], hiddenNames = [], honeypots = [], submits = [];
+    const fields = [], hiddenNames = [], honeypots = [], submits = [], captchaFields = [];
     const radios = new Map();
+    const consentBox = formEl ? inConsent(formEl) : false;
+    const inputs = controls.filter((el) => el.tagName && /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) && !isButton(el));
+    const bases = new Set(inputs.filter((el) => controlType(el) !== 'hidden' && visible(el)).map((el) => el.getAttribute('name')));
     for (const el of controls) {
       if (!el.tagName || !/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(el.tagName)) continue;
       if (isButton(el)) {
-        if (visible(el) && !el.disabled) submits.push({ selector: selectorFor(el), text: buttonText(el),
-          type: isSubmit(el) ? 'submit' : 'button' });
+        if (visible(el) && !el.disabled) submits.push({ selector: submitSelector(el), text: buttonText(el),
+          type: isSubmit(el) ? 'submit' : 'button', ...(el.getAttribute('name') === 'wizard_goto_step' ? { wizard_back: true } : {}) });
         continue;
       }
       const type = controlType(el);
       const name = el.getAttribute('name');
-      if (type === 'hidden') { if (name) hiddenNames.push(name); continue; }
-      const trap = honeypotOf(el);
+      const rank = captchaRank(el);
+      if (rank) { captchaFields.push({ name, rank }); continue; }
+      const trap = consentBox ? null : honeypotOf(el, bases);
       if (trap) { honeypots.push(trap); continue; }
+      if (type === 'hidden') { if (name) hiddenNames.push(name); continue; }
       const hidden = hiddenReason(el);
       let labelSelector = null;
       if (hidden) {
         // Styled checkbox/radio: the native input is hidden behind its label.
         const lbl = (type === 'checkbox' || type === 'radio') && el.labels ? [...el.labels].find(visible) : null;
         if (!lbl) continue;  // invisible and not a trap: a later step or a closed menu
-        labelSelector = lbl.getAttribute('for') && el.id ? 'label[for="' + q(el.id) + '"]' : pathSelector(lbl);
+        labelSelector = lbl.getAttribute('for') && el.id ? 'label[for="' + q(el.id) + '"]' : pathSelector(lbl, anchorOf(el));
       }
       const label = labelOf(el);
       const required = !!(el.required || el.getAttribute('aria-required') === 'true' || (label && /\*\s*$/.test(label)));
@@ -232,13 +323,20 @@ INSPECT_JS = r"""
       }
       fields.push(field);
     }
-    submits.sort((a, b) => (a.type === 'submit' ? 0 : 1) - (b.type === 'submit' ? 0 : 1));
-    const out = { selector: formEl ? formSelector(formEl) : null, formless: !formEl,
+    // A consent widget: inside a CMP container, or only purpose checkboxes
+    // (Functionality / Experience / Measurement / Marketing ...).
+    const boxes = fields.filter((f) => f.type === 'checkbox');
+    const consent = consentBox || (boxes.length >= 2 && boxes.length === fields.length &&
+      boxes.filter((f) => CONSENT_PURPOSE.test(f.label || '')).length >= 2);
+    const rankSubmit = (s) => (s.wizard_back ? 2 : 0) + (s.type === 'submit' ? 0 : 1);
+    submits.sort((a, b) => rankSubmit(a) - rankSubmit(b));
+    captchaFields.sort((a, b) => a.rank - b.rank);
+    return { selector: formEl ? formSelector(formEl) : null, formless: !formEl, kind: consent ? 'consent' : 'form',
       action: formEl ? formEl.action || location.href : null,
       method: formEl ? (formEl.getAttribute('method') || 'get').toLowerCase() : null,
-      fields, submit_candidates: submits.slice(0, 10), honeypot_candidates: honeypots,
+      fields, submit_candidates: submits.slice(0, 10), honeypot_candidates: consent ? [] : honeypots,
+      captcha_fields: [...new Set(captchaFields.map((c) => c.name))],
       hidden_inputs: [...new Set(hiddenNames)].slice(0, 50) };
-    return out;
   };
 
   // Forms, then controls outside any form (SPAs) as one pseudo-form whose
@@ -250,13 +348,14 @@ INSPECT_JS = r"""
     if (d.fields.length || d.honeypot_candidates.length && d.submit_candidates.length) forms.push(d);
     else hiddenForms++;
   }
-  const loose = [...document.querySelectorAll('input,select,textarea')].filter((el) => !el.form);
+  // Consent toggles outside any form (iubenda) are a CMP, not a form.
+  const loose = [...document.querySelectorAll('input,select,textarea')].filter((el) => !el.form && !inConsent(el));
   if (loose.length) {
     const d = describeForm(null, loose);
     if (d.fields.length) {
       for (const b of document.querySelectorAll('button,[role="button"],input[type="submit"],input[type="button"],a')) {
         if (b.form || !visible(b) || !SUBMIT_TEXT.test(buttonText(b))) continue;
-        d.submit_candidates.push({ selector: selectorFor(b), text: buttonText(b), type: 'button' });
+        d.submit_candidates.push({ selector: submitSelector(b), text: buttonText(b), type: 'button' });
         if (d.submit_candidates.length >= 10) break;
       }
       forms.push(d);
@@ -269,6 +368,22 @@ INSPECT_JS = r"""
     .concat(performance.getEntriesByType('resource').map((e) => e.name));
   const any = (re) => urls.some((u) => re.test(u));
   const captcha = [];
+  // The field the page's own integration writes the token into wins over
+  // the widget's response textarea (atoka: hidden 0-captcha, not
+  // g-recaptcha-response). Each integration field is credited to one provider.
+  const providerOf = (el) => {
+    const text = el.getAttribute('name') + ' ' + (el.getAttribute('class') || '');
+    return /h-?captcha/i.test(text) ? 'hcaptcha' : /turnstile/i.test(text) ? 'turnstile' : 'recaptcha';
+  };
+  const tokenFields = (provider, widgetField) => {
+    const integration = [...document.querySelectorAll('input[name],textarea[name]')]
+      .filter((el) => captchaRank(el) === 1 && providerOf(el) === provider)
+      .map((el) => el.getAttribute('name'));
+    const fields = [...new Set(integration)];
+    const widgetPresent = !!document.querySelector('[name="' + widgetField + '"]');
+    return { token_field: fields[0] || widgetField, token_fields: fields.concat(widgetPresent ? [widgetField] : []),
+      token_field_present: fields.length > 0 || widgetPresent, widget_field: widgetField };
+  };
   {
     const variants = new Set();
     const api = urls.filter((u) => /\/recaptcha\/(api|enterprise)\.js/.test(u));
@@ -276,25 +391,27 @@ INSPECT_JS = r"""
     for (const u of api) {
       try { const r = new URL(u).searchParams.get('render'); if (r && r !== 'explicit' && r !== 'onload') variants.add('v3'); } catch (e) {}
     }
-    const widgets = [...document.querySelectorAll('.g-recaptcha, [data-sitekey]:not(.h-captcha):not(.cf-turnstile)')];
+    // Visible widgets only: a hidden input carrying .g-recaptcha is the v3
+    // integration's token field (django-recaptcha), not a v2 checkbox.
+    const marked = [...document.querySelectorAll('.g-recaptcha, [data-sitekey]:not(.h-captcha):not(.cf-turnstile)')];
+    const widgets = marked.filter((w) => !(w.tagName === 'INPUT' && controlType(w) === 'hidden'));
     for (const w of widgets) variants.add((w.getAttribute('data-size') || '').toLowerCase() === 'invisible' ? 'v2-invisible' : 'v2');
     if (urls.some((u) => /\/recaptcha\/(api2|enterprise)\/anchor.*size=invisible/.test(u)) && !variants.has('v3')) variants.add('invisible');
     if (urls.some((u) => /\/recaptcha\/(api2|enterprise)\/anchor.*size=normal/.test(u))) variants.add('v2');
     if (document.querySelector('.grecaptcha-badge') && !variants.has('v3') && !variants.has('v2-invisible')) variants.add('v3-or-invisible');
     if (api.length || variants.size || any(/\/recaptcha\//)) {
       captcha.push({ provider: 'recaptcha', variants: [...variants],
-        sitekey_present: api.some((u) => /[?&]render=(?!explicit|onload)[^&]+/.test(u)) || widgets.some((w) => !!w.getAttribute('data-sitekey')),
-        token_field: 'g-recaptcha-response',
-        token_field_present: !!document.querySelector('[name="g-recaptcha-response"]') });
+        sitekey_present: api.some((u) => /[?&]render=(?!explicit|onload)[^&]+/.test(u)) || marked.some((w) => !!w.getAttribute('data-sitekey')),
+        ...tokenFields('recaptcha', 'g-recaptcha-response') });
     }
   }
   if (any(/hcaptcha\.com/) || document.querySelector('.h-captcha')) {
     captcha.push({ provider: 'hcaptcha', variants: [], sitekey_present: !!document.querySelector('.h-captcha[data-sitekey]'),
-      token_field: 'h-captcha-response', token_field_present: !!document.querySelector('[name="h-captcha-response"]') });
+      ...tokenFields('hcaptcha', 'h-captcha-response') });
   }
   if (any(/challenges\.cloudflare\.com\/turnstile/) || document.querySelector('.cf-turnstile')) {
     captcha.push({ provider: 'turnstile', variants: [], sitekey_present: !!document.querySelector('.cf-turnstile[data-sitekey]'),
-      token_field: 'cf-turnstile-response', token_field_present: !!document.querySelector('[name="cf-turnstile-response"]') });
+      ...tokenFields('turnstile', 'cf-turnstile-response') });
   }
 
   // Cookie banners: known CMP buttons, then accept-like text inside a
@@ -339,15 +456,45 @@ INSPECT_JS = r"""
   }
   if (hiddenSteps) signals.push('hidden_steps:' + hiddenSteps);
   if (hiddenForms) signals.push('hidden_forms:' + hiddenForms);
+  // Server-side wizards (django-formtools): a `<prefix>-current_step`
+  // management field, `wizard_goto_step` buttons, step-prefixed names (0-email).
+  const names = [...document.querySelectorAll('input[name],select[name],textarea[name],button[name]')]
+    .map((el) => el.getAttribute('name'));
+  const currentStep = names.filter((n) => /(^|[-_])current_step$/.test(n));
+  const gotoStep = [...document.querySelectorAll('[name="wizard_goto_step"]')].map(submitSelector).filter(Boolean);
+  const prefixed = [...new Set(names.filter((n) => /^\d+-[\w-]+$/.test(n)))];
+  const prefixes = [...new Set(prefixed.map((n) => n.match(/^(\d+-)/)[1]))];
+  if (currentStep.length) signals.push('formtools_current_step:' + currentStep[0]);
+  if (gotoStep.length) signals.push('wizard_goto_step:' + gotoStep.length);
+  if (prefixes.length) signals.push('step_prefix:' + prefixes.join(','));
+  const server = !!(currentStep.length || gotoStep.length || prefixes.length);
+  const wizard = { likely: !!(stepText || nextButtons.length || hiddenSteps || server), signals, next_buttons: nextButtons };
+  if (server) wizard.fields = { current_step_field: currentStep[0] || null, goto_step_buttons: gotoStep,
+    step_prefixes: prefixes, step_fields: prefixed.slice(0, 40) };
 
-  return { forms, captcha, cookie_banners: banners,
-    wizard: { likely: !!(stepText || nextButtons.length || hiddenSteps), signals, next_buttons: nextButtons } };
+  return { forms, captcha, cookie_banners: banners, wizard };
 }
 """
 
 WIZARD_HINT = ("Multi-step form: submit step0's fields/submit, then pass step2 + step2_submit "
                "for the second step, gate_text for an interstitial button clicked once, and "
                "completion_markers for an end state that keeps the URL; timeout_ms ~240000.")
+
+
+def _formtools_hint(fields):
+    prefixes = fields.get("step_prefixes") or []
+    current = prefixes[0] if prefixes else "0-"
+    try:
+        following = "%d-" % (int(current.rstrip("-")) + 1)
+    except ValueError:
+        following = "1-"
+    management = fields.get("current_step_field")
+    return ("Server-side wizard (django-formtools%s): fields of this step are prefixed '%s'; "
+            "each step is one POST. Submit this step's fields, then pass step2 with the next "
+            "step's '%s'-prefixed fields (selectors like [name=\"%sfield\"]), step2_submit, "
+            "gate_text for an interstitial button, and completion_markers for the end state; "
+            "timeout_ms ~240000. Never fill the management field or wizard_goto_step."
+            % ((": " + management) if management else "", current, following, following))
 
 
 def _suggest(url, form, captcha, banners):
@@ -368,7 +515,9 @@ def _suggest(url, form, captcha, banners):
                  "submit": form["submit_candidates"][0]["selector"] if form["submit_candidates"] else None}
     if banners:
         suggested["dismiss"] = [b["selector"] for b in banners[:3]]
-    if captcha:
+    if form.get("captcha_fields"):
+        suggested["captcha_field"] = form["captcha_fields"][0]
+    elif captcha:
         suggested["captcha_field"] = captcha[0]["token_field"]
     action = form.get("action")
     if action and form.get("method") == "post":
@@ -430,12 +579,16 @@ def inspect_form(context, *, url, wait_until="domcontentloaded", wait_ms=4000, t
             banner["frame_url"] = urlsplit(frame.url)._replace(query="", fragment="").geturl()
             banners.append(banner)
     main_banners = [b for b in banners if "frame_url" not in b]
+    # Consent widgets (CMP toggles) rank last and get no submit skeleton.
+    forms.sort(key=lambda form: form.get("kind") == "consent")
     for index, form in enumerate(forms):
         form["index"] = index
-        if "frame_url" not in form:
+        if "frame_url" not in form and form.get("kind") != "consent":
             form["suggested"] = _suggest(page.url, form, captcha, main_banners)
     wizard = data["wizard"]
-    if wizard["likely"]:
+    if wizard.get("fields"):
+        wizard["hint"] = _formtools_hint(wizard["fields"])
+    elif wizard["likely"]:
         wizard["hint"] = WIZARD_HINT
     return {"ok": True, "error": None, "form_submissions": 0, "status": diagnostics["navigation_status"] or 0,
             "url": page.url, "forms": forms, "captcha": captcha, "cookie_banners": banners,

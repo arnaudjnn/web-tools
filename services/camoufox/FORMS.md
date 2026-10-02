@@ -160,7 +160,30 @@ controls does not: that is a later wizard step. Each form also gets a
 (reCAPTCHA v2/invisible/v3/enterprise, hCaptcha, Turnstile; presence of a
 sitekey, never the key), cookie-banner dismiss candidates and wizard hints.
 It never returns VALUES: not typed, default, selected or hidden ones (only the
-names of hidden inputs). Every failure is a 503 `retryable: true`, since
+names of hidden inputs).
+
+Four rules come from Atoka's live output (2026-10-02):
+
+- The CAPTCHA `token_field` is the field the page's own integration writes
+  into, preferred over the widget's response textarea. A hidden input carrying
+  `.g-recaptcha` or `data-sitekey`, or one whose name says captcha, wins:
+  django-recaptcha V3 writes into `0-captcha`, not `g-recaptcha-response`.
+  Each form lists its `captcha_fields` in that order, and
+  `suggested.captcha_field` takes the first.
+- A honeypot is never a CAPTCHA response field, a CSRF/state field or a
+  consent toggle. A hidden input (even `type=hidden`) whose name is a visible
+  field's name plus `_last`, `_confirm`, `_2`, `-hp` and the like is a
+  honeypot: `0-email_last` shadows `0-email`. So is a visible input with
+  `tabindex=-1` plus `autocomplete=off` or a trap-like name.
+- Server-side wizards (django-formtools) are recognised by a
+  `*-current_step` field, `wizard_goto_step` buttons and step-prefixed names
+  (`0-email`). `wizard.fields` names them, and the hint gives the next step's
+  prefix for `step2`.
+- Form selectors are tried in this order: `form#id`, `form[action]`,
+  `form:has([name=first field])`, `form[name]`. Submit selectors are `#id`,
+  then `<form> button[type="submit"]`-style. Every selector is checked for
+  uniqueness in the page. A form of cookie-purpose toggles, or one inside a CMP
+  container, is `kind: "consent"`: it is ranked last and gets no `suggested`. Every failure is a 503 `retryable: true`, since
 nothing can have been submitted. A form inside a child frame carries
 `frame_url`; `/form-submit` drives only the main frame.
 

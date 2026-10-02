@@ -41,6 +41,39 @@ PAGE = b'''<!doctype html><html><body>
 </body></html>'''
 
 
+# Atoka's shape (measured live 2026-10-02): a django-formtools wizard
+# (`<prefix>-current_step`, step-prefixed `0-` names), django-recaptcha V3
+# writing its token into the hidden `0-captcha` (the widget's own
+# g-recaptcha-response textarea stays empty), a hidden `0-email_last`
+# shadowing the visible `0-email` (the honeypot), and an iubenda consent form
+# of purpose toggles. No ids on the form; the submit is a plain button.
+ATOKA_PAGE = b'''<!doctype html><html><body class="has-cookie-banner">
+<div id="iubenda-cs-banner" class="iubenda-cs-container"><p>Cookie</p>
+  <form class="iub-prefs">
+    <div class="iub-toggle"><input type="checkbox" id="iub-toggle-id-1" style="position:absolute;opacity:0"><label for="iub-toggle-id-1">Functionality</label></div>
+    <div class="iub-toggle"><input type="checkbox" id="iub-toggle-id-2" style="position:absolute;opacity:0"><label for="iub-toggle-id-2">Experience</label></div>
+    <div class="iub-toggle"><input type="checkbox" id="iub-toggle-id-3" style="position:absolute;opacity:0"><label for="iub-toggle-id-3">Measurement</label></div>
+    <div class="iub-toggle"><input type="checkbox" id="iub-toggle-id-4" style="position:absolute;opacity:0"><label for="iub-toggle-id-4">Marketing</label></div>
+  </form>
+  <button class="iubenda-cs-accept-btn" onclick="document.getElementById('iubenda-cs-banner').style.display='none'">Accetta</button>
+</div>
+<div class="container"><div class="row"><div class="col">
+<form method="post" action="/register/" class="registration">
+  <input type="hidden" name="csrfmiddlewaretoken" value="csrf-secret-value">
+  <input type="hidden" name="atoka_registration_wizard_l_p1_v3-current_step" value="0">
+  <label for="id_0-email">Email aziendale *</label><input type="email" name="0-email" id="id_0-email" required>
+  <input type="hidden" name="0-email_last" id="id_0-email_last">
+  <label for="id_0-first_name">Nome</label><input type="text" name="0-first_name" id="id_0-first_name" required>
+  <input type="hidden" name="0-captcha" class="g-recaptcha" data-sitekey="fixture-sitekey-not-real" data-widget-uuid="fixture" required id="id_0-captcha">
+  <textarea id="g-recaptcha-response" name="g-recaptcha-response" class="g-recaptcha-response" style="display:none"></textarea>
+  <button type="submit" class="btn btn-primary">Continua</button>
+</form></div></div></div>
+<script src="/recaptcha/api.js?render=fixture-sitekey-not-real"></script>
+<script>// django-recaptcha V3 stand-in: the integration fills its own hidden field.
+document.querySelector('[data-widget-uuid="fixture"]').value = 'fixture-token-not-a-real-captcha';</script>
+</body></html>'''
+
+
 @contextmanager
 def browser_engine():
     if os.environ.get("FORM_BROWSER_TEST") == "camoufox":
@@ -123,7 +156,8 @@ class InspectBrowserTests(unittest.TestCase):
                     return
                 self.send_header("Content-Type", "text/html")
                 self.end_headers()
-                self.wfile.write(b"<p>done</p>" if self.path == "/done" else PAGE)
+                page = ATOKA_PAGE if self.path.startswith("/register") else PAGE
+                self.wfile.write(b"<p>done</p>" if self.path == "/done" else page)
 
             def do_POST(self):
                 posts.append((self.path, self.rfile.read(int(self.headers.get("Content-Length", 0)))))
@@ -141,11 +175,11 @@ class InspectBrowserTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join()
 
-    def inspect(self):
+    def inspect(self, url=None):
         with browser_engine() as browser:
             context = browser.new_context(service_workers="block")
             try:
-                return inspect_form(context, url=self.url, wait_ms=500, timeout_ms=15000)
+                return inspect_form(context, url=url or self.url, wait_ms=500, timeout_ms=15000)
             finally:
                 context.close()
 
@@ -160,7 +194,8 @@ class InspectBrowserTests(unittest.TestCase):
 
         self.assertEqual(len(result["forms"]), 1)
         form = result["forms"][0]
-        self.assertEqual(form["selector"], "#lead")
+        self.assertEqual(form["selector"], "form#lead")
+        self.assertEqual(form["kind"], "form")
         self.assertEqual(form["method"], "post")
         by_name = {f["name"]: f for f in form["fields"]}
         self.assertEqual(set(by_name), {"email", "company", "country", "size", "notes", "agree"})
@@ -222,6 +257,78 @@ class InspectBrowserTests(unittest.TestCase):
         body = submitted[0]
         for expected in (b"email=test%40example.test", b"country=FR", b"size=s", b"agree=on"):
             self.assertIn(expected, body)
+
+    def atoka(self):
+        return self.inspect(self.url.replace("/form", "/register/"))
+
+    def test_atoka_shape_captcha_honeypot_wizard_selectors(self):
+        result = self.atoka()
+        self.assertEqual(self.posts, [])
+        dump = json.dumps(result)
+        for secret in ("csrf-secret-value", "fixture-token-not-a-real-captcha", "fixture-sitekey-not-real"):
+            self.assertNotIn(secret, dump)
+        # The registration form first; the iubenda toggles are a consent
+        # widget ranked last, with no honeypots and no submit skeleton.
+        self.assertEqual([f["kind"] for f in result["forms"]], ["form", "consent"])
+        form, consent = result["forms"]
+        self.assertEqual(consent["honeypot_candidates"], [])
+        self.assertNotIn("suggested", consent)
+        self.assertNotIn("iub-toggle", json.dumps([f["honeypot_candidates"] for f in result["forms"]]))
+
+        # 4. short, unique selectors
+        self.assertEqual(form["selector"], 'form[action="/register/"]')
+        self.assertEqual(form["submit_candidates"][0]["selector"], 'form[action="/register/"] button[type="submit"]')
+        self.assertEqual([f["selector"] for f in form["fields"]], ["#id_0-email", "#id_0-first_name"])
+
+        # 1. the integration's field, not the widget textarea
+        self.assertEqual(form["captcha_fields"], ["0-captcha", "g-recaptcha-response"])
+        recaptcha = result["captcha"][0]
+        self.assertEqual(recaptcha["token_field"], "0-captcha")
+        self.assertEqual(recaptcha["widget_field"], "g-recaptcha-response")
+        self.assertIn("v3", recaptcha["variants"])
+        self.assertNotIn("v2", recaptcha["variants"])
+        self.assertTrue(recaptcha["sitekey_present"])
+
+        # 2. the shadow is the honeypot; the response textarea and state fields are not
+        self.assertEqual([(h["name"], h["reasons"]) for h in form["honeypot_candidates"]],
+                         [("0-email_last", ["type_hidden", "shadows:0-email"])])
+        self.assertEqual(form["hidden_inputs"], ["csrfmiddlewaretoken", "atoka_registration_wizard_l_p1_v3-current_step"])
+
+        # 3. formtools wizard
+        wizard = result["wizard"]
+        self.assertTrue(wizard["likely"])
+        self.assertIn("formtools_current_step:atoka_registration_wizard_l_p1_v3-current_step", wizard["signals"])
+        self.assertIn("step_prefix:0-", wizard["signals"])
+        self.assertEqual(wizard["fields"]["current_step_field"], "atoka_registration_wizard_l_p1_v3-current_step")
+        self.assertEqual(wizard["fields"]["step_prefixes"], ["0-"])
+        self.assertIn("0-email_last", wizard["fields"]["step_fields"])
+        self.assertIn("'1-'", wizard["hint"])
+
+        suggested = form["suggested"]
+        self.assertEqual(suggested["captcha_field"], "0-captcha")
+        self.assertEqual(suggested["dismiss"], [".iubenda-cs-accept-btn"])
+        self.assertEqual(suggested["fields"], [{"selector": "#id_0-email", "action": "type"},
+                                               {"selector": "#id_0-first_name", "action": "type"}])
+
+    def test_atoka_suggested_submits_with_token_guard(self):
+        suggested = self.atoka()["forms"][0]["suggested"]
+        values = {"#id_0-email": "test@example.test", "#id_0-first_name": "Test"}
+        fields = [dict(f, value=values[f["selector"]]) for f in suggested["fields"]]
+        with browser_engine() as browser:
+            context = browser.new_context(service_workers="block")
+            try:
+                result = run_form(context, url=suggested["url"], fields=fields, submit=suggested["submit"],
+                                  dismiss=suggested["dismiss"], success_url=r"/done$",
+                                  captcha_field=suggested["captcha_field"], require_captcha_token=True,
+                                  settle_ms=1000, timeout_ms=60000)
+            finally:
+                context.close()
+        self.assertTrue(result["ok"], result["error"])
+        self.assertTrue(result["diagnostics"]["token_present"])
+        submitted = [body for path, body in self.posts if path == "/register/"]
+        self.assertEqual(len(submitted), 1)
+        self.assertIn(b"0-email=test%40example.test", submitted[0])
+        self.assertIn(b"0-email_last=&", submitted[0] + b"&")
 
     def test_isolated_worker_path(self):
         result = run_isolated_form(browser_engine, deadline=time.monotonic() + 30, runner=inspect_form,
