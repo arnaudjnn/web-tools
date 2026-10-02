@@ -155,6 +155,27 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   rather than from caller-side bookkeeping. The live mark is per job
   (`FormLive`), not a module global.
 
+## reCAPTCHA v3 score oracle (G2)
+
+- **Tune against our key, never a third party.** Tools serves
+  `/oracle/recaptcha` (Atoka-shaped: mint inside the submit listener) and does
+  siteverify; it is outside the Bearer auth on purpose (the browser carries no
+  key) and 404s unless `RECAPTCHA_ORACLE_SITEKEY`/`SECRET` are set on Tools.
+  The key is registered for `tools-production-d199.up.railway.app` only, so a
+  local page cannot mint. The Camoufox copies of those vars are unused.
+- `web_form_score_probe` / `web_form_warm` / `web_form_exit_select` /
+  `web_form_exits` are REST-only (`/api/v0/...`, not MCP) and run the forms'
+  own launch path (`score_probe.py`). Bench:
+  `.claude/skills/tools-health/scripts/score_bench.py --n 20`.
+- **Profiles need a volume**: `FORM_PROFILE_DIR` unset = temp dir = wiped per
+  deploy. Sticky exits (`FORM_PROFILE_STICKY_EXIT`, `sticky_exit`) and the
+  exit blocklist live there too.
+- **Camoufox version is a deploy-level A/B**: one pinned browser per image;
+  bench with `--label`, deploy, bench again, `--report` both.
+- **`mint_age_s` is not a token age**: it counts from the last
+  `api2/reload` response, and api.js reloads on load too. Whether a wizard
+  POST re-sent step0's token is `submission_tokens[].same_as_first`.
+
 ## Deploy lore (Railway, project `3375ebc9…`)
 
 - **Tools does not auto-deploy on push.** After a commit, run

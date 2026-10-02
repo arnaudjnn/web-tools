@@ -183,8 +183,33 @@ which is what a per-session score (reCAPTCHA v3) responds to. The first
 launch's options are persisted to `fingerprint.json`; later launches reload
 them and override only the request-scoped fields (exit/proxy, headless).
 Omit `profile` for the default isolated browser per submit. Profiles are
-per-replica (ephemeral filesystem) and never opened concurrently — the form
-worker's admission is serial.
+per-replica and never opened concurrently — the form worker's admission is
+serial. Without `FORM_PROFILE_DIR` they live in the image's temp dir and are
+wiped by every redeploy; production mounts a Railway volume there.
+
+`sticky_exit: true` (or `FORM_PROFILE_STICKY_EXIT=1` as the default) pins a
+profile to ONE exit: the Evomi session token is stored under the reserved
+`_web_tools` key of `fingerprint.json` (stripped before Camoufox sees the
+options) and reused on every later run; `fresh_ip` no longer rotates it, an
+explicit `exit_session` overrides it (and becomes the new pin). The pin is
+written before launch, so an unknown outcome still keeps the identity on the
+exit it was seen from. A profile whose saved `executable_path` no longer
+exists (a browser upgrade on the volume) redraws its fingerprint and keeps
+its cookies. The token selects an exit; the provider may still recycle the
+IP behind it, which `exit_ip`/`exit_ip_changed` make visible.
+
+## Score oracle and probe (`score_probe.py`)
+
+Our own reCAPTCHA v3 key scores the form browser: Tools serves the page and
+does siteverify (`/oracle/recaptcha`, the only public hostname registered on
+the key); `/form-score-probe` runs `run_isolated_form` + `_form_browser` +
+`run_form` against it — the forms' own path, not a copy — and returns the
+verified score and egress. `/form-warm` (google, youtube, target origin;
+dwell, scroll, consent) and `/form-exit-select` (pre-check an exit's IP/ASN
+against `exit-blocklist.json` next to the profiles, probe it isolated, pin
+the first passing one) reuse the same launch path with their own runner.
+Tune against this oracle only, never a third-party form; the bench is
+`.claude/skills/tools-health/scripts/score_bench.py`.
 
 `/form-inspect` (Tools: `web_form_inspect`, module `form_inspect.py`) is
 the read-only step an agent takes BEFORE submitting. It runs under the same form
