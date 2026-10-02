@@ -21,7 +21,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 # Download the Camoufox Firefox build + the GeoIP database into the image
 # so the runtime container starts fast and offline.
-ARG CAMOUFOX_BROWSER=official/stable/152.0.4-beta.30
+# 156.0.1-beta.33 (a GitHub prerelease, hence the prerelease channel): fixes
+# daijro/camoufox#751 — humanized trajectories crossing x==0/y==0 deadlock
+# the input chain on Linux + Xvfb headed (35b45c1, 6e994b9, 4132dd5) — and
+# paces humanized moves on their own schedule (#808). Previous pin:
+# official/stable/152.0.4-beta.30.
+ARG CAMOUFOX_BROWSER=official/prerelease/156.0.1-beta.33
 # Re-exported for the form-run summary line (an ARG is gone at runtime).
 ENV CAMOUFOX_BUILD=$CAMOUFOX_BROWSER
 # Order is the fix: FETCH THE PIN EXPLICITLY first, then pin, then assert.
@@ -31,7 +36,11 @@ ENV CAMOUFOX_BUILD=$CAMOUFOX_BROWSER
 # (observed 2026-09-27: set pinned beta.30, fetch installed beta.31).
 # `set` after fetch pins runtime launches; `active` must then name the pin
 # and never "(not fetched)" or the build fails instead of shipping drift.
-RUN python -m camoufox fetch "$CAMOUFOX_BROWSER" && \
+# `echo y`: a PRERELEASE fetch asks "Continue with prerelease installation?"
+# and, with no tty, aborts with exit 0 having installed nothing (measured
+# 2026-10-02 on 156.0.1-beta.33; the `active` assertion below caught it). A
+# stable pin never reads stdin, so the answer is inert there.
+RUN echo y | python -m camoufox fetch "$CAMOUFOX_BROWSER" && \
     python -m camoufox set "$CAMOUFOX_BROWSER" 2>&1 | grep -F "Pinned: $CAMOUFOX_BROWSER" && \
     python -m camoufox active | tee /tmp/active && \
     grep -F "${CAMOUFOX_BROWSER##*/}" /tmp/active && \

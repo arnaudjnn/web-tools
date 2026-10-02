@@ -6,7 +6,11 @@
 # versions are what scartoffie's camoufox resolved to on its 2026-08-12 build
 # (from `camoufox[geoip]>=0.4`), i.e. the exact set the Akamai POST path is known
 # to clear with. Bump on purpose, then re-verify _abck reaches ~0~.
-camoufox[geoip]==0.5.4
+# 0.5.6 (2026-10-02): carries the library side of the FF152 integration that
+# the 156.0.1-beta.33 browser pin (Dockerfile) builds on; the input-deadlock
+# fix itself is browser-side. 0.5.7b* (paired prereleases) add only the
+# persistent-profile toggle-pref fix, which these launches do not need.
+camoufox[geoip]==0.5.6
 fastapi==0.141.1
 uvicorn[standard]==0.52.1
 pydantic==2.13.4

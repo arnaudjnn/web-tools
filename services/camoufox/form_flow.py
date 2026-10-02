@@ -305,7 +305,7 @@ def _click_target(box):
     Off-centre: an identical dead-centre click on every control is its own
     pattern. Never x<=1 or y<=1: a trajectory point on x==0/y==0 never gets
     a renderer ack in camoufox and deadlocks the whole input chain
-    (daijro/camoufox#751, unfixed in our pinned 152.0.4-beta.30) — the old
+    (daijro/camoufox#751, fixed only from 156.0.1-beta.32; kept as defence) — the old
     approach START (target minus 100-400px / 60-200px) went off-screen for
     any field near the left or top edge and was clamped onto exactly that
     axis.
