@@ -18,7 +18,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build
-      - run: pnpm test
+      # Runs every vitest suite with coverage; each package's vitest.config.ts
+      # holds its thresholds (toolkit 80% lines / 70% branches, api 80% lines,
+      # cli 60% lines) and the job fails below them.
+      - run: pnpm test:coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lcov
+          path: packages/*/coverage/lcov.info
+          if-no-files-found: warn
   scrapling:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -29,6 +38,27 @@ jobs:
           python-version: '3.13'
       # Pure-function tests: Scrapling itself is stubbed, so only the web
       # framework pins from requirements.txt are needed (no browser).
-      - run: python -m pip install fastapi==0.121.1 httpx==0.28.1
-      - run: python -m unittest discover -s services/scrapling -p 'test_*.py' -v
+      - run: python -m pip install fastapi==0.121.1 httpx==0.28.1 coverage==7.10.7
+      # Coverage is reported, not gated (yet); the tests themselves gate.
+      - run: >-
+          python -m coverage run --data-file=.coverage-scrapling --source=services/scrapling
+          --omit='*/test_*' -m unittest discover -s services/scrapling -p 'test_*.py' -v
+      - run: python -m coverage report --data-file=.coverage-scrapling
       - run: python -m py_compile services/searxng/google_sorry_fix.py
+  camoufox-coverage:
+    # Report-only: the browser-free Camoufox form tests (helpers, worker,
+    # recovery) under coverage. forms.yml remains the gate for these tests,
+    # with a real browser.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install fastapi==0.141.1 pydantic==2.13.4 playwright==1.58.0 coverage==7.10.7
+      - run: >-
+          python -m coverage run --data-file=.coverage-camoufox --source=services/camoufox
+          --omit='*/test_*' -m unittest discover -s services/camoufox -p 'test_form*.py'
+      - run: python -m coverage report --data-file=.coverage-camoufox
