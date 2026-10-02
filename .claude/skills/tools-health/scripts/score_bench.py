@@ -57,6 +57,10 @@ CONFIGS: dict[str, tuple] = {
     "dwell-0": ("as baseline, no dwell after load", None, lambda tag, i: {"wait_ms": 0}),
     "dwell-15s": ("as baseline, 15 s dwell after load", None, lambda tag, i: {"wait_ms": 15000}),
     "dwell-40s": ("as baseline, 40 s dwell after load", None, lambda tag, i: {"wait_ms": 40000}),
+    # Google's challenge_ts measured ~= page load, not execute(): does a long
+    # dwell (Atoka's step0 fill is 60-140 s) age the token toward expiry?
+    "dwell-60s": ("as baseline, 60 s dwell after load (token-age test)", None,
+                  lambda tag, i: {"wait_ms": 60000, "timeout_ms": 180000}),
     "typing-1": ("as baseline, 1 field typed", None, lambda tag, i: {"field_count": 1}),
     "typing-3": ("as baseline, 3 fields typed", None, lambda tag, i: {"field_count": 3}),
 }
@@ -83,14 +87,29 @@ def call(tool: str, body: dict, key: str, timeout: int = 420):
         return {"error": text[:200] or "unparseable"}, round(time.time() - started, 1)
 
 
+# The sidecar being away (a park or launch-shed restarts it for ~60 s, and
+# Tools' breaker then refuses for 60 s) is not a sample: wait it out.
+AWAY = ("unreachable", "breaker open", "HTTP 502", "HTTP 503", "HTTP 504")
+
+
+def call_when_up(tool: str, body: dict, key: str, waits: int = 8):
+    for attempt in range(waits + 1):
+        result, secs = call(tool, body, key)
+        err = str(result.get("error") or "")
+        if not any(a in err for a in AWAY) or attempt == waits:
+            return result, secs, attempt
+        time.sleep(75)
+    return result, secs, waits
+
+
 def setup(kind: str, body: dict, tag: str, key: str) -> dict:
     body = {k: (v.format(tag=tag) if isinstance(v, str) else v) for k, v in body.items()}
     if kind == "warm":
-        out, secs = call("web_form_warm", body, key)
+        out, secs, _ = call_when_up("web_form_warm", body, key)
         print(f"  setup warm {body['profile']}: {secs}s visits="
               f"{[(v.get('host'), v.get('ok')) for v in out.get('visits') or []]} error={out.get('error')}")
     else:
-        out, secs = call("web_form_exit_select", body, key)
+        out, secs, _ = call_when_up("web_form_exit_select", body, key)
         print(f"  setup exit-select {body['profile']}: {secs}s pinned={out.get('pinned')} "
               f"tries={[t.get('score', t.get('skipped')) for t in out.get('tries') or []]}")
     return out
@@ -106,17 +125,27 @@ def run(configs, n, tag, label, out_path, key, threshold):
             setup(prep[0], dict(prep[1]), tag, key)
         for i in range(n):
             body = {"threshold": threshold, **factory(tag, i)}
-            result, secs = call("web_form_score_probe", body, key)
+            result, secs, waited = call_when_up("web_form_score_probe", body, key)
             row = {"label": label, "config": name, "i": i, "secs": secs, "at": int(time.time()),
                    "score": result.get("score"), "passed": result.get("passed"),
                    "error": result.get("error") or (result.get("form") or {}).get("error"),
                    "codes": result.get("error-codes"), "egress": result.get("egress"),
                    "blocked": result.get("blocked"), "exit_ip_changed": result.get("exit_ip_changed"),
-                   "dwell_s": (result.get("verdict") or {}).get("page_dwell_s")}
+                   "waited_restarts": waited,
+                   "dwell_s": (result.get("verdict") or {}).get("page_dwell_s"),
+                   "token_age_s": (result.get("verdict") or {}).get("token_age_s"),
+                   "subs": (result.get("form") or {}).get("form_submissions"),
+                   # POSTed but no verdict read back: Google may still have
+                   # scored it (Tools logs `oracle verdict`) — a probe miss,
+                   # not a score.
+                   "capture_miss": bool((result.get("form") or {}).get("form_submissions")
+                                        and result.get("verdict") is None)}
             rows.append(row)
             if sink:
                 sink.write(json.dumps(row) + "\n")
                 sink.flush()
+            if row["error"] == "probe_unavailable":
+                time.sleep(75)  # the park shed the replica; let it come back
             eg = row["egress"] or {}
             print(f"  {i + 1:>3}/{n} score={row['score']} {secs:>5}s ip={eg.get('ip')} "
                   f"asn={eg.get('asn')} err={row['error']}")
