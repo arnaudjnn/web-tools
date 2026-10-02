@@ -5,7 +5,7 @@ import { createServer as netServer, Socket } from 'node:net';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { TOOL_NAMES } from '@web-tools/toolkit';
+import { TOOL_NAMES, tools as toolDefs } from '@web-tools/toolkit';
 
 const realFetch = globalThis.fetch;
 let base = '';
@@ -150,8 +150,10 @@ describe('MCP over streamable HTTP', () => {
   it('registers every tool by name', async () => {
     const client = await connect();
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(TOOL_NAMES.length);
-    expect(tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
+    // REST-only diagnostics (restOnly) are deliberately not on MCP.
+    const mcpNames = toolDefs.filter((t) => !t.restOnly).map((t) => t.name);
+    expect(tools).toHaveLength(mcpNames.length);
+    expect(tools.map((t) => t.name).sort()).toEqual([...mcpNames].sort());
     expect(tools.every((t) => t.inputSchema.type === 'object')).toBe(true);
     await client.close();
   });
