@@ -442,14 +442,14 @@ def inspect_form(context, *, url, wait_until="domcontentloaded", wait_ms=4000, t
             "wizard": wizard, "diagnostics": diagnostics}
 
 
-def register(app, *, worker, form_browser, shared_session):
+def register(app, *, worker, form_browser, shared_session, camoufox=None):
     """Mount POST /form-inspect on the app, sharing the form worker's admission."""
     import secrets
 
     from fastapi import HTTPException
     from pydantic import BaseModel, Field
 
-    from form_flow import validate_form
+    from form_flow import FormLive, validate_form
     from form_worker import run_isolated_form
 
     class FormInspectRequest(BaseModel):
@@ -471,11 +471,14 @@ def register(app, *, worker, form_browser, shared_session):
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         session = req.exit_session or (secrets.token_hex(6) if req.fresh_ip else shared_session)
+        # One per job, shared by the worker and the runner: one form-run line.
+        live = FormLive(profile=req.profile, headed=req.headed, camoufox=camoufox)
         try:
             data = await worker.run(partial(run_isolated_form,
                 partial(form_browser, session, False, req.headed, req.profile),
-                deadline=deadline, runner=inspect_form, url=req.url,
-                wait_until=req.wait_until, wait_ms=req.wait_ms), url=req.url, deadline=deadline)
+                deadline=deadline, runner=inspect_form, live=live, url=req.url,
+                wait_until=req.wait_until, wait_ms=req.wait_ms), url=req.url, deadline=deadline,
+                live=live)
         except Exception as e:
             # Read-only: nothing was submitted, so every failure is replayable.
             log.warning("form-inspect failed (%s)", type(e).__name__)

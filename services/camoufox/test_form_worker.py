@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import threading
 import time
@@ -92,6 +93,33 @@ class IsolatedFormTests(unittest.TestCase):
         self.assertEqual(result["error"], "deadline_before_navigation")
         self.manager.__exit__.assert_called_once()
         execute.assert_not_called()
+
+    @patch("form_worker.time.sleep")
+    def test_launch_failure_emits_one_summary_without_the_message(self, _sleep):
+        import form_flow
+        self.manager.__enter__.side_effect = RuntimeError("private proxy credential")
+        live = form_flow.FormLive(profile="p1", headed=True, camoufox="x/y")
+        with self.assertLogs("camoufox.forms", level="INFO") as logs:
+            run_isolated_form(self.factory, deadline=time.monotonic() + 5, live=live, **self.params)
+        runs = [r.getMessage() for r in logs.records if r.getMessage().startswith("form-run ")]
+        self.assertEqual(len(runs), 1)
+        summary = json.loads(runs[0][len("form-run "):])
+        self.assertEqual(summary["error"], "browser_launch_failed")
+        self.assertEqual(summary["launch_attempts"], 2)
+        self.assertEqual(summary["profile"], "p1")
+        self.assertIn("launch", summary["durations_s"])
+        self.assertIn("teardown", summary["durations_s"])
+        self.assertNotIn("credential", runs[0])
+
+    @patch("form_worker.run_form", side_effect=RuntimeError("private"))
+    def test_escaping_exception_still_emits_a_summary(self, _execute):
+        with self.assertLogs("camoufox.forms", level="INFO") as logs:
+            with self.assertRaises(RuntimeError):
+                self.run_form()
+        runs = [r.getMessage() for r in logs.records if r.getMessage().startswith("form-run ")]
+        self.assertEqual(len(runs), 1)
+        self.assertIn('"failure_class":"RuntimeError"', runs[0])
+        self.assertNotIn("private", runs[0])
 
     def test_expired_operation_does_not_launch(self):
         result = run_isolated_form(self.factory, deadline=time.monotonic() - 1, **self.params)
@@ -192,10 +220,12 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         import form_flow
         worker = FormWorker()
         stuck = threading.Event()
+        live = form_flow.FormLive()
 
         def parked():
-            form_flow._mark(form_flow.PRE_SUBMIT_STEP)
-            form_flow._LIVE["at"] = time.monotonic() - 99  # parked long ago
+            live.mark(form_flow.PRE_SUBMIT_STEP)
+            name, _, threshold = live._step
+            live._step = (name, form_flow._clock() - 99, threshold)  # parked long ago
             stuck.wait(5)
             return "late"
 
@@ -204,13 +234,43 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict(os.environ, {"FORM_WEDGE_EXIT_S": "0.01"}), \
                  patch("form_worker.os._exit", lambda code: fired.append(code)), \
                  patch("form_worker.TEARDOWN_GRACE_S", 30):
-                with self.assertRaises(FormRetryable):
-                    await worker.run(parked, url="https://example.test",
-                                     deadline=time.monotonic() + 30)
+                with self.assertLogs("camoufox.forms", level="INFO") as logs:
+                    with self.assertRaises(FormRetryable):
+                        await worker.run(parked, url="https://example.test",
+                                         deadline=time.monotonic() + 30, live=live)
             await asyncio.sleep(0.05)  # let the shed's call_later fire
         finally:
             stuck.set()
         self.assertEqual(fired, [1])
+        # The park is the job's verdict: one summary line, from the worker.
+        runs = [r.getMessage() for r in logs.records if r.getMessage().startswith("form-run ")]
+        self.assertEqual(len(runs), 1)
+        summary = json.loads(runs[0][len("form-run "):])
+        self.assertEqual(summary["error"], "parked")
+        self.assertEqual(summary["parked_step"], form_flow.PRE_SUBMIT_STEP)
+
+    async def test_a_previous_jobs_mark_never_parks_the_next_job(self):
+        # The old module-global marker had to be reset before every job; a
+        # per-job object cannot leak at all.
+        import form_flow
+        stale = form_flow.FormLive()
+        stale.mark("pointer move")
+        name, _, threshold = stale._step
+        stale._step = (name, form_flow._clock() - 99, threshold)
+        worker = FormWorker()
+        self.assertEqual(await worker.run(lambda: "fine", url="https://example.test",
+                                          deadline=time.monotonic() + 5,
+                                          live=form_flow.FormLive()), "fine")
+
+    async def test_queue_timeout_emits_the_summary(self):
+        import form_flow
+        worker = FormWorker()
+        with self.assertLogs("camoufox.forms", level="INFO") as logs:
+            result = await worker.run(Mock(), url="https://example.test",
+                                      deadline=time.monotonic() - 1, live=form_flow.FormLive())
+        self.assertEqual(result["error"], "queue_deadline_exceeded")
+        self.assertTrue(any(r.getMessage().startswith("form-run ") and
+                            "queue_deadline_exceeded" in r.getMessage() for r in logs.records))
 
 
 if __name__ == "__main__":
