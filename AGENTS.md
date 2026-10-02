@@ -10,42 +10,52 @@ lives here is the map, the benchmark that shaped the architecture, and the traps
 
 ## Two fetchers, one router
 
-- `packages/toolkit/src/routing.ts` decides the backend **by host**; callers never
-  choose. `isItalianSource` → Camoufox, `prefersCamoufox` (trustpilot) → Camoufox
-  with `forcedWaitMs: 20000`; everything else → Scrapling. Camoufox also owns
-  `web_bytes`, `web_spa_fetch`, forms.
-- `functions.ts` `fetchPage` falls back **symmetrically**: preferred sidecar first,
-  the other second; the thrown error names both causes. A transient Camoufox render
-  failure (`NS_ERROR_CONNECTION_REFUSED`/`ABORT` happens) must not kill a tool
-  Scrapling could serve, and vice versa.
-- `web_crawl` is sequential — one `/markdown` post per URL — shaped
-  `{results:[{url,status_code,success,mode,markdown}]}`; a failed URL is
-  `{url,status_code:0,success:false,error}` inside the same array, not an error.
-- `delay` is explicit-only (no hidden 2 s default). `WebFetchInput.f` is
-  `raw|fit` only; `css_selector` implies `fit`.
+- `packages/toolkit/src/routing.ts` `pickBackend` decides the backend **by host**;
+  callers never choose. Italian sources and `CAMOUFOX_HOSTS` (trustpilot, with
+  `forcedWaitMs: 20000`) → Camoufox; everything else → Scrapling. Camoufox also
+  owns `web_bytes`, `web_eval`, `web_spa_fetch`, forms.
+- `functions.ts` `routed()` is the one fallback: preferred sidecar first, the other
+  second, the error names both causes. **Every URL tool goes through it** —
+  fetch/html/crawl, screenshot, pdf, execute_js. It does **not** fall back on a
+  sidecar 4xx (the request itself was refused — replaying a script elsewhere would
+  run its side effects twice). PDF is Chromium-only: for a Camoufox host,
+  Camoufox renders and Scrapling's `/pdf` prints that DOM (`html` field, the
+  navigation is route-fulfilled, scripts stripped). `web_execute_js` on Camoufox
+  sequences the scripts into one `/eval` expression.
+- **Markdown survives a Scrapling outage**: `markdown.ts` tries `/markdown`, then
+  renders locally (turndown + domino, same noise/hidden strip, `<base href>`,
+  links absolutised). `web_crawl` results carry `renderer: scrapling|local` —
+  assert on it. Wayback GETs fall back from Scrapling `/raw` to Camoufox `/bytes`
+  (residential either way; never from the Tools process).
+- `sidecar.ts` is the one HTTP client for both sidecars, with a circuit breaker
+  that trips **only** on unreachable (ENOTFOUND/ECONNREFUSED/…), 60 s, never on a
+  timeout or HTTP error. No retries anywhere (forms: a lost response may hide a
+  submission). Client aborts: Scrapling timeout+25 s, Camoufox +30 s, forms +60 s.
+- One result shape: every tool returns an MCP `ToolResult`; `functionMap` wraps
+  each in `instrument()` (counts calls/bytes/errors for **all 17** tools (incl. `web_form_inspect`, `web_agent`), turns a
+  throw into `isError`). JSON-native tools (`output:'data'`: search, snapshots,
+  archive, usage_stats) also set `data`, which REST returns bare (500 `{error}` on
+  failure) — the v0 contract `health.py` parses. Screenshots are MCP `image`,
+  PDFs an embedded `resource`; REST downgrades both to the old base64 text.
+- REST validates with the same zod schemas as MCP (`validateParams`): 400
+  `{error:'invalid_params', issues}`. SearXNG failures throw (no silent `[]`);
+  zero results with `unresponsive_engines` is an error naming them.
+- `web_crawl` is sequential, max 20 URLs, 300 s overall deadline (each fetch's
+  timeout shrinks to fit), shaped `{results:[{url,status_code,success,mode,
+  renderer,markdown}]}`; a failed or unreached URL is
+  `{url,status_code:0,success:false,error}` inside the same array.
+- `delay` is explicit-only (no hidden 2 s default), 0–60 s. `WebFetchInput.f` is
+  `raw|fit` only; `css_selector` implies `fit`. Fetch-shaped `timeout_ms` max is
+  90000 = Scrapling `MAX_FETCH_MS` (a vitest asserts they match); above it is a
+  400, not a silent cap.
 
-## The benchmark that removed Crawl4AI (2026-09-27)
+## History: Crawl4AI (removed 2026-09-27)
 
-Side-by-side, same URLs, raw results in the session bench dir (`sl_results.json`,
-`c4a_results.json`, `md_results.json` — kept out of git on purpose):
-
-- **Speed**: Scrapling fast 0.25–1.06 s for full pages (wikipedia 0.62 s / 235 KB,
-  github 1.06 s / 575 KB, bbc 0.50 s) vs Crawl4AI 2.4–3.8 s on the same URLs.
-- **Markdown parity**: Crawl4AI's edge was link absolutisation; once the sidecar
-  urljoins links and honours `<base href>`, quality matched — and Scrapling's
-  markdown conversion is local (`scrapling/core/shell.py` Convertor), no second
-  HTTP hop (~0.8 s/call) and no second service that can wedge.
-- **Capability**: everything Crawl4AI did is `sessions` + Chromium now —
-  `/markdown`, `/screenshot`, `/pdf`, `/eval` on the sidecar, `web_crawl`
-  composed from it.
-- **Trustpilot decided the routing, not the benchmark**: Scrapling `fast` answers
-  403/970 B in ~0.5 s, clean. Escalating it hit the *managed* Turnstile and
-  **wedged the whole worker for minutes** (no log line; the solve holds the driver
-  while the queue starves). Camoufox with `wait_ms:20000` renders the full page
-  (691 KB with live reviews, verified through the public Tools API).
-- Crawl4AI itself was decommissioned the same day (`railway down -s Crawl4AI`,
-  its `CRAWL4AI_*` vars removed from Tools). Historical references to it in code
-  comments are history, not live paths.
+Removed after a side-by-side benchmark (Scrapling 0.25–1.06 s vs Crawl4AI
+2.4–3.8 s on the same URLs, equal markdown once links were absolutised); any
+mention of it in code is history. **Trustpilot decided the routing**: Scrapling
+fast answers 403/970 B, escalating hit the managed Turnstile and **wedged the
+whole worker for minutes**; Camoufox with `wait_ms:20000` renders the full page.
 
 ## Scrapling sidecar (`services/scrapling/app.py`)
 
@@ -62,9 +72,13 @@ Endpoints: `/fetch` (with `wait_ms`), `/markdown` (`raw|fit`), `/raw`,
 - **Pinned version `scrapling[fetchers]==0.4.14`** — `Response.markdown()` does
   not exist yet; the render path uses the Convertor internals. `markdownify==1.2.3`
   is a hard dep of `/markdown`; `httpx==0.28.1` of `/raw`.
-- `_execute` enforces a hard deadline (timeout + 20 s slack; clients abort at
-  +25 s), tracks `_inflight`, and `/healthz` reports `busy_age_s` — a mode busy
-  >150 s is a wedge.
+- **One deadline per request** (timeout + 20 s slack; clients abort at +25 s),
+  escalation included: `/fetch` gives the solve retry only what is left
+  (`escalation_budget_ms`, none under 10 s). Two runs of timeout+20 s each used
+  to outlast the client. `_execute` tracks `_inflight`; `/healthz` reports
+  `busy_age_s` — a mode busy >150 s is a wedge.
+- `timeout_ms` above `MAX_FETCH_MS` (90000) is a 422 on every endpoint, not a
+  silent `min()`.
 - Action errors return **400 without discarding the session** (the session is
   fine; the page lied).
 - `NEVER_ESCALATE_HOSTS=("trustpilot.com",)` — escalation there cannot win and
@@ -162,10 +176,17 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
 
 ## QA
 
-- `pnpm typecheck && pnpm build` — there are **no toolkit tests** (only
-  `forms.yml` CI and Python form tests). The live API is the oracle: POST
-  `/api/v0/{tool}` with the Bearer key and assert `mode`/`status`, never
-  liveness alone.
+- `pnpm typecheck && pnpm build && pnpm test` (vitest: routing, the symmetric
+  fallback against a fake `fetch`, the local markdown renderer, REST validation,
+  MCP content types) and `pnpm test:py` (Scrapling pure functions, Scrapling
+  stubbed). `ci.yml` runs both on every push/PR; `forms.yml` stays separate.
+  The live API is still the oracle: POST `/api/v0/{tool}` with the Bearer key and
+  assert `mode`/`status`/`renderer`, never liveness alone.
+- SIGTERM drains: `/health` turns 503, in-flight calls finish, exit after at most
+  `DRAIN_TIMEOUT_MS` (60 s). Railway only waits `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`.
+- SearXNG is pinned (`2026.9.30-a9d990033`); `google_sorry_fix.py` exits 1 when a
+  patch neither applies nor is upstream, failing the build. Patch 1 (302/sorry)
+  is upstream as of that tag.
 - `.claude/skills/tools-health` diagnoses/heals the stack (`health.py`,
   `heal.py`); `references/signatures.md` maps every observed failure signature to
   its confirmed cause and fix. Read it before interpreting a probe.

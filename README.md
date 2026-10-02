@@ -58,11 +58,8 @@ internally coherent: its locale and timezone are derived from the exit IP, so
 bot-gate datacenter IPs outright or score the exit country as part of a sensor
 decision, and a US residential exit is not a milder version of the right answer.
 
-Crawl4AI was the third fetcher until 2026-09-27, when a side-by-side benchmark
-confirmed its removal: Scrapling fetched 3-10x faster, matched its markdown
-quality (now with link absolutisation), and covers every capability through
-`sessions` + Chromium (`screenshot`, `pdf`, `evaluate`). See `AGENTS.md` for the
-numbers.
+A third fetcher (Crawl4AI) was removed on 2026-09-27 after a benchmark; see
+`AGENTS.md`.
 
 ### Fetch strategy
 
@@ -83,13 +80,14 @@ interstitial title with a 403/429/503 gets retried once in `solve`, and the
 response reports `escalated: true`.
 
 So: **Scrapling owns fetch, markdown and captures; Camoufox owns the Italian
-exit.** `web_fetch` and `web_html` fetch through Scrapling (or Camoufox, by
-host); `web_fetch` renders that HTML to markdown through Scrapling's CPU-only
-`/markdown` endpoint — a single hop each, no browser for the render. `web_crawl`
-loops the same pipeline per URL; `web_execute_js`, `web_screenshot` and
-`web_pdf` go to Scrapling's `/eval`, `/screenshot` and `/pdf`. When one backend
-fails, the other is the fallback in both directions; if both fail, the error
-says so rather than pretending a third engine exists.
+exit.** Every URL tool — `web_fetch`, `web_html`, `web_crawl`, `web_screenshot`,
+`web_pdf`, `web_execute_js` — routes by host (Italian and bot-walled hosts to
+Camoufox, the rest to Scrapling). When one backend fails, the other is the
+fallback in both directions; if both fail, the error names both causes. HTML is
+rendered to markdown by Scrapling's CPU-only `/markdown`, or locally in the
+Tools process (turndown) when Scrapling is down, so `web_fetch`, `web_crawl`
+and `web_archive` survive a Scrapling outage. PDFs are Chromium-only: for a
+Camoufox host, Camoufox renders the page and Scrapling prints that DOM.
 
 The project is structured as a **monorepo** with three packages:
 
@@ -150,7 +148,7 @@ destroys: JSON-LD, meta tags, attributes.
 | `click_all`    | string[] (optional)| CSS selectors clicked (every match) before capture, for lazy accordions and tabs |
 | `settle_ms`    | number (optional) | Time for AJAX to settle after `click_all` (default: 3000, max 30000) |
 | `fresh_ip`     | boolean (optional)| Serve from a new browser context on a new exit IP with clean cookies (~1s) |
-| `timeout_ms`   | number (optional) | Upstream fetch timeout (default: 60000)                 |
+| `timeout_ms`   | number (optional) | Upstream fetch timeout (default: 60000, max: 90000)     |
 
 These describe how to treat the *page*, not which backend runs it. Each is
 honoured where the serving backend supports it and ignored where it does not.
@@ -161,25 +159,28 @@ so callers can branch on 999 vs 404 themselves.
 
 ### `web_screenshot`
 
-Capture a full-page PNG screenshot of a URL (base64). Scrapling's
-`/screenshot`; Italian and bot-walled hosts go through Camoufox.
+Capture a full-page PNG screenshot of a URL. Scrapling's `/screenshot`; Italian
+and bot-walled hosts go through Camoufox.
 
 | Parameter             | Type              | Description                                 |
 | --------------------- | ----------------- | ------------------------------------------- |
 | `url`                 | string (required) | URL to screenshot                           |
 | `screenshot_wait_for` | number (optional) | Seconds to wait before capture (default: 2) |
 
-Returns a base64-encoded PNG image.
+MCP returns it as `image` content (`mimeType: image/png`); REST keeps the v0
+shape, `{ content: [{ type: "text", text: <base64 PNG> }], isError }`.
 
 ### `web_pdf`
 
-Convert a URL to PDF (Chromium print-to-PDF) and return it base64-encoded.
+Convert a URL to PDF (Chromium print-to-PDF). For Italian and bot-walled hosts
+Camoufox renders the page and Scrapling prints the rendered DOM.
 
 | Parameter | Type              | Description           |
 | --------- | ----------------- | --------------------- |
 | `url`     | string (required) | URL to convert to PDF |
 
-Returns a base64-encoded PDF.
+MCP returns an embedded `resource` (`mimeType: application/pdf`, base64 `blob`);
+REST keeps the v0 shape, base64 PDF as text content.
 
 ### `web_execute_js`
 
@@ -199,13 +200,15 @@ Crawl one or more URLs sequentially through the same pipeline as `web_fetch`
 
 | Parameter     | Type                | Description                                            |
 | ------------- | ------------------- | ------------------------------------------------------ |
-| `urls`        | string[] (required) | URLs to crawl, in order                                |
+| `urls`        | string[] (required) | URLs to crawl, in order (max 20)                       |
 | `css_selector`| string (optional)   | Convert only elements matching this selector           |
-| `timeout_ms`  | number (optional)   | Per-URL fetch timeout (default: 60000)                 |
+| `timeout_ms`  | number (optional)   | Per-URL fetch timeout (default: 60000, max: 90000)     |
 
-Returns `{ results: [{ url, status_code, success, mode, markdown }] }`. A failed
-URL reports `{ url, status_code: 0, success: false, error }` in its own slot
-without sinking the batch.
+Returns `{ results: [{ url, status_code, success, mode, renderer, markdown }] }`
+(`renderer` is `scrapling` or `local`). A failed URL reports
+`{ url, status_code: 0, success: false, error }` in its own slot without
+sinking the batch. The whole crawl has a 300 s budget; URLs it does not reach
+come back the same way.
 
 ### `web_snapshots`
 
@@ -480,7 +483,11 @@ claude mcp add web_tools \
 
 ### REST API
 
-Every tool is also available as a REST endpoint:
+Every tool is also available as a REST endpoint. Bodies are validated with the
+same schemas as MCP: invalid input is HTTP 400 `{ error: "invalid_params",
+issues }`. `web_search`, `web_snapshots`, `web_archive` and `web_usage_stats`
+answer with their JSON payload (HTTP 500 `{ error }` on failure); the other
+tools answer with `{ content, isError }`.
 
 ```bash
 # Discovery: list all tools
