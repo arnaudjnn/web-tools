@@ -176,6 +176,8 @@ def summarize_probe(data, *, session, profile, headed, threshold, started):
             "captcha_reload": diagnostics.get("captcha_script_reload"),
             "captcha_failed": diagnostics.get("captcha_failed"),
             "nav_error": diagnostics.get("nav_error"),
+            "exit_rotated": diagnostics.get("exit_rotated"),
+            "captcha_waited_inflight": diagnostics.get("captcha_waited_inflight"),
         },
         "duration_s": round(time.monotonic() - started, 1),
     }
@@ -304,13 +306,24 @@ async def _run(job, url, deadline, live):
         return {"error": "probe_unavailable", "failure_class": type(error).__name__, "diagnostics": {}}
 
 
-async def run_probe(*, oracle_url, session, profile, headed, wait_ms, field_count, action, timeout_ms):
+async def run_probe(*, oracle_url, session, profile, headed, wait_ms, field_count, action, timeout_ms,
+                    rotatable=False, rotated=None):
     page_url, verify_url = oracle_urls(oracle_url, action)
     deadline = time.monotonic() + timeout_ms / 1000
     params = probe_params(page_url, verify_url, field_count, wait_ms)
     factory = partial(_deps["browser_factory"], session, False, headed, profile)
     live = _live(profile, headed, "score")
-    job = partial(_deps["run_isolated"], factory, deadline=deadline, live=live, **params)
+
+    def rotate():
+        # The forms' own exit rotation; `rotated` tells the summary which
+        # exit token the verdict actually came from.
+        token = secrets.token_hex(6)
+        if rotated is not None:
+            rotated["session"] = token
+        return partial(_deps["browser_factory"], token, False, headed, profile)
+
+    job = partial(_deps["run_isolated"], factory, deadline=deadline, live=live,
+                  rotate_factory=rotate if rotatable else None, **params)
     return await _run(job, page_url, deadline, live)
 
 
@@ -382,9 +395,14 @@ async def form_score_probe(req: ScoreProbeRequest):
         raise HTTPException(status_code=400, detail=str(error))
     started = time.monotonic()
     session, _pin = _deps["resolve_session"](req.profile, req.exit_session, req.fresh_ip, req.sticky_exit)
+    sticky = profile_store.sticky_default() if req.sticky_exit is None else req.sticky_exit
+    rotated = {}
     data = await run_probe(oracle_url=req.oracle_url, session=session, profile=req.profile,
                            headed=req.headed, wait_ms=req.wait_ms, field_count=req.field_count,
-                           action=req.action, timeout_ms=req.timeout_ms)
+                           action=req.action, timeout_ms=req.timeout_ms,
+                           rotatable=not req.exit_session and not (req.profile and sticky),
+                           rotated=rotated)
+    session = rotated.get("session", session)
     summary = summarize_probe(data, session=session, profile=req.profile, headed=req.headed,
                               threshold=req.threshold, started=started)
     _record(summary, req.threshold, req.record_exit)

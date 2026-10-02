@@ -138,5 +138,20 @@ class RetryableZeroPostTests(unittest.TestCase):
             {"error": "outcome_unknown", "form_submissions": 0}))
 
 
+class ExitRotationPinTests(unittest.TestCase):
+    """A fresh exit only for an exit the caller did not pin."""
+
+    def test_pinned_exits_never_rotate(self):
+        self.assertIsNone(app._form_rotator("tok", None, None, False, True))
+        self.assertIsNone(app._form_rotator(None, "p1", True, False, True))
+
+    def test_unpinned_exits_get_a_new_token_each_time(self):
+        rotate = app._form_rotator(None, None, None, False, True)
+        first, second = rotate(), rotate()
+        self.assertNotEqual(first.args[0], second.args[0])
+        self.assertEqual(first.args[1:], (False, True, None))
+        self.assertIsNotNone(app._form_rotator(None, "p1", False, False, True))
+
+
 if __name__ == "__main__":
     unittest.main()

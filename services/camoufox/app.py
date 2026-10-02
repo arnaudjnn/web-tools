@@ -1008,11 +1008,15 @@ async def form_submit(req: FormSubmitRequest):
     # One per job: the pre-POST mark the worker polls and the job's single
     # `form-run {json}` summary line (no values, tokens or bodies).
     live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
+    # Exit rotation (pre-input, once) only for an exit the caller did not
+    # pin — neither an explicit exit_session nor a sticky profile's own.
+    rotate = _form_rotator(req.exit_session, req.profile, req.sticky_exit,
+                           bool(req.ready_expression), req.headed)
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
         data = await _form_worker.run(partial(run_isolated_form,
             partial(_form_browser, session, bool(req.ready_expression), req.headed, req.profile),
-            deadline=deadline, url=req.url,
+            deadline=deadline, url=req.url, rotate_factory=rotate,
             fields=[f.model_dump() for f in req.fields], submit=req.submit,
             dismiss=req.dismiss, success_url=req.success_url,
             wait_until=req.wait_until, wait_ms=req.wait_ms, settle_ms=req.settle_ms,
@@ -1048,6 +1052,15 @@ async def form_submit(req: FormSubmitRequest):
     # A profile-pinned exit is reported back (the caller did not choose it);
     # otherwise the contract is unchanged: echo what the caller passed.
     return FormSubmitResponse(**data, exit_session=req.exit_session or (session if req.profile and _sticky(req.sticky_exit) else ""))
+
+
+def _form_rotator(exit_session, profile, sticky_exit, main_world_eval, headed):
+    """A fresh-exit browser factory for run_isolated_form, or None when the
+    exit is pinned (explicit exit_session, or a sticky profile's own exit:
+    rotating it would move the identity off the exit it is known on)."""
+    if exit_session or (profile and _sticky(sticky_exit)):
+        return None
+    return lambda: partial(_form_browser, secrets.token_hex(6), main_world_eval, headed, profile)
 
 
 def _sticky(flag) -> bool:

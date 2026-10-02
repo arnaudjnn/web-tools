@@ -10,6 +10,7 @@ whether its client can mint. Reuses test_form_flow.FormTests' fake page
 (borrowed methods, so its own tests are not collected twice).
 """
 import json
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -182,6 +183,95 @@ class CaptchaGateTests(unittest.TestCase):
         self.assertTrue(summary["captcha_reload"])
         self.assertTrue(summary["captcha_ready"])
         self.assertNotIn("private", json.dumps(summary))
+
+
+class CaptchaFollowUpTests(unittest.TestCase):
+    """cf156g (2026-10-02 18:43/18:47): a reload aborted a SLOW library, and
+    a reload on the same exit repeated a TRUNCATED one. Borrows the gate
+    tests' fake page (not a subclass: its tests would run twice)."""
+    setUp_flow = CaptchaGateTests.setUp_flow
+    submit = CaptchaGateTests.submit
+    setUp = CaptchaGateTests.setUp
+    evaluate = CaptchaGateTests.evaluate
+    handler = CaptchaGateTests.handler
+    load = CaptchaGateTests.load
+    run_with = CaptchaGateTests.run_with
+
+    def test_truncated_library_on_an_unpinned_exit_asks_for_a_fresh_exit(self):
+        request = SimpleNamespace(method="GET", url=LIB_JS, resource_type="script",
+                                  failure="NS_ERROR_NET_PARTIAL_TRANSFER")
+
+        def goto(*args, **kwargs):
+            self.load(API_JS, "ok")
+            self.handler("request")(request)
+            self.handler("response")(SimpleNamespace(request=request, url=LIB_JS, status=200))
+            self.handler("requestfailed")(request)
+            return SimpleNamespace(status=200)
+
+        self.page.goto.side_effect = goto
+        result = run_form(self.context, **self.params, exit_rotatable=True)
+        d = result["diagnostics"]
+        self.assertEqual(result["error"], "captcha_unavailable")
+        self.assertTrue(d["captcha_rotate"])
+        self.assertEqual(self.page.goto.call_count, 1)  # no same-exit reload
+        self.assertIsNone(d.get("captcha_script_reload"))
+        self.assertEqual(result["form_submissions"], 0)
+        self.page.keyboard.type.assert_not_called()
+
+    def test_pinned_exit_keeps_the_reload_and_never_asks_to_rotate(self):
+        result = self.run_with([("ok", "cut"), ("ok", "cut")])
+        self.assertEqual(self.page.goto.call_count, 2)
+        self.assertFalse(result["diagnostics"]["captcha_rotate"])
+        self.assertEqual(result["error"], "captcha_unavailable")
+
+    def test_unusable_after_reload_on_an_unpinned_exit_asks_to_rotate(self):
+        # Not a truncation (refused), so the reload comes first; still
+        # broken after it -> rotation is the last pre-input remedy.
+        result = self.run_with([("refused", None), ("refused", None)], exit_rotatable=True)
+        self.assertEqual(self.page.goto.call_count, 2)
+        self.assertTrue(result["diagnostics"]["captcha_rotate"])
+
+    def run_slow_library(self, finish_after_s):
+        request = SimpleNamespace(method="GET", url=LIB_JS, resource_type="script", failure=None)
+        started = []
+
+        def goto(*args, **kwargs):
+            self.load(API_JS, "ok")
+            if not started:
+                self.handler("request")(request)
+                started.append(time.monotonic())
+            else:
+                self.load(LIB_JS, "ok")
+            return SimpleNamespace(status=200)
+
+        def wait(ms):
+            time.sleep(0.005)
+            if started and request not in finished and time.monotonic() - started[0] >= finish_after_s:
+                finished.append(request)
+                self.handler("response")(SimpleNamespace(request=request, url=LIB_JS, status=200))
+                self.handler("requestfinished")(request)
+
+        finished = []
+        self.page.goto.side_effect = goto
+        self.page.wait_for_timeout.side_effect = wait
+        return run_form(self.context, **self.params)
+
+    def test_an_in_flight_library_gets_time_to_finish_instead_of_a_reload(self):
+        with patch.object(form_flow, "CAPTCHA_LIB_INFLIGHT_S", 2.0):
+            result = self.run_slow_library(0.1)
+        d = result["diagnostics"]
+        self.assertEqual(self.page.goto.call_count, 1)  # the download was NOT aborted
+        self.assertTrue(d["captcha_waited_inflight"])
+        self.assertEqual(d["captcha_signal"], "lib")
+        self.assertEqual(result["form_submissions"], 1)
+
+    def test_the_in_flight_wait_is_bounded(self):
+        with patch.object(form_flow, "CAPTCHA_LIB_INFLIGHT_S", 0.05):
+            started = time.monotonic()
+            result = self.run_slow_library(60.0)
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertTrue(result["diagnostics"]["captcha_script_reload"])
+        self.assertEqual(self.page.goto.call_count, 2)
 
 
 class CaptchaPathClassTests(unittest.TestCase):

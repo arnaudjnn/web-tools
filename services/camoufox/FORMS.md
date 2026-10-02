@@ -129,6 +129,23 @@ Each failed reCAPTCHA request is recorded in `diagnostics.captcha_failed` /
 CLASS (`api.js`, `recaptcha__*.js`, `anchor`, `bframe`, `reload`, `clr`,
 `webworker.js`, `styles__*.css`, `other`), never a query string.
 
+Two refinements from the first gated bench (cf156g, 2026-10-02). A
+`recaptcha__*.js` download still in flight when the 8 s window closes gets up
+to `CAPTCHA_LIB_INFLIGHT_S` (15 s) more to land before anything is declared:
+a reload there ABORTED a slow library (`NS_BINDING_ABORTED`) and then failed
+itself. And a library cut mid-body (`NS_ERROR_NET_PARTIAL_TRANSFER` and kin,
+after its headers) is a property of the exit: a reload through it repeated the
+cut. When the caller did not pin the exit (no `exit_session`, not a sticky
+profile's own), the flow skips the reload and asks the worker for ONE
+relaunch on a fresh proxy session token (`exit_rotated` in diagnostics and
+form-run, `first_captcha_failed` naming what the first exit cut) — still
+pre-input, zero POSTs, and only with `ROTATE_MIN_LEFT_S` (50 s) of budget
+left. A pinned exit keeps the reload and then the 503. There is no second
+route to the library that keeps IP coherence: `www.recaptcha.net`'s api.js
+also loads it from `www.gstatic.com` (the release path 404s on
+recaptcha.net), and fetching it any other way would split the identity across
+IPs.
+
 Every job logs exactly one `form-run {json}` line — on return, on a
 structured failure, on an escaping exception, and (from the worker) on a
 queue timeout, a park or a wedge. It is the measurement source and carries

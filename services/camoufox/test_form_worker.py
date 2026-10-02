@@ -67,6 +67,57 @@ class IsolatedFormTests(unittest.TestCase):
         self.assertEqual(self.factory.call_count, 2)
         execute.assert_called_once()
 
+    # -- exit rotation (pre-input, once, unpinned exits only) ------------
+
+    def unusable(self, **diag):
+        return {"error": "captcha_unavailable", "form_submissions": 0, "ok": False,
+                "diagnostics": {"submit_click_attempted": False, "captcha_rotate": True,
+                                "captcha_failed": [{"path": "recaptcha__*.js",
+                                                    "code": "NS_ERROR_NET_PARTIAL_TRANSFER",
+                                                    "after_response": True, "type": "script"}],
+                                **diag}}
+
+    @patch("form_worker.run_form")
+    def test_truncated_library_relaunches_once_on_a_fresh_exit(self, execute):
+        fresh = Mock(return_value=self.manager)
+        rotate = Mock(return_value=fresh)
+        execute.side_effect = [self.unusable(), {"ok": True, "form_submissions": 1, "diagnostics": {}}]
+        live = __import__("form_flow").FormLive()
+        result = run_isolated_form(self.factory, deadline=time.monotonic() + 120, live=live,
+                                   rotate_factory=rotate, **self.params)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["diagnostics"]["exit_rotated"])
+        rotate.assert_called_once()
+        fresh.assert_called_once()
+        self.assertEqual([c.kwargs["exit_rotatable"] for c in execute.call_args_list], [True, False])
+        self.assertEqual(self.manager.__exit__.call_count, 2)  # the first browser torn down first
+        self.assertTrue(live.extra["exit_rotated"])
+        self.assertEqual(live.extra["first_captcha_failed"][0]["code"], "NS_ERROR_NET_PARTIAL_TRANSFER")
+
+    @patch("form_worker.run_form")
+    def test_a_pinned_exit_never_rotates(self, execute):
+        execute.return_value = self.unusable()
+        result = run_isolated_form(self.factory, deadline=time.monotonic() + 120, **self.params)
+        self.assertEqual(result["error"], "captcha_unavailable")
+        execute.assert_called_once()
+        self.assertNotIn("exit_rotatable", execute.call_args.kwargs)
+
+    @patch("form_worker.run_form")
+    def test_rotation_needs_proof_of_zero_posts_and_budget(self, execute):
+        for label, first, left in (
+                ("posted", dict(self.unusable(), form_submissions=1), 120),
+                ("clicked", self.unusable(submit_click_attempted=True), 120),
+                ("not asked", self.unusable(captcha_rotate=False), 120),
+                ("no budget", self.unusable(), 20)):
+            with self.subTest(label):
+                execute.reset_mock()
+                execute.side_effect = [first, {"ok": True}]
+                rotate = Mock()
+                run_isolated_form(self.factory, deadline=time.monotonic() + left,
+                                  rotate_factory=rotate, **self.params)
+                rotate.assert_not_called()
+                execute.assert_called_once()
+
     @patch("form_worker.run_form")
     def test_context_failure_has_zero_submissions(self, execute):
         self.manager.__enter__.return_value.new_context.side_effect = RuntimeError()

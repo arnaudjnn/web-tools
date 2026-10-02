@@ -71,6 +71,18 @@ NEW_PAGE_STUCK_S = 8.0
 # POST possible); still unusable → captcha_unavailable, zero POSTs, 503.
 CAPTCHA_READY_WAIT_S = 8.0
 CAPTCHA_READY_POLL_MS = 250
+# A recaptcha__*.js download still IN FLIGHT when the window closes gets up
+# to this much longer to finish (the library is ~850 KB). cf156g 18:43:27:
+# the gate saw no failure yet, reloaded, and the reload ABORTED the slow
+# download (NS_BINDING_ABORTED) — then the reload failed too.
+CAPTCHA_LIB_INFLIGHT_S = 15.0
+# A library body cut mid-transfer on THIS exit: a reload on the same exit
+# repeats it (cf156g 18:47:52: NS_ERROR_NET_PARTIAL_TRANSFER twice). With an
+# unpinned exit the worker relaunches once on a fresh one instead
+# (`exit_rotatable`, form_worker.run_isolated_form's rotate_factory).
+_TRUNCATED = ("NS_ERROR_NET_PARTIAL_TRANSFER", "NS_ERROR_NET_INTERRUPT", "NS_ERROR_NET_RESET",
+              "net::ERR_CONTENT_LENGTH_MISMATCH", "net::ERR_INCOMPLETE_CHUNKED_ENCODING",
+              "net::ERR_CONNECTION_RESET")
 # Main-world probe (Camoufox `mw:`; a JS label elsewhere). The api.js stub
 # defines only grecaptcha.ready — execute() arrives with the recaptcha__*.js
 # library, so its presence is the "library initialised" signal. Without a
@@ -209,6 +221,8 @@ class FormLive:
             "captcha_ready": diagnostics.get("captcha_ready"),
             "captcha_signal": diagnostics.get("captcha_signal"),
             "captcha_failed": diagnostics.get("captcha_failed") or None,
+            "captcha_rotate": diagnostics.get("captcha_rotate"),
+            "captcha_waited_inflight": diagnostics.get("captcha_waited_inflight"),
             "page_reused": diagnostics.get("page_reused"),
             "captcha_scripts": [diagnostics.get("captcha_script_requests"),
                                 diagnostics.get("captcha_script_responses"),
@@ -501,7 +515,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
              require_captcha_token=False, ready_expression=None,
              gate_text=None, step2=None, step2_submit=None, completion_markers=None,
-             stop_after_posts=None, live=None):
+             stop_after_posts=None, live=None, exit_rotatable=False):
     targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
     # The caller (run_isolated_form, via the worker) owns the live object and
     # its summary line; a direct call (tests, fixtures) owns its own.
@@ -612,13 +626,24 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         parsed = urlsplit(request.url)
         return parsed.hostname in ("www.google.com", "www.recaptcha.net", "www.gstatic.com", "recaptcha.google.com") and "/recaptcha/" in parsed.path
 
+    lib_inflight = set()  # id() of recaptcha__*.js requests not yet finished/failed
+
+    def is_lib(request):
+        try:
+            return captcha_request(request) and captcha_path_class(request.url) == "recaptcha__*.js"
+        except Exception:
+            return False
+
     def request_started(request):
         if captcha_request(request) and request.resource_type == "script":
             diagnostics["captcha_script_requests"] += 1
+        if is_lib(request):
+            lib_inflight.add(id(request))
 
     captcha_answered = set()  # id() of captcha requests whose headers arrived
 
     def request_failed(request):
+        lib_inflight.discard(id(request))
         if captcha_request(request):
             diagnostics["captcha_network_failures"] += 1
             # WHICH piece failed, and how: the path class (never the query —
@@ -638,6 +663,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
 
     def request_finished(request):
         # The library's body fully arrived: the network half of "usable".
+        lib_inflight.discard(id(request))
         try:
             if (captcha_request(request)
                     and captcha_path_class(request.url) == "recaptcha__*.js"):
@@ -722,12 +748,26 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             return True, "lib"
         return False, None
 
+    def truncated_lib():
+        """The library's body was cut after its headers on this exit."""
+        return any(f.get("path") == "recaptcha__*.js" and f.get("after_response")
+                   and f.get("code") in _TRUNCATED for f in diagnostics["captcha_failed"])
+
     def wait_captcha_usable():
-        until = time.monotonic() + CAPTCHA_READY_WAIT_S
+        started = time.monotonic()
+        until = started + CAPTCHA_READY_WAIT_S
+        inflight_until = until + CAPTCHA_LIB_INFLIGHT_S
         while True:
             usable, signal = captcha_usable()
-            if usable or time.monotonic() >= until:
+            now = time.monotonic()
+            if usable:
                 return usable, signal
+            if now >= until:
+                # Never declare a client unusable while its library is
+                # still downloading: give it time to land (or fail) first.
+                if not (lib_inflight and now < inflight_until):
+                    return usable, signal
+                diagnostics["captcha_waited_inflight"] = True
             with live.at("captcha pause"):
                 page.wait_for_timeout(remaining(CAPTCHA_READY_POLL_MS))
 
@@ -822,6 +862,14 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             usable, signal = wait_captcha_usable()
             diagnostics["captcha_ready"] = usable
             diagnostics["captcha_signal"] = signal
+            if not usable and exit_rotatable and truncated_lib():
+                # The exit cuts the library mid-body; reloading through it
+                # repeats the cut. Hand the job back for ONE relaunch on a
+                # fresh exit — nothing touched, zero POSTs.
+                diagnostics["captcha_rotate"] = True
+                result["error"] = "captcha_unavailable"
+                log.info("form flow: reCAPTCHA library truncated on this exit; asking for a fresh exit")
+                raise CaptchaUnavailable("reCAPTCHA library truncated on this exit")
             if not usable:
                 diagnostics["captcha_script_reload"] = True
                 log.info("form flow: reCAPTCHA not usable (signal=%s failed=%s); reloading once",
@@ -839,6 +887,9 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     diagnostics["captcha_network_failures"] > failures_before)
                 if not usable:
                     result["error"] = "captcha_unavailable"
+                    # Still broken after the reload: a fresh exit is the
+                    # last pre-input remedy, when the exit is not pinned.
+                    diagnostics["captcha_rotate"] = bool(exit_rotatable)
                     raise CaptchaUnavailable("reCAPTCHA client unusable after one reload")
                 log.info("form flow: reCAPTCHA usable after reload (signal=%s)", signal)
         # Arrive like a person before touching anything: settle, scroll,

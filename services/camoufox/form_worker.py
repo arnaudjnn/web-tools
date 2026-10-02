@@ -41,6 +41,20 @@ TEARDOWN_GRACE_S = 45
 LAUNCH_ATTEMPTS = 3
 LAUNCH_BACKOFF_S = (2.0, 5.0)
 
+# Exit rotation: a form whose reCAPTCHA library the exit truncates (or that
+# stays unusable after its one reload) is relaunched ONCE on a fresh exit —
+# still pre-input, zero POSTs — when the caller did not pin the exit. It
+# needs a whole form's worth of budget left (launch + nav + fill + submit).
+ROTATE_MIN_LEFT_S = 50.0
+
+
+def _wants_rotation(result) -> bool:
+    diagnostics = (result or {}).get("diagnostics") or {}
+    return bool(result and result.get("error") == "captcha_unavailable"
+                and result.get("form_submissions") == 0
+                and not diagnostics.get("submit_click_attempted")
+                and diagnostics.get("captcha_rotate"))
+
 # Seconds after a wedge to hard-exit the process (0 = keep serving). A wedged
 # worker holds its Camoufox manager inside a stuck greenlet: nobody can close
 # it, so the firefox process leaks — threads and FDs accumulate until LAUNCHES
@@ -74,11 +88,17 @@ def not_started(url, error):
             "diagnostics": {"submit_click_attempted": False, "token_present": None}}
 
 
-def run_isolated_form(browser_factory, *, deadline, runner=None, live=None, **params):
+def run_isolated_form(browser_factory, *, deadline, runner=None, live=None,
+                      rotate_factory=None, **params):
     """No request can reach the target until browser and context are ready.
 
     `runner` replaces run_form for a read-only job (form_inspect) that shares
     the same launch, retry and teardown.
+
+    `rotate_factory` (form jobs only; None = the exit is pinned) returns a
+    browser factory on a FRESH exit: a run that ends captcha_unavailable with
+    `captcha_rotate` (zero POSTs, nothing touched) is torn down and run ONCE
+    more on it.
 
     Emits the job's one `form-run` summary line on every way out (a
     structured failure, a runner result, or an exception escaping), after
@@ -89,7 +109,7 @@ def run_isolated_form(browser_factory, *, deadline, runner=None, live=None, **pa
         live.note(runner=getattr(runner, "__name__", "runner"))
     result = failure = None
     try:
-        result = _run_isolated(browser_factory, deadline, live, runner, params)
+        result = _run_rotating(browser_factory, deadline, live, runner, params, rotate_factory)
         return result
     except BaseException as error:
         failure = type(error).__name__
@@ -99,6 +119,24 @@ def run_isolated_form(browser_factory, *, deadline, runner=None, live=None, **pa
             live.emit(result)
         else:
             live.emit(None, error="exception", failure_class=failure)
+
+
+def _run_rotating(browser_factory, deadline, live, runner, params, rotate_factory):
+    if runner is not None or rotate_factory is None:
+        return _run_isolated(browser_factory, deadline, live, runner, params)
+    result = _run_isolated(browser_factory, deadline, live, runner,
+                           dict(params, exit_rotatable=True))
+    if not _wants_rotation(result) or deadline - time.monotonic() < ROTATE_MIN_LEFT_S:
+        return result
+    first = (result.get("diagnostics") or {}).get("captcha_failed") or []
+    live.note(exit_rotated=True,
+              first_captcha_failed=[{k: f.get(k) for k in ("path", "code", "after_response")}
+                                    for f in first][:5])
+    log.info("form phase: reCAPTCHA unusable on this exit; relaunching once on a fresh exit")
+    result = _run_isolated(rotate_factory(), deadline, live, runner,
+                           dict(params, exit_rotatable=False))
+    result.setdefault("diagnostics", {})["exit_rotated"] = True
+    return result
 
 
 def _run_isolated(browser_factory, deadline, live, runner, params):
