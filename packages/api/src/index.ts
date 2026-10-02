@@ -4,6 +4,7 @@ import express, { Request, Response } from 'express';
 import { Config, getStats, log, tools } from '@web-tools/toolkit';
 import { createServer } from './mcp.js';
 import { toolHandler } from './handler.js';
+import { mountOracle } from './oracle.js';
 
 log('Environment check:', { searxngUrl: Config.searxng.url });
 
@@ -16,6 +17,11 @@ app.use((_req: Request, res: Response, next) => {
   if (draining) res.set('Connection', 'close');
   next();
 });
+
+// ── Score oracle (BEFORE auth: the form browser carries no API key) ──
+// GET/POST /oracle/recaptcha — 404 unless RECAPTCHA_ORACLE_SITEKEY/SECRET are
+// set. See oracle.ts for why Tools (the public hostname) serves it.
+mountOracle(app, log);
 
 // ── Auth middleware (skips /health) ──────────────────────────────────
 
