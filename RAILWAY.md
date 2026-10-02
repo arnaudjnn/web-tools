@@ -117,7 +117,6 @@ only right in one place:
 SCRAPLING_URL = http://${{Scrapling.RAILWAY_PRIVATE_DOMAIN}}:${{Scrapling.PORT}}
 CAMOUFOX_URL  = http://${{Camoufox.RAILWAY_PRIVATE_DOMAIN}}:${{Camoufox.PORT}}
 SEARXNG_URL   = http://${{SearXNG.RAILWAY_PRIVATE_DOMAIN}}:8080
-# optional, on Tools and Scrapling (unset = forms use CAMOUFOX_URL):
 ```
 
 Reference `${{Service.PORT}}` only where the service actually **binds** it and has
