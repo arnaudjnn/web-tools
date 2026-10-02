@@ -6,33 +6,20 @@ POST /fetch      { url, mode?, network_idle?, timeout_ms?, disable_resources?, w
 POST /markdown   { html, url, filter?, css_selector? }   → { markdown }   (no browser)
 POST /raw        { url, mode?, timeout_ms? } → { status, url, body, size, mode } (no browser)
 POST /screenshot { url, mode?, full_page?, wait_ms?, timeout_ms? }        → { status, url, b64 }
-POST /pdf        { url, wait_ms?, timeout_ms?, format?, landscape? }      → { status, url, b64 }
+POST /pdf        { url, html?, wait_ms?, timeout_ms?, format?, landscape? } → { status, url, b64 }
 POST /eval       { url, scripts, mode?, wait_ms?, timeout_ms? }           → { status, url, results }
 GET  /healthz    → also reports busy_age_s: submission age of in-flight runs per mode.
                    A slot whose age keeps growing is a wedged driver — see _execute.
 
-Why markdown lives here too
----------------------------
-Rendering used to be Crawl4AI's REST /md with a raw:// body, which died with the
-Crawl4AI service (opaque 500s, ~0.8s per call, a second dependency to wedge).
-The conversion itself is pure CPU, so it is one small endpoint on this sidecar:
-Scrapling's own Convertor (noise-tag strip + prompt-injection sanitize + markdownify),
-then a urljoin pass so relative links resolve against the final URL — markdownify
-emits them verbatim and a page with relative /users/ links reads as a page with
-no links at all. The production pin is 0.4.14, whose Response has no `.markdown()`
-yet (added in 0.4.15); the Convertor methods it wraps exist unchanged in 0.4.14
-and are called directly here so the browser pin does not have to move. When the
-pin reaches 0.4.15+, _render_markdown can collapse to `Response.markdown(...)`.
+Markdown lives here because it is pure CPU: Scrapling's own Convertor (noise-tag
+strip + prompt-injection sanitize + markdownify), then a urljoin pass so relative
+links resolve against the final URL (or <base href>). The pin is 0.4.14, whose
+Response has no `.markdown()` yet (0.4.15+), so the Convertor methods are called
+directly. The toolkit has a local fallback renderer for when this is down.
 
-Why this service exists at all
------------------------------
-Crawl4AI >= 0.9 refuses `proxy_config` on a request body (every HTTP body is
-Provenance.UNTRUSTED and proxy_config is a forbidden power-field), and pins
-Chromium to its own localhost egress proxy. So Crawl4AI can only ever egress
-from the platform's own datacenter IP. Measured against LinkedIn profiles, that
-IP burns out: 3/6 → 1/6 → 0/6 over 18 sequential fetches, all HTTP 999, and no
-amount of retrying helps because the IP itself is what is blocked. This service
-owns the residential egress and the challenge solving Crawl4AI cannot have.
+This service owns the residential egress and the challenge solving; the
+platform's own datacenter IP burns out on LinkedIn (3/6 → 0/6 over 18 fetches,
+all HTTP 999).
 
 Three modes, because the failure modes are different and so are their costs
 -------------------------------------------------------------------------
@@ -156,6 +143,26 @@ SOLVE_HOSTS: tuple[str, ...] = ()
 # is where web-tools routes the host. An unsolvable challenge here costs the
 # full fetch cap AND the worker; a skipped escalation costs one useless 403.
 NEVER_ESCALATE_HOSTS: tuple[str, ...] = ("trustpilot.com",)
+
+
+# Hard ceiling on any browser run. The challenge solver can block well past its
+# own deadline (measured `Locator.bounding_box: Timeout 120000ms exceeded`), and
+# each mode has a single-slot executor — so one unbounded run stalls every later
+# request for that mode. Requests above it are REJECTED (422), not silently
+# capped: the toolkit schemas use the same number (MAX_FETCH_TIMEOUT_MS, kept
+# equal by a test).
+MAX_FETCH_MS = 90_000
+
+# Slack on top of a request's timeout_ms before its hard deadline fires: queue
+# wait (a single-slot executor can sit behind one slow job) plus transport. ONE
+# deadline per request, escalation included. The toolkit client aborts at
+# timeout+25s, so this MUST stay below 25s — otherwise the caller sees an
+# aborted socket instead of the honest answer produced here.
+HARD_DEADLINE_SLACK_S = 20
+
+# An escalation is only attempted when at least this much browser time is left
+# inside the request's deadline; less cannot plausibly clear a challenge.
+MIN_ESCALATION_MS = 10_000
 
 
 def _host_matches(host: str, suffixes: tuple[str, ...]) -> bool:
@@ -327,7 +334,7 @@ class FetchRequest(BaseModel):
         description="Block images/CSS/fonts. Defaults to False for solve (a challenge needs "
                     "its subresources) and True otherwise.",
     )
-    timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+    timeout_ms: int = Field(60_000, ge=1_000, le=MAX_FETCH_MS)
     wait_ms: int = Field(
         0,
         ge=0,
@@ -401,23 +408,18 @@ def healthz():
     }
 
 
-# Hard ceiling on any single fetch, independent of the caller's timeout_ms. The
-# challenge solver can block well past its own deadline (measured
-# `Locator.bounding_box: Timeout 120000ms exceeded`), and each mode has a
-# single-slot executor — so one unbounded fetch stalls every later request for
-# that mode. Cap it here so the slot always comes back.
-MAX_FETCH_MS = 90_000
+def _deadline_for(timeout_ms: int) -> float:
+    """The monotonic instant by which a request with this timeout must answer."""
+    return time.monotonic() + timeout_ms / 1000 + HARD_DEADLINE_SLACK_S
 
 
-# Slack on top of a run's own timeout_ms before the hard deadline fires: queue
-# wait (a single-slot executor can sit behind one slow job) plus transport. The
-# toolkit client aborts at timeout+25s, so this MUST stay below 25s — otherwise
-# the caller sees an aborted socket instead of the honest 504 raised here.
-HARD_DEADLINE_SLACK_S = 20
-
-
-async def _execute(mode: Mode, timeout_ms: int, fn: Callable[[], dict]) -> dict:
+async def _execute(
+    mode: Mode, timeout_ms: int, fn: Callable[[], dict], deadline: float | None = None
+) -> dict:
     """Run fn on mode's single-slot executor with a caller-facing hard deadline.
+
+    `deadline` (monotonic) defaults to now + timeout + slack; a request that
+    makes several runs (escalation) passes its one deadline to each.
 
     asyncio.wait bounds the WAIT, not the thread: on timeout the caller gets a
     504 while the executor keeps running (Python cannot kill a thread). That is
@@ -438,9 +440,9 @@ async def _execute(mode: Mode, timeout_ms: int, fn: Callable[[], dict]) -> dict:
             _inflight.pop(mode, None)
 
     fut.add_done_callback(_done)
-    done, _pending = await asyncio.wait(
-        {fut}, timeout=(timeout_ms + HARD_DEADLINE_SLACK_S) / 1000
-    )
+    if deadline is None:
+        deadline = _deadline_for(timeout_ms)
+    done, _pending = await asyncio.wait({fut}, timeout=max(0.0, deadline - time.monotonic()))
     if not done:
         log.error(
             "hard deadline exceeded mode=%s timeout_ms=%d (driver may be wedged)",
@@ -450,20 +452,20 @@ async def _execute(mode: Mode, timeout_ms: int, fn: Callable[[], dict]) -> dict:
         raise HTTPException(
             status_code=504,
             detail=(
-                f"[{mode.value}] run exceeded {timeout_ms + HARD_DEADLINE_SLACK_S * 1000}ms; "
-                "the browser driver may be wedged (healthz busy_age_s)"
+                f"[{mode.value}] hard deadline exceeded (timeout_ms={timeout_ms} + "
+                f"{HARD_DEADLINE_SLACK_S}s slack); the browser driver may be wedged "
+                "(healthz busy_age_s)"
             ),
         )
     return fut.result()
 
 
-async def _run(mode: Mode, req: FetchRequest) -> dict:
+async def _run(mode: Mode, req: FetchRequest, timeout_ms: int, deadline: float) -> dict:
     disable_resources = (
         req.disable_resources
         if req.disable_resources is not None
         else (mode is not Mode.SOLVE)
     )
-    timeout_ms = min(req.timeout_ms, MAX_FETCH_MS)
     return await _execute(
         mode,
         timeout_ms,
@@ -471,16 +473,33 @@ async def _run(mode: Mode, req: FetchRequest) -> dict:
             _do_fetch, mode, req.url, req.network_idle, timeout_ms,
             disable_resources, req.wait_ms,
         ),
+        deadline,
     )
+
+
+def escalation_budget_ms(deadline: float, now: float) -> int:
+    """Browser time left for an escalation inside the request's deadline.
+
+    The second run must finish (queue, teardown, transport) before the same
+    deadline the first one had, so it gets what is left minus the slack, and
+    nothing at all when that is too little to clear a challenge.
+    """
+    left = int((deadline - now - HARD_DEADLINE_SLACK_S / 2) * 1000)
+    return left if left >= MIN_ESCALATION_MS else 0
 
 
 @app.post("/fetch", response_model=FetchResponse)
 async def fetch(req: FetchRequest):
     explicit = req.mode is not None
     mode = req.mode or pick_mode(req.url)
+    # One deadline for the whole request, escalation included: two runs of
+    # timeout+slack each used to outlast the client's timeout+25s abort.
+    deadline = _deadline_for(req.timeout_ms)
 
     try:
-        data = await _run(mode, req)
+        data = await _run(mode, req, req.timeout_ms, deadline)
+    except HTTPException:
+        raise
     except Exception as e:
         log.exception("fetch failed url=%s mode=%s", req.url, mode.value)
         raise HTTPException(status_code=502, detail=f"[{mode.value}] {e}")
@@ -496,9 +515,13 @@ async def fetch(req: FetchRequest):
         and not _host_matches(host, NEVER_ESCALATE_HOSTS)
         and looks_like_challenge(data["status"], data["html"])
     ):
-        log.info("escalating to solve url=%s (status=%s)", req.url, data["status"])
+        budget_ms = escalation_budget_ms(deadline, time.monotonic())
+        if not budget_ms:
+            log.info("not escalating url=%s: too little of the deadline left", req.url)
+            return FetchResponse(**data, escalated=False)
+        log.info("escalating to solve url=%s (status=%s, %dms)", req.url, data["status"], budget_ms)
         try:
-            solved = await _run(Mode.SOLVE, req)
+            solved = await _run(Mode.SOLVE, req, budget_ms, deadline)
         except Exception as e:
             # Keep the original response rather than turning a usable 403 body
             # into a 502 — the caller can still inspect it. Scrapling raises "No
@@ -616,7 +639,7 @@ class RawRequest(BaseModel):
         description="fast = direct (default). stealth = residential proxy. "
                     "Omit to pick by host.",
     )
-    timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+    timeout_ms: int = Field(60_000, ge=1_000, le=MAX_FETCH_MS)
 
 
 class RawResponse(BaseModel):
@@ -661,7 +684,7 @@ def _do_raw(url: str, timeout_ms: int, mode: Mode) -> dict:
 @app.post("/raw", response_model=RawResponse)
 async def raw(req: RawRequest):
     mode = req.mode or pick_mode(req.url)
-    timeout_ms = min(req.timeout_ms, MAX_FETCH_MS)
+    timeout_ms = req.timeout_ms
     try:
         data = await _execute(
             mode, timeout_ms, partial(_do_raw, req.url, timeout_ms, mode)
@@ -697,6 +720,7 @@ def _do_action(
     network_idle: bool,
     wait_ms: int,
     action: Callable[[Any, dict], None],
+    page_setup: Callable[[Any], None] | None = None,
 ) -> dict:
     """Runs inside this mode's single-thread executor: fetch, settle, act."""
     session = _ensure_session_in_worker(mode)
@@ -719,6 +743,7 @@ def _do_action(
             timeout=timeout_ms,
             disable_resources=False,  # a screenshot without CSS is not a screenshot
             page_action=wrapper,
+            **({"page_setup": page_setup} if page_setup else {}),
         )
     except Exception:
         _discard_session(mode)
@@ -728,9 +753,11 @@ def _do_action(
     return {"status": page.status, "url": page.url, "mode": mode.value, **box}
 
 
-async def _run_action(req: Any, action: Callable[[Any, dict], None]) -> dict:
+async def _run_action(
+    req: Any, action: Callable[[Any, dict], None], page_setup: Callable[[Any], None] | None = None
+) -> dict:
     mode = req.mode or pick_mode(req.url)
-    timeout_ms = min(req.timeout_ms, MAX_FETCH_MS)
+    timeout_ms = req.timeout_ms
     network_idle = getattr(req, "network_idle", False)
     try:
         return await _execute(
@@ -738,7 +765,7 @@ async def _run_action(req: Any, action: Callable[[Any, dict], None]) -> dict:
             timeout_ms,
             partial(
                 _do_action, mode, req.url, timeout_ms, network_idle,
-                req.wait_ms, action,
+                req.wait_ms, action, page_setup,
             ),
         )
     except HTTPException:
@@ -756,16 +783,22 @@ class ScreenshotRequest(BaseModel):
     full_page: bool = Field(True, description="Capture the whole scrollable page")
     wait_ms: int = Field(0, ge=0, le=60_000, description="Settle time before capture")
     network_idle: bool = Field(False, description="Wait for network idle before capture")
-    timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+    timeout_ms: int = Field(60_000, ge=1_000, le=MAX_FETCH_MS)
 
 
 class PdfRequest(BaseModel):
     url: str = Field(..., description="Absolute URL to print")
     mode: Mode | None = None
     wait_ms: int = Field(0, ge=0, le=60_000, description="Settle time before print")
-    timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+    timeout_ms: int = Field(60_000, ge=1_000, le=MAX_FETCH_MS)
     format: str = Field("A4", description="Paper format accepted by Chromium print-to-PDF")
     landscape: bool = False
+    html: str | None = Field(
+        None,
+        description="Print this document instead of the live page: the navigation to `url` "
+                    "is answered with it (scripts stripped), subresources load as usual. "
+                    "How a page rendered by another browser (Camoufox) gets printed.",
+    )
 
 
 class EvalRequest(BaseModel):
@@ -773,7 +806,7 @@ class EvalRequest(BaseModel):
     scripts: list[str] = Field(..., min_length=1, description="JS expressions/IIFEs, evaluated in order")
     mode: Mode | None = None
     wait_ms: int = Field(0, ge=0, le=60_000, description="Settle time before the first script")
-    timeout_ms: int = Field(60_000, ge=1_000, le=180_000)
+    timeout_ms: int = Field(60_000, ge=1_000, le=MAX_FETCH_MS)
 
 
 class CaptureResponse(BaseModel):
@@ -800,6 +833,35 @@ async def screenshot_endpoint(req: ScreenshotRequest):
     return CaptureResponse(**await _run_action(req, act))
 
 
+_SCRIPT_RE = re.compile(r"<script\b[^>]*>.*?</script\s*>", re.I | re.S)
+
+
+def strip_scripts(html: str) -> str:
+    """A rendered DOM needs no scripts to print, and re-running them in another
+    browser can re-route, re-hydrate or re-challenge the page."""
+    return _SCRIPT_RE.sub("", html)
+
+
+def serve_document(html: str) -> Callable[[Any], None]:
+    """page_setup that answers the main-frame navigation with `html`, once."""
+    body = strip_scripts(html)
+
+    def setup(page: Any) -> None:
+        served = {"done": False}  # per page: Scrapling retries on a fresh one
+
+        def handle(route: Any) -> None:
+            r = route.request
+            if not served["done"] and r.is_navigation_request() and r.frame == page.main_frame:
+                served["done"] = True
+                route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
+            else:
+                route.fallback()
+
+        page.route("**/*", handle)
+
+    return setup
+
+
 @app.post("/pdf", response_model=CaptureResponse)
 async def pdf_endpoint(req: PdfRequest):
     def act(page: Any, box: dict) -> None:
@@ -807,7 +869,8 @@ async def pdf_endpoint(req: PdfRequest):
             page.pdf(format=req.format, landscape=req.landscape, print_background=True)
         ).decode()
 
-    return CaptureResponse(**await _run_action(req, act))
+    setup = serve_document(req.html) if req.html else None
+    return CaptureResponse(**await _run_action(req, act, setup))
 
 
 @app.post("/eval", response_model=EvalResponse)

@@ -1,9 +1,6 @@
-# Pinned, not floating. `unclecode/crawl4ai:latest` floating to 0.9.2 is exactly
-# what silently broke web_fetch for weeks: a minor upstream release added a trust
-# boundary that made every proxied request a hard 400. Scrapling drives a
-# fingerprint-sensitive browser stack, so an unattended bump here can quietly
-# change what does and does not get blocked. Bump deliberately, then re-measure
-# LinkedIn (mode=stealth) and Trustpilot (mode=solve) before shipping.
+# Pinned, not floating: a floating upstream image once silently broke web_fetch
+# for weeks. Scrapling drives a fingerprint-sensitive browser stack, so bump
+# deliberately, then re-measure LinkedIn (stealth) and a challenge host (solve).
 scrapling[fetchers]==0.4.14
 fastapi==0.121.1
 uvicorn[standard]==0.34.3
