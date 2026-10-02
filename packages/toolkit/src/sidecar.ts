@@ -13,6 +13,8 @@
 // have happened, so retrying belongs to callers that know their request is
 // idempotent — and none of the current ones need it.
 
+import './http.js';
+
 export class SidecarError extends Error {
   constructor(
     message: string,

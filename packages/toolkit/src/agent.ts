@@ -12,6 +12,7 @@
 // this client aborts at timeout_ms + 25 s — so the sidecar's honest answer
 // always wins the race.
 
+import './http.js';
 import { Config } from './config.js';
 import type { ToolResult } from './types.js';
 
