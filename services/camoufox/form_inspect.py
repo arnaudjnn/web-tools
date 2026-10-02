@@ -34,6 +34,8 @@ from functools import partial
 from typing import Optional
 from urllib.parse import urlsplit
 
+from form_flow import first_page
+
 log = logging.getLogger("camoufox.forms")
 
 CAPTCHA_FRAME_HOSTS = ("google.com", "recaptcha.net", "gstatic.com", "hcaptcha.com",
@@ -549,7 +551,9 @@ def inspect_form(context, *, url, wait_until="domcontentloaded", wait_ms=4000, t
         return value
 
     context.route("**/*", guard)
-    page = context.new_page()
+    # A persistent profile's own launch tab, never a second one (the
+    # 'new page' parks of 2026-10-02 — see form_flow.first_page).
+    page, _reused = first_page(context)
     navigation = page.goto(url, wait_until=wait_until, timeout=remaining())
     if navigation is not None and isinstance(navigation.status, int):
         diagnostics["navigation_status"] = navigation.status

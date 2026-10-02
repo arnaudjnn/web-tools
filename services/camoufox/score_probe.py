@@ -39,7 +39,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 import profile_store
-from form_flow import FormLive, human_click
+from form_flow import FormLive, first_page, human_click
 
 log = logging.getLogger("camoufox.score")
 
@@ -168,6 +168,14 @@ def summarize_probe(data, *, session, profile, headed, threshold, started):
             "submission_tokens": diagnostics.get("submission_tokens"),
             "phase": diagnostics.get("phase"),
             "failure_class": diagnostics.get("failure_class"),
+            # The pre-input reCAPTCHA gate: did the client become usable,
+            # by which signal, was the page reloaded once, and which pieces
+            # failed (path classes only — form_flow.captcha_path_class).
+            "captcha_ready": diagnostics.get("captcha_ready"),
+            "captcha_signal": diagnostics.get("captcha_signal"),
+            "captcha_reload": diagnostics.get("captcha_script_reload"),
+            "captcha_failed": diagnostics.get("captcha_failed"),
+            "nav_error": diagnostics.get("nav_error"),
         },
         "duration_s": round(time.monotonic() - started, 1),
     }
@@ -232,7 +240,7 @@ def warm_flow(context, *, timeout_ms, url, visits=DEFAULT_VISITS, dwell_ms=None)
     form ever mints a token on it."""
     deadline = time.monotonic() + timeout_ms / 1000
     out = {"visits": [], "egress": None, "error": None}
-    page = context.new_page()
+    page, _reused = first_page(context)  # a profile's launch tab, never a 2nd
     try:
         for target in [*visits, url]:
             left = deadline - time.monotonic()
@@ -264,7 +272,7 @@ def warm_flow(context, *, timeout_ms, url, visits=DEFAULT_VISITS, dwell_ms=None)
 
 def egress_flow(context, *, timeout_ms, url):
     """Which IP/ASN does this exit token land on? One navigation, no page JS."""
-    page = context.new_page()
+    page, _reused = first_page(context)  # a profile's launch tab, never a 2nd
     try:
         response = page.goto(url, wait_until="domcontentloaded", timeout=int(min(20000, timeout_ms)))
         return {"egress": normalize_egress(response.json() if response is not None else None)}

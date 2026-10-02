@@ -33,6 +33,14 @@ class FormRetryable(Exception):
 # every later form only ever saw queue_deadline_exceeded).
 TEARDOWN_GRACE_S = 45
 
+# Launch attempts and the pause before each retry. Two were not enough on
+# 2026-10-02 15:43:43/45: a persistent profile whose previous browser had
+# just failed refused launch_persistent_context TWICE (TargetClosedError,
+# 2s apart), and the next job's launch 6s later succeeded. A third attempt
+# after 5s covers that window; still pre-navigation, so zero submissions.
+LAUNCH_ATTEMPTS = 3
+LAUNCH_BACKOFF_S = (2.0, 5.0)
+
 # Seconds after a wedge to hard-exit the process (0 = keep serving). A wedged
 # worker holds its Camoufox manager inside a stuck greenlet: nobody can close
 # it, so the firefox process leaks — threads and FDs accumulate until LAUNCHES
@@ -100,11 +108,12 @@ def _run_isolated(browser_factory, deadline, live, runner, params):
     context_owned = True
     live.enter("launch")
     try:
-        # One launch retry: the first launch of a fresh process (tunnel still
-        # coming up, proxy exit cycling) fails transiently, and today that
-        # structured failure burns a whole caller attempt. Pre-navigation, so
-        # zero submissions either way — the retry cannot double anything.
-        for attempt in (1, 2):
+        # Launch retries: the first launch of a fresh process (tunnel still
+        # coming up, proxy exit cycling) fails transiently, and so does a
+        # profile whose previous browser is still letting go of it (see
+        # LAUNCH_ATTEMPTS). Pre-navigation, so zero submissions either way —
+        # a retry cannot double anything.
+        for attempt in range(1, LAUNCH_ATTEMPTS + 1):
             if time.monotonic() >= deadline:
                 return not_started(params["url"], "deadline_before_browser")
             live.note(launch_attempts=attempt)
@@ -123,9 +132,11 @@ def _run_isolated(browser_factory, deadline, live, runner, params):
                 break
             except Exception as error:
                 launch_health.note(False)
+                live.note(launch_errors=[*live.extra.get("launch_errors", []),
+                                         type(error).__name__])
                 log.warning("form browser launch failed attempt %d (%s: %s); %s",
                             attempt, type(error).__name__, str(error)[:300],
-                            "retrying" if attempt == 1 else "no submission")
+                            "retrying" if attempt < LAUNCH_ATTEMPTS else "no submission")
                 if manager is not None:
                     # A factory that opened before __enter__ raised still owns
                     # whatever it opened — close it here; the finally below
@@ -135,9 +146,10 @@ def _run_isolated(browser_factory, deadline, live, runner, params):
                     except Exception:
                         pass
                 manager = None
-                if attempt == 2:
+                if attempt == LAUNCH_ATTEMPTS:
                     return not_started(params["url"], "browser_launch_failed")
-                time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+                pause = LAUNCH_BACKOFF_S[min(attempt - 1, len(LAUNCH_BACKOFF_S) - 1)]
+                time.sleep(min(pause, max(0.0, deadline - time.monotonic())))
         try:
             if hasattr(browser, "new_context"):
                 context = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")

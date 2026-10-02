@@ -1080,9 +1080,10 @@ def _retryable_zero_post(data: dict) -> bool:
     return (
         data.get("error") in (
             # Pre-click failures: nothing left this machine (fields, context,
-            # navigation, the readiness gate) — the caller may replay.
+            # navigation, the readiness gate, an unusable reCAPTCHA client
+            # after its one reload) — the caller may replay.
             "fields_failed", "browser_launch_failed", "navigation_failed",
-            "browser_context_failed", "readiness_failed",
+            "browser_context_failed", "readiness_failed", "captcha_unavailable",
             "deadline_before_browser", "deadline_before_navigation",
         )
         and data.get("form_submissions") == 0

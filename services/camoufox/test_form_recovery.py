@@ -105,7 +105,7 @@ class RetryableZeroPostTests(unittest.TestCase):
 
     def test_pre_submit_failures_with_zero_posts_qualify(self):
         for error in ("fields_failed", "browser_launch_failed", "navigation_failed",
-                      "browser_context_failed", "readiness_failed",
+                      "browser_context_failed", "readiness_failed", "captcha_unavailable",
                       "deadline_before_browser", "deadline_before_navigation"):
             with self.subTest(error=error):
                 self.assertTrue(app._retryable_zero_post({

@@ -49,7 +49,38 @@ POINTER_MOVE_STUCK_S = 10.0
 # Navigation: a transient refusal is retried in-run (pre-POST, a GET only).
 NAV_ATTEMPTS = 3
 NAV_BACKOFF_S = (2.0, 4.0)
-NAV_TIMEOUT_MS = 60000
+# Per goto. Every successful oracle navigation on cf156 reached
+# domcontentloaded within ~10s; the one TimeoutError (2026-10-02 15:38:47)
+# sat the full 60s on a stalled exit and left no budget to retry. 30s is 3x
+# the worst success, and a timed-out GET is retried in-run (pre-input) when
+# at least NAV_RETRY_MIN_LEFT_S of the deadline remains for the form itself.
+NAV_TIMEOUT_MS = 30000
+NAV_RETRY_MIN_LEFT_S = 60.0
+# 'new page' parks (2026-10-02 15:36:33, 15:43:49): both on PERSISTENT
+# profiles, whose launch already owns a blank tab; context.new_page() opening
+# a second one never returned. Isolated contexts start with no page and never
+# parked there (0/41). Reuse the launch's own tab when there is one.
+NEW_PAGE_STUCK_S = 8.0
+# reCAPTCHA readiness, pre-input. A page that requested a reCAPTCHA script
+# must have a usable client before anything is typed: on cf156, 5/33 POSTs
+# carried NO token, every one with captcha_scripts [2,2,1] and an oracle
+# verdict with no t_submit (page_dwell_s null, mint_error null) — the
+# page's submit listener, attached inside grecaptcha.ready(), never ran, so
+# the click fell through to a NATIVE submit with an empty field. Polled for
+# CAPTCHA_READY_WAIT_S; unusable then → ONE reload (no field touched, no
+# POST possible); still unusable → captcha_unavailable, zero POSTs, 503.
+CAPTCHA_READY_WAIT_S = 8.0
+CAPTCHA_READY_POLL_MS = 250
+# Main-world probe (Camoufox `mw:`; a JS label elsewhere). The api.js stub
+# defines only grecaptcha.ready — execute() arrives with the recaptcha__*.js
+# library, so its presence is the "library initialised" signal. Without a
+# main world, `wrappedJSObject` (Firefox xray waiver) is tried; anything
+# else reads false and the frame/network signals below decide.
+GRECAPTCHA_USABLE_JS = (
+    "(() => { const w = window.wrappedJSObject || window; const g = w.grecaptcha;"
+    " return !!g && (typeof g.execute === 'function' ||"
+    " !!(g.enterprise && typeof g.enterprise.execute === 'function')); })()")
+_ANCHOR_PATH = re.compile(r"/recaptcha/(?:api2|enterprise)/anchor\b")
 # The readiness gate's own bound. Every passing run met it within
 # milliseconds of the fields finishing; every failing one (7 on 2026-10-01)
 # polled until the whole deadline expired (~2 min) — a condition still
@@ -175,6 +206,10 @@ class FormLive:
             "nav_error": diagnostics.get("nav_error"),
             "ready_met": diagnostics.get("ready_condition_met"),
             "captcha_reload": diagnostics.get("captcha_script_reload"),
+            "captcha_ready": diagnostics.get("captcha_ready"),
+            "captcha_signal": diagnostics.get("captcha_signal"),
+            "captcha_failed": diagnostics.get("captcha_failed") or None,
+            "page_reused": diagnostics.get("page_reused"),
             "captcha_scripts": [diagnostics.get("captcha_script_requests"),
                                 diagnostics.get("captcha_script_responses"),
                                 diagnostics.get("captcha_network_failures")],
@@ -282,7 +317,71 @@ _NAV_RETRY = ("NS_ERROR_CONNECTION_REFUSED", "NS_ERROR_PROXY_CONNECTION_REFUSED"
               "NS_BINDING_ABORTED", "net::ERR_CONNECTION_REFUSED",
               "net::ERR_PROXY_CONNECTION_FAILED", "net::ERR_CONNECTION_RESET",
               "net::ERR_TUNNEL_CONNECTION_FAILED", "net::ERR_ABORTED",
-              "interrupted", "target_closed")
+              "interrupted", "target_closed", "new_page_failed")
+
+
+class CaptchaUnavailable(Exception):
+    """reCAPTCHA never became usable, even after one pre-input reload."""
+
+
+# reCAPTCHA request PATH CLASSES — which piece failed, never a query string
+# (sitekeys, tokens and versions live there and in the release path).
+_CAPTCHA_CLASSES = (
+    (re.compile(r"/recaptcha/api\.js$"), "api.js"),
+    (re.compile(r"/recaptcha/enterprise\.js$"), "enterprise.js"),
+    (re.compile(r"/recaptcha/releases/[^/]+/recaptcha__[^/]*\.js$"), "recaptcha__*.js"),
+    (re.compile(r"/recaptcha/releases/[^/]+/styles__[^/]*\.css$"), "styles__*.css"),
+    (re.compile(r"/recaptcha/(?:api2|enterprise)/anchor$"), "anchor"),
+    (re.compile(r"/recaptcha/(?:api2|enterprise)/bframe$"), "bframe"),
+    (re.compile(r"/recaptcha/(?:api2|enterprise)/reload$"), "reload"),
+    (re.compile(r"/recaptcha/(?:api2|enterprise)/clr$"), "clr"),
+    (re.compile(r"/recaptcha/(?:api2|enterprise)/userverify$"), "userverify"),
+    (re.compile(r"/recaptcha/(?:api2|enterprise)/webworker\.js$"), "webworker.js"),
+    (re.compile(r"/recaptcha/(?:api2|enterprise)/payload$"), "payload"),
+)
+_FAILURE_TOKEN = re.compile(r"^[A-Za-z_:]{1,48}$")
+
+
+def captcha_path_class(url):
+    """The loggable class of a reCAPTCHA URL (path only, normalised)."""
+    path = urlsplit(url or "").path
+    for pattern, name in _CAPTCHA_CLASSES:
+        if pattern.search(path):
+            return name
+    return "other"
+
+
+def _failure_code(text):
+    """An engine error token from request.failure (never a message/URL)."""
+    text = str(text or "")
+    found = _NAV_CODE.search(text)
+    if found:
+        return found.group(1)
+    text = text.strip()
+    return text if _FAILURE_TOKEN.match(text) else ("unknown" if not text else "other")
+
+
+def first_page(context, live=None):
+    """The page a form job drives: the launch's own tab when it has one.
+
+    A persistent context (`profile`) launches INTO a blank tab; asking it
+    for a second one is what parked twice on cf156 (see NEW_PAGE_STUCK_S).
+    An isolated context has none, and gets a fresh page as before. Returns
+    (page, reused).
+    """
+    try:
+        pages = list(context.pages) if isinstance(context.pages, (list, tuple)) else []
+    except Exception:
+        pages = []
+    for candidate in pages:
+        try:
+            if not candidate.is_closed():
+                return candidate, True
+        except Exception:
+            continue
+    at = live.at if live is not None else _unmarked
+    with at("new page", NEW_PAGE_STUCK_S):
+        return context.new_page(), False
 
 
 def _nav_code(error):
@@ -424,7 +523,10 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     "phase": None, "failure_class": None, "dismiss_clicked": [],
                     "banner_visible": None, "field_state": None, "egress": None,
                     "wizard_gate_clicked": False, "wizard_step2": False,
-                    "nav_attempts": 0, "nav_error": None}
+                    "nav_attempts": 0, "nav_error": None,
+                    "captcha_failed": [], "captcha_lib_loaded": False,
+                    "captcha_ready": None, "captcha_signal": None,
+                    "page_reused": None}
     result["diagnostics"] = diagnostics
     live.result = result
     live.note(wizard=bool(gate_text or step2 or completion_markers),
@@ -514,9 +616,34 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         if captcha_request(request) and request.resource_type == "script":
             diagnostics["captcha_script_requests"] += 1
 
+    captcha_answered = set()  # id() of captcha requests whose headers arrived
+
     def request_failed(request):
         if captcha_request(request):
             diagnostics["captcha_network_failures"] += 1
+            # WHICH piece failed, and how: the path class (never the query —
+            # sitekeys and tokens live there), the resource type, the
+            # engine's error token, and whether headers had already arrived
+            # (a body cut mid-transfer counts as a response AND a failure:
+            # that is how [2,2,1] can have as many responses as requests).
+            try:
+                failure = request.failure
+            except Exception:
+                failure = None
+            entry = {"path": captcha_path_class(request.url),
+                     "type": getattr(request, "resource_type", None),
+                     "code": _failure_code(failure),
+                     "after_response": id(request) in captcha_answered}
+            diagnostics["captcha_failed"] = (diagnostics["captcha_failed"] + [entry])[-10:]
+
+    def request_finished(request):
+        # The library's body fully arrived: the network half of "usable".
+        try:
+            if (captcha_request(request)
+                    and captcha_path_class(request.url) == "recaptcha__*.js"):
+                diagnostics["captcha_lib_loaded"] = True
+        except Exception:
+            pass
 
     def page_error(_error):
         diagnostics["page_script_errors"] += 1
@@ -534,6 +661,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 diagnostics["captcha_reloads"] = diagnostics.get("captcha_reloads", 0) + 1
         except Exception:
             pass
+        if captcha_request(response.request):
+            captcha_answered.add(id(response.request))
         if captcha_request(response.request) and response.request.resource_type == "script":
             diagnostics["captcha_script_responses"] += 1
             if response.status >= 400:
@@ -543,14 +672,64 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
 
     def open_page():
         log.info("form flow: new_page")
-        with live.at("new page"):
-            opened = context.new_page()
-        log.info("form flow: page ready")
+        opened, reused = first_page(context, live)
+        diagnostics["page_reused"] = reused
+        log.info("form flow: page ready (reused=%s)", reused)
         opened.on("request", request_started)
         opened.on("requestfailed", request_failed)
+        opened.on("requestfinished", request_finished)
         opened.on("pageerror", page_error)
         opened.on("response", response_received)
         return opened
+
+    def captcha_usable():
+        """(usable, signal) — can the page's reCAPTCHA client mint?
+
+        Decided by the strongest signal present, all read-only:
+        - an anchor frame (v3 badge / v2 widget) is attached: usable iff
+          its document carries #recaptcha-token (the anchor really loaded);
+        - else the page's main world exposes grecaptcha.execute (the
+          library initialised — the api.js stub has only ready());
+        - else the recaptcha__*.js body arrived (requestfinished).
+        """
+        try:
+            frames = list(page.frames) if isinstance(page.frames, (list, tuple)) else []
+        except Exception:
+            frames = []
+        anchors = []
+        for frame in frames:
+            try:
+                if _ANCHOR_PATH.search(urlsplit(frame.url or "").path):
+                    anchors.append(frame)
+            except Exception:
+                continue
+        for frame in anchors:
+            try:
+                with live.at("captcha frame check"):
+                    if frame.evaluate("() => !!document.getElementById('recaptcha-token')") is True:
+                        return True, "anchor"
+            except Exception:
+                continue
+        if anchors:
+            return False, "anchor_empty"
+        try:
+            with live.at("captcha check"):
+                if page.evaluate("mw:(" + GRECAPTCHA_USABLE_JS + ")") is True:
+                    return True, "execute"
+        except Exception:
+            pass
+        if diagnostics.get("captcha_lib_loaded"):
+            return True, "lib"
+        return False, None
+
+    def wait_captcha_usable():
+        until = time.monotonic() + CAPTCHA_READY_WAIT_S
+        while True:
+            usable, signal = captcha_usable()
+            if usable or time.monotonic() >= until:
+                return usable, signal
+            with live.at("captcha pause"):
+                page.wait_for_timeout(remaining(CAPTCHA_READY_POLL_MS))
 
     try:
         live.enter("navigation")
@@ -561,6 +740,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # one in the same context; anything else re-raises as before.
         for attempt in range(1, NAV_ATTEMPTS + 1):
             diagnostics["nav_attempts"] = attempt
+            opening = page is None
             try:
                 if page is None:
                     page = open_page()
@@ -570,9 +750,18 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             except TimeoutError:
                 raise  # remaining(): the form deadline itself, nothing to retry with
             except Exception as error:
-                code = _nav_code(error)
+                # new_page raising (2026-10-02 15:43:41: class Error 0.17s
+                # after new_page, no "page ready") is a page that never
+                # existed — the same zero-input state as a refused GET.
+                code = "new_page_failed" if opening and page is None else _nav_code(error)
                 diagnostics["nav_error"] = code
-                if attempt >= NAV_ATTEMPTS or code not in _NAV_RETRY:
+                # A goto timeout (playwright's own TimeoutError, NOT the
+                # builtin one remaining() raises) is a stalled exit: retried
+                # only while the form itself still has its budget.
+                retry = code in _NAV_RETRY or (
+                    code == "timeout"
+                    and deadline - time.monotonic() >= NAV_RETRY_MIN_LEFT_S)
+                if attempt >= NAV_ATTEMPTS or not retry:
                     raise
                 log.info("form flow: navigation attempt %d failed (%s); retrying",
                          attempt, code)
@@ -595,24 +784,6 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # between this line and a later marker and could not say which call
         # never returned).
         log.info("form flow: wait done")
-        # A CAPTCHA script that failed to load through the exit leaves the
-        # page with no grecaptcha: its submit listener is never attached, the
-        # click falls through to a NATIVE submit with an empty token, and the
-        # site answers "Error verifying reCAPTCHA" (missing-input-response).
-        # Measured on our oracle 2026-10-02: every no-token run had a failed
-        # api.js request (captcha_scripts [1,0,1]). Nothing has been touched
-        # yet — no field, no POST — so ONE reload is as safe as the
-        # navigation retry above; a second failure proceeds as before and
-        # the diagnostics say so.
-        if (not inspect_only and diagnostics["captcha_network_failures"]
-                and diagnostics["captcha_script_responses"] < diagnostics["captcha_script_requests"]):
-            diagnostics["captcha_script_reload"] = True
-            failures_before = diagnostics["captcha_network_failures"]
-            log.info("form flow: captcha script failed to load; reloading once")
-            page.goto(url, wait_until=wait_until, timeout=remaining(NAV_TIMEOUT_MS))
-            page.wait_for_timeout(min(max(wait_ms, 2000), remaining()))
-            diagnostics["captcha_script_reload_failed"] = (
-                diagnostics["captcha_network_failures"] > failures_before)
         # Which IP does this browser ACTUALLY egress from? The contract says
         # every run is pinned to the residential pool by PROXY_URL — but a
         # datacenter or direct egress mints reCAPTCHA tokens from the worst
@@ -634,6 +805,42 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             result["url"] = page.url
             # No page contents/hidden tokens in an inspection response.
             return result
+        # reCAPTCHA readiness gate, BEFORE any input. On cf156 every no-token
+        # POST (5/33) came from a page whose reCAPTCHA client never
+        # initialised: the oracle saw no t_submit at all, i.e. the submit
+        # listener attached in grecaptcha.ready() did not exist and the
+        # click fell through to a NATIVE submit with an empty field
+        # (missing-input-response; "Error verifying reCAPTCHA" on a real
+        # django-recaptcha form). Counting scripts cannot see it — [2,2,1]
+        # has as many responses as requests — so ask the page instead.
+        # Only pages that requested a reCAPTCHA script are gated. Nothing has
+        # been touched yet, so ONE reload is as safe as the navigation retry;
+        # still unusable after it is a zero-POST captcha_unavailable (503
+        # retryable), never a submit with an empty token.
+        if diagnostics["captcha_script_requests"]:
+            live.enter("captcha")
+            usable, signal = wait_captcha_usable()
+            diagnostics["captcha_ready"] = usable
+            diagnostics["captcha_signal"] = signal
+            if not usable:
+                diagnostics["captcha_script_reload"] = True
+                log.info("form flow: reCAPTCHA not usable (signal=%s failed=%s); reloading once",
+                         signal, [f.get("path") for f in diagnostics["captcha_failed"]])
+                diagnostics["captcha_lib_loaded"] = False
+                failures_before = diagnostics["captcha_network_failures"]
+                with live.at("captcha reload", NAV_TIMEOUT_MS / 1000 + 10.0):
+                    page.goto(url, wait_until=wait_until, timeout=remaining(NAV_TIMEOUT_MS))
+                with live.at("captcha reload wait", max(wait_ms, 2000) / 1000 + 8.0):
+                    page.wait_for_timeout(min(max(wait_ms, 2000), remaining()))
+                usable, signal = wait_captcha_usable()
+                diagnostics["captcha_ready"] = usable
+                diagnostics["captcha_signal"] = signal
+                diagnostics["captcha_script_reload_failed"] = (
+                    diagnostics["captcha_network_failures"] > failures_before)
+                if not usable:
+                    result["error"] = "captcha_unavailable"
+                    raise CaptchaUnavailable("reCAPTCHA client unusable after one reload")
+                log.info("form flow: reCAPTCHA usable after reload (signal=%s)", signal)
         # Arrive like a person before touching anything: settle, scroll,
         # dwell. A submit seconds after navigation with no prior input reads
         # as automation no matter how human the typing itself is.

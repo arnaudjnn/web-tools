@@ -36,10 +36,14 @@ workers so form requests remain visible to interception.
 Forms own a short-lived browser and fresh worker thread, separate from the
 shared render/Akamai browsers. `/recycle` cannot close a form's browser. Admission
 is serial per replica, including while a disconnected caller's operation finishes.
-Launch and queue time consume the request deadline. A launch failure gets ONE
-retry inside the worker (the first launch of a fresh process fails transiently
-— tunnel coming up, exit cycling — and it is pre-navigation, so zero
-submissions either way); a launch/context failure after that, or a
+Launch and queue time consume the request deadline. A launch gets up to
+three attempts inside the worker, 2 s then 5 s apart (the first launch of a
+fresh process fails transiently — tunnel coming up, exit cycling — and so
+does a persistent profile whose previous browser is still letting go of it:
+2026-10-02 15:43, two `TargetClosedError` refusals 2 s apart, the next launch
+6 s later fine; it is pre-navigation, so zero submissions either way;
+`form-run.launch_errors` lists the class of each failed attempt); a
+launch/context failure after that, or a
 pre-navigation deadline, returns a structured result with **zero submissions**;
 unexpected failures after execution begins remain unknown and are never retried.
 One structured failure is explicit about being pre-POST: every driver call
@@ -57,8 +61,9 @@ returned, and the worker answers **503** with
 within seconds — no field was touched, no POST left the machine, so that
 attempt's identity may be replayed. The same 503 answers the structured
 failures that prove the same thing (`_retryable_zero_post`): `fields_failed`
-(died before the submit click), `navigation_failed`, or
-`browser_launch_failed`, each with the guard's submission count still zero.
+(died before the submit click), `navigation_failed`, `captcha_unavailable`
+(below), or `browser_launch_failed`, each with the guard's submission count
+still zero.
 After the click nothing is provable — `no_submission` in particular can still
 have the page's native submit in flight when the wait expires — so those stay
 unknown and are never replayed. The leaked browser is shed with the
@@ -86,11 +91,43 @@ exactly that axis for any field near the left or top edge.
 Navigation retries in-run, strictly before any input: up to 3 attempts with
 2 s / 4 s backoff for a transient refusal (`NS_ERROR_*CONNECTION_REFUSED`,
 proxy/net errors, an interrupted navigation) or a page closed on arrival
-(`TargetClosedError` — replaced by a fresh page in the same context). It is a
-GET; the guard has seen no POST. `goto` itself is capped at 60 s. The
-readiness gate (`ready_expression`) is bounded at `READY_WAIT_S` (30 s):
-passing runs meet it within milliseconds, and every 2026-10-01
-`readiness_failed` instead polled away the whole remaining deadline (~2 min).
+(`TargetClosedError` — replaced by a fresh page in the same context), a page
+that failed to open at all (`new_page_failed`), or a `goto` timeout while at
+least `NAV_RETRY_MIN_LEFT_S` (60 s) of the deadline remains. It is a GET; the
+guard has seen no POST. `goto` itself is capped at 30 s (`NAV_TIMEOUT_MS`;
+every successful cf156 navigation took ≤10 s, and the one timeout sat the old
+60 s cap and left no budget to retry). The readiness gate (`ready_expression`)
+is bounded at `READY_WAIT_S` (30 s): passing runs meet it within
+milliseconds, and every 2026-10-01 `readiness_failed` instead polled away the
+whole remaining deadline (~2 min).
+
+The page a job drives is the launch's own tab when the context has one
+(`first_page`): a persistent `profile` context launches INTO a blank tab, and
+asking it for a second one is what parked at `'new page'` twice on cf156
+(2026-10-02 15:36 and 15:43, both `bench-cf156a-warm`; isolated contexts,
+which start with no page, never parked there in 41 runs). Isolated contexts
+still get `new_page()`, marked at `NEW_PAGE_STUCK_S`. Inspect, warm and the
+exit pre-check use the same helper. `form-run.page_reused` says which.
+
+**reCAPTCHA readiness gate.** When the page requested a reCAPTCHA script, the
+flow checks — after arrival's wait and before ANY input — that the page's
+client can mint, polling up to `CAPTCHA_READY_WAIT_S` (8 s). Signals, strongest
+first: an attached anchor frame (`/recaptcha/{api2,enterprise}/anchor`) must
+carry `#recaptcha-token`; else the main world must expose
+`grecaptcha.execute` (`mw:`; the api.js stub defines only `ready`); else the
+`recaptcha__*.js` body must have arrived (`requestfinished`). Unusable → ONE
+reload (no field touched, no POST possible); still unusable →
+`captcha_unavailable`, zero POSTs, 503 retryable — never a submit with an
+empty token. Why: on cf156 5/33 oracle POSTs carried no token, all with
+`captcha_scripts` `[2,2,1]` and a verdict with no `t_submit`
+(`page_dwell_s`/`mint_error` null) — the submit listener the page attaches
+inside `grecaptcha.ready()` never existed, so the click fell through to a
+native submit (missing-input-response). The counts cannot see it: a body cut
+after its headers is a response AND a failure. `inspect_only` is never gated.
+Each failed reCAPTCHA request is recorded in `diagnostics.captcha_failed` /
+`form-run.captcha_failed` as `{path, type, code, after_response}` — `path` a
+CLASS (`api.js`, `recaptcha__*.js`, `anchor`, `bframe`, `reload`, `clr`,
+`webworker.js`, `styles__*.css`, `other`), never a query string.
 
 Every job logs exactly one `form-run {json}` line — on return, on a
 structured failure, on an escaping exception, and (from the worker) on a
@@ -103,8 +140,10 @@ teardown), `total_s`, `posts` (`[{n, token, mint_age_s}]`), `token_present`,
 `egress` (`{country, asn}`), `nav_attempts`, `nav_error` (an engine code such
 as `NS_ERROR_CONNECTION_REFUSED`, never the message), `ready_met`,
 `captcha_scripts` (`[requests, responses, network_failures]`),
+`captcha_ready` / `captcha_signal` / `captcha_reload` / `captcha_failed`
+(the gate above), `page_reused`,
 `submit_clicked`, `inspect_only`, `wizard`, `stop_after_posts`,
-`launch_attempts`, `profile`, `headed`, and `camoufox` (wrapper version /
+`launch_attempts`, `launch_errors`, `profile`, `headed`, and `camoufox` (wrapper version /
 `CAMOUFOX_BUILD` browser pin). Count G1 straight from it:
 `railway logs --service Camoufox --filter '"form-run"'`. The human-readable
 `form flow: done …` line also fires on every return path now (inspect_only

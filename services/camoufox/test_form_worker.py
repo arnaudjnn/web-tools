@@ -6,6 +6,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+import form_worker
 from form_worker import FormRetryable, FormWorker, run_isolated_form
 
 
@@ -24,16 +25,35 @@ class IsolatedFormTests(unittest.TestCase):
     @patch("form_worker.time.sleep")
     @patch("form_worker.run_form")
     def test_launch_failure_has_zero_submissions_and_no_replay(self, execute, _sleep):
-        # Both attempts fail: structured, zero submissions, no execute — the
-        # single retry cannot turn a launch failure into a submission.
+        # Every attempt fails: structured, zero submissions, no execute — a
+        # retry cannot turn a launch failure into a submission.
         self.manager.__enter__.side_effect = RuntimeError("private proxy credential")
         result = self.run_form()
         self.assertEqual(result["form_submissions"], 0)
         self.assertEqual(result["error"], "browser_launch_failed")
         self.assertNotIn("credential", str(result))
-        self.assertEqual(self.factory.call_count, 2)
-        self.assertEqual(self.manager.__exit__.call_count, 2)
+        self.assertEqual(self.factory.call_count, form_worker.LAUNCH_ATTEMPTS)
+        self.assertEqual(self.manager.__exit__.call_count, form_worker.LAUNCH_ATTEMPTS)
         execute.assert_not_called()
+
+    @patch("form_worker.time.sleep")
+    @patch("form_worker.run_form")
+    def test_profile_refusing_two_launches_recovers_on_the_third(self, execute, sleep):
+        # 2026-10-02 15:43:43/45: a persistent profile refused
+        # launch_persistent_context twice (TargetClosedError, 2s apart); the
+        # next job's launch 6s later worked. The third attempt waits longer.
+        class TargetClosedError(Exception):
+            pass
+        execute.return_value = {"ok": True, "form_submissions": 1}
+        self.manager.__enter__.side_effect = [TargetClosedError("closed"), TargetClosedError("closed"),
+                                              self.manager.__enter__.return_value]
+        live = __import__("form_flow").FormLive()
+        result = run_isolated_form(self.factory, deadline=time.monotonic() + 30, live=live, **self.params)
+        self.assertEqual(result, execute.return_value)
+        self.assertEqual(self.factory.call_count, 3)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], list(form_worker.LAUNCH_BACKOFF_S))
+        self.assertEqual(live.extra["launch_errors"], ["TargetClosedError", "TargetClosedError"])
+        execute.assert_called_once()
 
     @patch("form_worker.time.sleep")
     @patch("form_worker.run_form")
@@ -105,7 +125,8 @@ class IsolatedFormTests(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         summary = json.loads(runs[0][len("form-run "):])
         self.assertEqual(summary["error"], "browser_launch_failed")
-        self.assertEqual(summary["launch_attempts"], 2)
+        self.assertEqual(summary["launch_attempts"], form_worker.LAUNCH_ATTEMPTS)
+        self.assertEqual(summary["launch_errors"], ["RuntimeError"] * form_worker.LAUNCH_ATTEMPTS)
         self.assertEqual(summary["profile"], "p1")
         self.assertIn("launch", summary["durations_s"])
         self.assertIn("teardown", summary["durations_s"])
