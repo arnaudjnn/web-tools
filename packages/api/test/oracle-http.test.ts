@@ -133,6 +133,7 @@ describe('POST verify', () => {
       token_length: TOKEN.length,
       page_dwell_s: 8,
       mint_s: 0.5,
+      mint_error: null,
     });
     // Google got the secret, the token and the exit IP ...
     expect(Object.fromEntries(o.calls[0]!)).toEqual({ secret: SECRET, response: TOKEN, remoteip: '93.40.1.2' });
