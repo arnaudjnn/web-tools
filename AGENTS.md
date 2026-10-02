@@ -210,10 +210,23 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
 
 ## QA
 
-- `pnpm typecheck && pnpm build && pnpm test` (vitest: routing, the symmetric
-  fallback against a fake `fetch`, the local markdown renderer, REST validation,
-  MCP content types) and `pnpm test:py` (Scrapling pure functions, Scrapling
-  stubbed). `ci.yml` runs both on every push/PR; `forms.yml` stays separate.
+- `pnpm typecheck && pnpm build && pnpm test` runs vitest in toolkit, api and
+  cli. Every test fakes the sidecars at global `fetch` (toolkit `test/sidecars.ts`),
+  so nothing touches the network. The suites cover routing, the symmetric
+  fallback, the local markdown renderer, the sidecar client's breaker and
+  deadlines, form outcome mapping, wayback/searxng, the crawl deadline, REST
+  validation, auth (Bearer or `?api_key=`, never `X-API-Key`), MCP over HTTP and
+  the SIGTERM drain (`api/test/server.test.ts` boots the real server on loopback).
+- `pnpm test:coverage` is the same run with v8 coverage (text + `coverage/lcov.info`
+  per package). It **fails below the thresholds** in each `vitest.config.ts`:
+  toolkit 80% lines / 70% branches, api 80% lines, cli 60% lines. CI runs it and
+  uploads the lcov files as the `lcov` artifact. New code without tests can
+  push a package under its bar, so add tests in the same change.
+- `pnpm test:py` runs the Scrapling pure functions (Scrapling stubbed).
+  `pnpm test:py:coverage` reports Python coverage for Scrapling and for the
+  browser-free Camoufox form tests (needs `coverage`, plus `fastapi`/`httpx`, or
+  `fastapi`/`pydantic`/`playwright` for Camoufox). It reports only and is not gated.
+  `ci.yml` runs all of this on every push/PR; `forms.yml` stays separate.
   The live API is still the oracle: POST `/api/v0/{tool}` with the Bearer key and
   assert `mode`/`status`/`renderer`, never liveness alone.
 - SIGTERM drains: `/health` turns 503, in-flight calls finish, exit after at most

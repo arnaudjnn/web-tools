@@ -15,5 +15,15 @@ export default defineConfig({
       CAMOUFOX_URL: 'http://camoufox.test:8000',
       SEARXNG_URL: 'http://searxng.test:8080',
     },
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      reportsDirectory: 'coverage',
+      // This package's own code only; the toolkit is measured in its own package.
+      include: ['src/**/*.ts'],
+      exclude: ['src/**/*.d.ts'],
+      // `pnpm test:coverage` (and CI) fails below this.
+      thresholds: { lines: 80 },
+    },
   },
 });

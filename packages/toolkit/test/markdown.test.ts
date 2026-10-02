@@ -57,6 +57,21 @@ describe('renderMarkdownLocal', () => {
     expect(out).toBe('one\n\ntwo');
   });
 
+  it('leaves an unresolvable relative link as it was', () => {
+    const html = '<body><a href="//[bad">x</a> <a href="">empty</a></body>';
+    expect(renderMarkdownLocal({ html, url: 'https://ex.com/' })).toBe('[x](//[bad) empty');
+  });
+
+  it('strips every hidden-style variant the sidecar strips', () => {
+    const styles = ['display: none', 'visibility:hidden', 'opacity:0', 'font-size: 0', 'height:0', 'width:0', 'DISPLAY:NONE'];
+    const html = `<body><p>shown</p>${styles.map((s) => `<p style="${s}">secret</p>`).join('')}<p style="color:red">red</p></body>`;
+    expect(renderMarkdownLocal({ html, url: 'https://ex.com/' })).toBe('shown\n\nred');
+  });
+
+  it('removes control characters', () => {
+    expect(renderMarkdownLocal({ html: '<p>a\u0001b\u0008c</p>', url: 'https://ex.com/' })).toBe('abc');
+  });
+
   it('survives broken HTML', () => {
     expect(renderMarkdownLocal({ html: '<p>open <b>bold <i>both', url: 'https://ex.com/' })).toContain('open **bold _both_**');
   });
@@ -82,5 +97,18 @@ describe('renderMarkdown', () => {
     });
     fakeSidecars({ scrapling: () => ({ status: 500, text: 'boom' }) });
     expect((await renderMarkdown({ html: '<p>x</p>', url: 'https://ex.com/' })).renderer).toBe('local');
+  });
+
+  it('forwards css_selector to the sidecar', async () => {
+    const calls = fakeSidecars({ scrapling: () => ({ json: { markdown: 'm' } }) });
+    await renderMarkdown({ html: '<p>x</p>', url: 'https://ex.com/', filter: 'raw', cssSelector: '.a' });
+    expect(calls[0]!.body).toEqual({ html: '<p>x</p>', url: 'https://ex.com/', filter: 'raw', css_selector: '.a' });
+  });
+
+  it('names both causes when the local renderer fails too', async () => {
+    fakeSidecars({});
+    await expect(renderMarkdown({ html: '<p>x</p>', url: 'https://ex.com/', cssSelector: '[[' })).rejects.toThrow(
+      /^scrapling: .*ECONNREFUSED.*; local: /,
+    );
   });
 });

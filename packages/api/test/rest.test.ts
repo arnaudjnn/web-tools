@@ -64,6 +64,19 @@ describe('REST v0 bodies stay backward compatible', () => {
     const r = await runRest('web_screenshot', { url: 'https://example.com/' });
     expect(r).toEqual({ status: 200, body: { content: [{ type: 'text', text: 'iVBORw==' }], isError: false } });
   });
+
+  it('PDFs come back as base64 text content, as before', async () => {
+    stubFetch(() => ({ status: 200, url: 'https://example.com/', mode: 'fast', b64: 'JVBERi0x' }));
+    const r = await runRest('web_pdf', { url: 'https://example.com/' });
+    expect(r).toEqual({ status: 200, body: { content: [{ type: 'text', text: 'JVBERi0x' }], isError: false } });
+  });
+
+  it('non-data tool failures stay HTTP 200 with isError (the v0 contract)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('down', { status: 502 })));
+    const r = await runRest('web_html', { url: 'https://example.com/' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ isError: true, content: [{ type: 'text', text: expect.stringMatching(/^web_html error: scrapling: .*; camoufox: /) }] });
+  });
 });
 
 describe('MCP', () => {
