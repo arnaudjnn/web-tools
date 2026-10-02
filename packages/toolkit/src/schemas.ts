@@ -276,6 +276,37 @@ export const WebSpaFetchInput = z.object({
   timeout_ms: z.number().min(1000).max(300000).optional().describe('Client timeout (default: 180000)'),
 });
 
+export const WebAgentInput = z.object({
+  task: z.string().min(1).max(4000).describe('What to do, in plain language'),
+  start_url: z.string().url().optional().describe('Page opened before the first step'),
+  max_steps: z.number().int().min(1).max(40).optional().describe('Step cap (default: 15)'),
+  allowed_domains: z
+    .array(z.string().min(1))
+    .max(20)
+    .optional()
+    .describe("Hosts the agent may visit, subdomains included (default: start_url's host)"),
+  output_schema: z
+    .record(z.unknown())
+    .optional()
+    .describe('JSON schema (type=object, with properties) the final_result must match'),
+  timeout_ms: z
+    .number()
+    .int()
+    .min(10000)
+    .max(300000)
+    .optional()
+    .describe('Whole-run deadline; a partial result comes back at the deadline (default: 180000)'),
+  stealth: z.boolean().optional().describe('Residential egress instead of direct (default: false)'),
+  allow_mutations: z
+    .boolean()
+    .optional()
+    .describe("Let the agent's own browser send POST/PUT/DELETE (default: false — blocked)"),
+  allow_form_submit: z
+    .boolean()
+    .optional()
+    .describe('Give the agent ONE submit through the web_form_submit path (default: false)'),
+});
+
 export const WebRecycleInput = z
   .object({})
   .describe('Drop the warmed session and render browser, and take a fresh exit IP. No parameters.');

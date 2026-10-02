@@ -71,6 +71,39 @@ Endpoints: `/fetch` (with `wait_ms`), `/markdown` (`raw|fit`), `/raw`,
   costs the worker. `SOLVE_HOSTS` is empty on purpose; a host only enters it when
   SOLVE is proven to *clear* the challenge, not merely when FAST is refused.
 
+## web_agent (`services/scrapling/agent.py`, `agent_runner.py`)
+
+browser-use (MIT, pinned `0.13.10`) on the Scrapling sidecar, with no new service.
+`POST /agent` with `{task, start_url?, max_steps?, allowed_domains?, output_schema?,
+timeout_ms?, stealth?, allow_mutations?, allow_form_submit?}` returns
+`{final_result, success, steps:[{n, action, url}], urls, duration_s, blocked_requests,
+form_submissions, error}`. Traps:
+
+- **It cannot share the sidecar's venv.** browser-use pins `anyio==4.12.1` and
+  `markdownify==1.2.2`, while Scrapling 0.4.14 needs `anyio>=4.14` and `/markdown`
+  pins 1.2.3. Every release from 0.12.6 to 0.13.10 has the same pins. So it lives
+  in `/opt/agent-venv` and runs as a **subprocess**: `agent.py` never imports it,
+  and the deadline is a `killpg`, not an unkillable thread. The Dockerfile installs
+  the main venv's exact patchright version there, so one Chromium serves both.
+- **Disabled without a key**: `503 {disabled:true, reason:"set AGENT_LLM_API_KEY"}`.
+  One run per container (flock): a busy replica answers `429 {busy, retryable}`.
+  A run needs `start_url` or `allowed_domains`; a run with no domain fence is refused.
+- **The agent's browser cannot submit forms.** Patchright launches Chromium and keeps
+  a `route("**/*")` guard while browser-use drives it over `cdp_url`. A non-GET
+  `document` request (to any host) is aborted, and so is a non-GET xhr/fetch to the
+  task's own domains. A site that reads through same-origin POST (GraphQL) needs
+  `allow_mutations`. Forms go through `submit_form_via_web_tools`, which is offered
+  only with `allow_form_submit` and calls Camoufox `/form-submit` once per run. The
+  budget is spent before the call, and only a 503 `retryable` (zero POSTs) refunds it.
+  The sidecar needs `CAMOUFOX_URL` for this.
+- **Claude 5.x refuses browser-use's forced `tool_choice`** (HTTP 400 on every step,
+  measured on `claude-sonnet-5-5`), so the runner subclasses `ChatAnthropic` to use
+  `auto`. Then about 1 step in 4–5 comes back with flattened arguments and is
+  retried. That is why `max_steps` defaults to 15.
+- Not stealth-equivalent to Scrapling: Patchright's driver patches do not cover
+  browser-use's own CDP session. Only the launch flags, the profile and the egress
+  carry over. There is no CAPTCHA solving.
+
 ## Camoufox sidecar (`services/camoufox/app.py`)
 
 The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`

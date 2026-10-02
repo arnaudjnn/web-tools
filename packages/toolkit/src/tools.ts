@@ -14,6 +14,7 @@ import {
   WebRecycleInput,
   WebUsageStatsInput,
   WebFormSubmitInput,
+  WebAgentInput,
 } from './schemas.js';
 import type { ToolDefinition } from './types.js';
 
@@ -148,6 +149,25 @@ export const tools: ToolDefinition[] = [
       'Duplicate matching POSTs are blocked; browser failures are never retried. ' +
       'A lost response means unknown outcome, not permission to retry. The caller owns durable reservations.',
     parameters: WebFormSubmitInput,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'web_agent',
+    description:
+      'Give a browser agent a plain-language task (e.g. "find the pricing page and list the plan ' +
+      'names") and get back {final_result, success, steps[{n, action, url}], urls}. It drives a ' +
+      'real Chromium, capped by max_steps and timeout_ms, and only visits allowed_domains (default: ' +
+      "start_url's host). Pass output_schema for a structured final_result. The agent's browser " +
+      'cannot submit forms: POSTs are blocked unless allow_mutations. With allow_form_submit it gets ' +
+      'one submit through the web_form_submit path, never retried. Slower and costlier than ' +
+      'web_fetch, so use it only when a page needs clicking through. "disabled" means no LLM key is ' +
+      'set on the server.',
+    parameters: WebAgentInput,
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,

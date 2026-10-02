@@ -13,6 +13,7 @@ export {
   WebSpaFetchInput,
   WebRecycleInput,
   WebUsageStatsInput,
+  WebAgentInput,
 } from './schemas.js';
 
 export { tools, toolsByName } from './tools.js';
@@ -36,6 +37,8 @@ export {
   functionMap,
 } from './functions.js';
 
+export { web_agent, scraplingAgent, AgentError } from './agent.js';
+export type { AgentResult, AgentStep, AgentOutcome } from './agent.js';
 export { Config } from './config.js';
 export { getStats, recordCall } from './stats.js';
 export { scraplingFetch, ScraplingError } from './scrapling.js';
