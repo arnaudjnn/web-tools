@@ -1,6 +1,22 @@
 # Web Tools
 
-A self-hosted web toolkit providing fourteen tools for search, content extraction, and archival. Available as an [MCP](https://modelcontextprotocol.io/) server, REST API, and CLI, powered by [SearXNG](https://github.com/searxng/searxng), [Scrapling](https://github.com/D4Vinci/Scrapling), [Camoufox](https://github.com/daijro/camoufox), and the [Wayback Machine](https://web.archive.org/).
+**Web tools for AI agents to search, read, and act on the web, on your own infrastructure.**
+
+Fifteen tools your agent calls over [MCP](https://modelcontextprotocol.io/), REST, or a CLI:
+
+- **Search**: `web_search` (SearXNG metasearch: Google, Brave, DuckDuckGo and more)
+- **Read**: `web_fetch` returns clean markdown, plus `web_html`, `web_crawl`, `web_screenshot`, `web_pdf`, `web_bytes`, and the Wayback Machine (`web_snapshots`, `web_archive`)
+- **Act**: `web_form_submit` fills and submits a form with a guarded single POST; `web_execute_js`, `web_eval` and `web_spa_fetch` drive pages in a real browser
+- **Operate**: `web_recycle` (fresh browser and exit IP), `web_usage_stats` (call counts and proxy cost)
+
+It is an open-source, self-hosted alternative to Firecrawl, Linkup, Tavily, Exa,
+Bright Data and Browser Use (see [Comparison](#comparison)). The stack is five
+services you own, deployable to Railway in one click. There is no per-call fee
+and no LLM tokens are spent on web access. Under the hood it runs
+[SearXNG](https://github.com/searxng/searxng),
+[Scrapling](https://github.com/D4Vinci/Scrapling) (Chromium) and
+[Camoufox](https://github.com/daijro/camoufox) (stealth Firefox on a residential
+exit). The server picks the fetcher for each host, so callers never have to.
 
 ## Architecture
 
@@ -87,7 +103,7 @@ Browser form execution uses Camoufox's [single-attempt form contract](services/c
 
 ## Tools
 
-The server exposes fourteen tools:
+The server exposes fifteen tools. Two more, `web_form_inspect` and `web_agent`, are [coming](#coming-soon).
 
 ### `web_search`
 
@@ -129,7 +145,15 @@ destroys: JSON-LD, meta tags, attributes.
 | -------------- | ----------------- | ------------------------------------------------------- |
 | `url`          | string (required) | URL to fetch                                            |
 | `network_idle` | boolean (optional)| Wait for the network to go quiet (default: false)        |
+| `wait_until`   | enum (optional)   | `load` (default), `domcontentloaded`, `networkidle`, `commit` |
+| `wait_ms`      | number (optional) | Extra settle time after load, in ms (max 60000)         |
+| `click_all`    | string[] (optional)| CSS selectors clicked (every match) before capture, for lazy accordions and tabs |
+| `settle_ms`    | number (optional) | Time for AJAX to settle after `click_all` (default: 3000, max 30000) |
+| `fresh_ip`     | boolean (optional)| Serve from a new browser context on a new exit IP with clean cookies (~1s) |
 | `timeout_ms`   | number (optional) | Upstream fetch timeout (default: 60000)                 |
+
+These describe how to treat the *page*, not which backend runs it. Each is
+honoured where the serving backend supports it and ignored where it does not.
 
 Returns a JSON object: `{ status, url, mode, escalated, size, html }`. A
 non-2xx upstream status is reported in `status` rather than raised as an error,
@@ -224,6 +248,57 @@ rendering the page as text would lose the document.
 Returns `{ status, url, size_b64, b64 }`. A non-2xx arrives in `status` rather
 than raised, so a caller fetching a PDF that 404s still learns what happened.
 
+### `web_form_submit`
+
+Fill a form and click submit **once** in a real browser (Camoufox, on the
+residential exit), then report what actually happened. You supply the
+selectors and values; the service owns navigation, typing (keystroke by
+keystroke), cookie isolation, cleanup, and a context-wide guard that blocks
+duplicate POSTs. It never solves or mints a CAPTCHA: the page's own handler runs
+and its own integration mints the token. The full contract is in
+[`services/camoufox/FORMS.md`](services/camoufox/FORMS.md).
+
+| Parameter               | Type                | Description |
+| ----------------------- | ------------------- | ----------- |
+| `url`                   | string (required)   | Page holding the form |
+| `fields`                | object[] (required) | `{ selector, value?, action? }` in order; `action` is `type` (default), `check`, or `select` |
+| `submit`                | string (required)   | CSS selector of the submit control |
+| `dismiss`               | string[] (optional) | Selectors clicked first (cookie walls) |
+| `success_url`           | string (optional)   | Regex; a final URL matching it means success |
+| `submission_urls`       | string[] (optional) | Same-origin POST endpoints sharing one submission budget (default: `url`) |
+| `captcha_field`         | string (optional)   | POST field checked for token *presence*, never its value (default `g-recaptcha-response`) |
+| `require_captcha_token` | boolean (optional)  | Block the POST when that field is empty or unreadable; no retry |
+| `ready_expression`      | string (optional)   | Main-world boolean expression that must hold before the click |
+| `inspect_only`          | boolean (optional)  | Navigate only: no fill, no click, same-origin mutating requests blocked |
+| `wait_until`, `wait_ms` | (optional)          | Navigation condition and settle after load (default 4000 ms) |
+| `settle_ms`             | number (optional)   | How long to wait for the outcome (default: 20000) |
+| `timeout_ms`            | number (optional)   | Whole-run deadline (default: 120000; a wizard needs ~240000) |
+| `fresh_ip`              | boolean (optional)  | New context and exit IP (default: true) |
+| `exit_session`          | string (optional)   | Pin the exit: the same token lands on the same IP, so an exit that passed can be reused |
+| `headed`                | boolean (optional)  | Headed browser under Xvfb for score-gated forms (reCAPTCHA v3 scores headless fleets at 0) |
+| `profile`               | string (optional)   | Named persistent profile: cookies and fingerprint reused across submissions (per replica) |
+| `gate_text`             | string (optional)   | Wizard: regex on a gate button's text, clicked **once** after step 0 |
+| `step2`, `step2_submit` | (optional)          | Wizard: second-step fields and submit (default `form button`), used only if that step renders |
+| `completion_markers`    | string[] (optional) | Wizard: body-text regexes that count as completion when the URL never changes |
+| `stop_after_posts`      | number (optional)   | Wizard warm-up: stop once this many POSTs (1-3) have been answered |
+
+Returns `{ contract_version: 2, ok, form_submissions, status, error, url, html, exit_session, diagnostics }`.
+`status` is the matching POST's response, not the initial GET. `ok` needs at
+least one POST, a 2xx/3xx answer, and a `success_url` match (on a wizard, a
+completion marker instead). `diagnostics` reports passive CAPTCHA and network
+counts and whether a token was present. It never includes field values, tokens
+or request bodies.
+
+**Retry rule.** This tool is single-attempt and not idempotent. Persist your
+own reservation *before* calling it, and treat a lost response, a timeout, or a
+502 as an **unknown outcome**: something may have been submitted. The only
+sanctioned replay is the sidecar's **503 with `retryable: true`**. It is sent
+only when the service can prove that nothing was posted: the run stalled before
+the click, or failed at launch, navigation or field filling with zero POSTs.
+Through the Tools API it currently arrives as an error result whose text
+contains `HTTP 503` and `"retryable":true`. Replay at most a couple of times,
+seconds apart. Do not wrap this tool in a generic HTTP retry policy.
+
 ### `web_eval`
 
 Evaluate JavaScript in a residential browser page and return its JSON result. Use
@@ -288,6 +363,46 @@ In-memory only, so it resets on container restart; the `started_at` field lets a
 caller detect that. The proxied tools' byte counts are an upper bound rather
 than a measurement: this process cannot see which sidecar mode actually served a
 call, and over-counting a cost estimate is the safe direction.
+
+### Coming soon
+
+Not shipped yet; the names and shapes below may change.
+
+- **`web_form_inspect`**: read a form without submitting it. It will report fields,
+  selectors, required flags and CAPTCHA scripts, so a caller can build the
+  `fields` list for `web_form_submit` without hand-reading the page.
+- **`web_agent`**: give it a task in plain language and it browses until done,
+  then returns a structured result within a step cap. It will be built on
+  [browser-use](https://github.com/browser-use/browser-use) in Chromium.
+  Form submission will be delegated to `web_form_submit`, so its single-POST
+  guard still applies. It needs an LLM key and will report itself as disabled
+  when none is set.
+
+## Comparison
+
+How web-tools compares with the hosted products it replaces, from each vendor's
+public docs and pricing pages as of 2026-10-02. "—" means the vendor does not
+document the feature.
+
+| | Firecrawl | Tavily | Exa | Linkup | Bright Data | Browser Use Cloud | **web-tools** |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Web search | `/search` | `/search` | own neural index | `/search` | SERP API | — | SearXNG metasearch (no own index, no semantic search) |
+| Fetch → markdown | `/scrape` | `/extract` | `/contents` (text) | `/fetch` | Web Unlocker, MCP `scrape_as_markdown` | — | `web_fetch` |
+| Crawl | `/crawl` | `/crawl` | subpages (≤100) | — | Crawl API | — | `web_crawl` (your URL list; no link discovery yet) |
+| Site map | `/map` | `/map` | — | — | Crawl API | — | **not yet** |
+| Structured (schema) extract | JSON format | — | JSON-schema summaries | structured output | per-site Scraper APIs | — | **not yet** |
+| Screenshot / page → PDF | screenshot / — | — | — | — | via Browser API | — | both |
+| Anti-bot fetch | yes (cloud only) | — | — | — | Web Unlocker, CAPTCHA solving | stealth, proxies, CAPTCHA solving | residential exits you supply, stealth Firefox, JS-challenge solve; **no CAPTCHA solver** |
+| Form submission | actions (click/write) | — | — | — | Browser API | via agent | `web_form_submit` (guarded single POST) |
+| Agent browser | Agent | — | — | — | — | yes (core product) | **coming** (`web_agent`) |
+| Deep research | — | `/research` | Deep search, Agent | `/research` | — | — | **not yet** |
+| Self-hosted | AGPL-3.0, without Fire-engine anti-bot, screenshots, actions or agent | no | no | no | no (MCP server is MIT, calls their API) | library is MIT; stealth is cloud-only | **yes, MIT, all features** |
+| Price | 1,000 free credits/mo; from $16/mo for 5,000 | 1,000 free credits/mo; $0.008/credit | $7/1k searches, $1/1k pages | $0.005-0.006/search, $0.001-0.006/fetch | Web Unlocker $1.5/1k; 5,000 free MCP req/mo | $0.02/browser-hour + proxy $5/GB + model cost +20% | Railway hosting + your proxy bandwidth; no per-call fee |
+
+What the hosted products still do better: their own search indexes (Exa's
+semantic search especially), schema-driven extraction, site maps, research
+endpoints, and managed CAPTCHA solving. web-tools covers search, read, capture
+and forms on infrastructure you control.
 
 ## Interfaces
 

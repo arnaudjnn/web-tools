@@ -1,6 +1,6 @@
 # Deploy and Host Web Tools on Railway
 
-Web Tools is an open-source web toolkit that gives AI agents fifteen tools to search, fetch, screenshot, crawl, and archive the web — available as an MCP server, REST API, and CLI. It consumes zero LLM tokens for web access, so your models spend their budget on reasoning, not searching.
+Web Tools is an open-source web toolkit that gives AI agents fifteen tools to search, read, and act on the web (fetch, crawl, screenshot, archive, fill forms), available as an MCP server, REST API, and CLI. It consumes zero LLM tokens for web access, so your models spend their budget on reasoning, not searching.
 
 ## About Hosting Web Tools
 
@@ -8,7 +8,7 @@ This template deploys a complete self-hosted web toolkit as five services on Rai
 
 ## Common Use Cases
 
-- **Replace paid search APIs**: Drop-in replacement for Firecrawl, Linkup, Tavily, Exa, or Bright Data. Get web search, page fetching, and content extraction without per-query costs
+- **Replace paid web APIs**: Open-source alternative to Firecrawl, Linkup, Tavily, Exa, Bright Data and Browser Use. Search, fetch, crawl and submit forms without per-query costs
 - **Supercharge AI coding agents**: Connect Claude Code or Cursor to self-hosted web search and page fetching. Replace their built-in WebSearch and WebFetch tools so every search is private and free
 - **Web research and monitoring**: Search the web, fetch pages as clean markdown, take screenshots, generate PDFs, execute JavaScript on pages, and query the Wayback Machine for historical snapshots
 
@@ -82,9 +82,8 @@ documented in the README.
 **Both stealth sidecars run 2 replicas**, and that is a throughput requirement
 rather than redundancy. Each container serves one request per mode at a time (one
 warmed session per mode, pinned to a single-slot executor), so concurrent callers
-queue. Under a live signal sweep on a single replica, an unrelated fetch waited
-behind the queue for the full client budget and then fell back to the plain
-datacenter browser: measured 90.5s, and 0.7s once a second replica was added.
+queue. Measured on one replica under load: an unrelated fetch waited 90.5s; 0.7s with
+two.
 
 **Scale the browsers by replicas, not workers.** Camoufox keeps `WORKERS=1`: a
 warmed anti-bot session cannot be shared across processes. Use
@@ -135,6 +134,4 @@ Service names are case-sensitive: `${{camoufox.…}}` against a service named
 
 ## Why Deploy Web Tools on Railway?
 
-Railway is a singular platform to deploy your infrastructure stack. Railway will host your infrastructure so you don't have to deal with configuration, while allowing you to vertically and horizontally scale it.
-
-By deploying Web Tools on Railway, you are one step closer to supporting a complete full-stack application with minimal burden. Host your servers, databases, AI agents, and more on Railway.
+Railway hosts the whole five-service stack, private networking included, so you don't have to deal with configuration, and lets you scale it vertically and horizontally. Host your servers, databases, AI agents, and more in one place.
