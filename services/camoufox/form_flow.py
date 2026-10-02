@@ -174,6 +174,7 @@ class FormLive:
             "nav_attempts": diagnostics.get("nav_attempts"),
             "nav_error": diagnostics.get("nav_error"),
             "ready_met": diagnostics.get("ready_condition_met"),
+            "captcha_reload": diagnostics.get("captcha_script_reload"),
             "captcha_scripts": [diagnostics.get("captcha_script_requests"),
                                 diagnostics.get("captcha_script_responses"),
                                 diagnostics.get("captcha_network_failures")],
@@ -594,6 +595,24 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # between this line and a later marker and could not say which call
         # never returned).
         log.info("form flow: wait done")
+        # A CAPTCHA script that failed to load through the exit leaves the
+        # page with no grecaptcha: its submit listener is never attached, the
+        # click falls through to a NATIVE submit with an empty token, and the
+        # site answers "Error verifying reCAPTCHA" (missing-input-response).
+        # Measured on our oracle 2026-10-02: every no-token run had a failed
+        # api.js request (captcha_scripts [1,0,1]). Nothing has been touched
+        # yet — no field, no POST — so ONE reload is as safe as the
+        # navigation retry above; a second failure proceeds as before and
+        # the diagnostics say so.
+        if (not inspect_only and diagnostics["captcha_network_failures"]
+                and diagnostics["captcha_script_responses"] < diagnostics["captcha_script_requests"]):
+            diagnostics["captcha_script_reload"] = True
+            failures_before = diagnostics["captcha_network_failures"]
+            log.info("form flow: captcha script failed to load; reloading once")
+            page.goto(url, wait_until=wait_until, timeout=remaining(NAV_TIMEOUT_MS))
+            page.wait_for_timeout(min(max(wait_ms, 2000), remaining()))
+            diagnostics["captcha_script_reload_failed"] = (
+                diagnostics["captcha_network_failures"] > failures_before)
         # Which IP does this browser ACTUALLY egress from? The contract says
         # every run is pinned to the residential pool by PROXY_URL — but a
         # datacenter or direct egress mints reCAPTCHA tokens from the worst
