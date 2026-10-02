@@ -89,7 +89,8 @@ def call(tool: str, body: dict, key: str, timeout: int = 420):
 
 # The sidecar being away (a park or launch-shed restarts it for ~60 s, and
 # Tools' breaker then refuses for 60 s) is not a sample: wait it out.
-AWAY = ("unreachable", "breaker open", "HTTP 502", "HTTP 503", "HTTP 504")
+AWAY = ("unreachable", "breaker open", "HTTP 502", "HTTP 503", "HTTP 504",
+        "URLError", "TimeoutError", "ConnectionResetError", "RemoteDisconnected")
 
 
 def call_when_up(tool: str, body: dict, key: str, waits: int = 8):
@@ -133,6 +134,7 @@ def run(configs, n, tag, label, out_path, key, threshold):
                    "blocked": result.get("blocked"), "exit_ip_changed": result.get("exit_ip_changed"),
                    "waited_restarts": waited,
                    "dwell_s": (result.get("verdict") or {}).get("page_dwell_s"),
+                   "mint_s": (result.get("verdict") or {}).get("mint_s"),
                    "token_age_s": (result.get("verdict") or {}).get("token_age_s"),
                    "subs": (result.get("form") or {}).get("form_submissions"),
                    # POSTed but no verdict read back: Google may still have
