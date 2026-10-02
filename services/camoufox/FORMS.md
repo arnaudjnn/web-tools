@@ -48,7 +48,10 @@ above that call's own legitimate worst case (its timeout, the keystroke
 duration for `type`), because playwright's timeouts are enforced by the
 driver's loop and never fire once its transport is stuck — measured
 2026-09-29: the fields phase sat in the driver's `select` for minutes past
-every timeout. A mark older than its threshold means the call never
+every timeout. Marks live on a per-job `FormLive` object (`form_flow.py`),
+created by the endpoint and passed to both the worker (which polls it) and
+the flow (which writes it) — never a module global, so one job's mark cannot
+age into the next one's poll. A mark older than its threshold means the call never
 returned, and the worker answers **503** with
 `detail = {message, retryable: true}`
 within seconds — no field was touched, no POST left the machine, so that
@@ -66,6 +69,46 @@ launch fails in every mode until the container is moved) is shed the same way:
 `LAUNCH_FAIL_STREAK` consecutive launch failures across any path exit the
 process after `LAUNCH_FAIL_SHED_S` seconds of grace (`3`/`10` in the image;
 0 disables), and a success in between retracts the pending exit.
+
+Pointer input is ONE `mouse.move` per click (to an off-centre point of the
+control, then a short beat, then the press). The form browser launches with
+`humanize=True`, so Camoufox already draws a human trajectory for every
+dispatched move; the former 6–18 manual steps were double humanization —
+6–18× the dispatches, each a chance at the input-chain deadlock that parked
+32 attempts at `pointer move` (and plausibly 12 more at `field scroll`, the
+next call behind it) on 2026-10-01. Click targets never sit on `x<=1`/`y<=1`:
+a trajectory point on a viewport axis deadlocks Camoufox's input chain
+(daijro/camoufox#751, unfixed in the pinned 152.0.4-beta.30; fixed upstream in
+the 156.0.1-beta.32/.33 prereleases), and the old stepped approach started
+100–400 px left / 60–200 px above the target, i.e. off-screen and clamped onto
+exactly that axis for any field near the left or top edge.
+
+Navigation retries in-run, strictly before any input: up to 3 attempts with
+2 s / 4 s backoff for a transient refusal (`NS_ERROR_*CONNECTION_REFUSED`,
+proxy/net errors, an interrupted navigation) or a page closed on arrival
+(`TargetClosedError` — replaced by a fresh page in the same context). It is a
+GET; the guard has seen no POST. `goto` itself is capped at 60 s. The
+readiness gate (`ready_expression`) is bounded at `READY_WAIT_S` (30 s):
+passing runs meet it within milliseconds, and every 2026-10-01
+`readiness_failed` instead polled away the whole remaining deadline (~2 min).
+
+Every job logs exactly one `form-run {json}` line — on return, on a
+structured failure, on an escaping exception, and (from the worker) on a
+queue timeout, a park or a wedge. It is the measurement source and carries
+NO field values, tokens, bodies or exception messages: `error`, `ok`,
+`form_submissions`, `status`, `phase` (furthest reached), `failed_phase`,
+`failure_class`, `parked_step`, `field` (selector), `durations_s` per phase
+(queue, launch, navigation, arrival, fields, readiness, submit, outcome,
+teardown), `total_s`, `posts` (`[{n, token, mint_age_s}]`), `token_present`,
+`egress` (`{country, asn}`), `nav_attempts`, `nav_error` (an engine code such
+as `NS_ERROR_CONNECTION_REFUSED`, never the message), `ready_met`,
+`captcha_scripts` (`[requests, responses, network_failures]`),
+`submit_clicked`, `inspect_only`, `wizard`, `stop_after_posts`,
+`launch_attempts`, `profile`, `headed`, and `camoufox` (wrapper version /
+`CAMOUFOX_BUILD` browser pin). Count G1 straight from it:
+`railway logs --service Camoufox --filter '"form-run"'`. The human-readable
+`form flow: done …` line also fires on every return path now (inspect_only
+and `stopped_after_posts` used to skip it).
 
 Headed forms additionally need `DISPLAY :99`, and a Railway restart reuses the
 container's writable layer: the dead X server's `/tmp/.X99-lock` and
@@ -117,8 +160,9 @@ re-attempts — never a solver.
 
 `ready_expression` optionally waits for a caller-supplied boolean expression in
 the page's main world before the single submit click. This is important with
-Camoufox: ordinary evaluation cannot see the page's globals. The condition uses
-the operation's existing deadline; a failure never clicks submit.
+Camoufox: ordinary evaluation cannot see the page's globals. The condition is
+polled for at most `READY_WAIT_S` (30 s) inside the operation's deadline; a
+failure (`readiness_failed`, zero POSTs, 503 retryable) never clicks submit.
 
 `require_captcha_token: true` prevents a matching POST from leaving the browser
 when its configured CAPTCHA field is missing, empty, ambiguous, or unreadable.
