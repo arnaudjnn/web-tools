@@ -27,6 +27,34 @@ describe('pickBackend', () => {
   });
 });
 
+describe('host rules', () => {
+  it('matches hosts case-insensitively and on any subdomain', () => {
+    expect(pickBackend('https://WWW.CONSOB.IT/')).toBe('camoufox');
+    expect(pickBackend('https://a.b.altalex.com/x')).toBe('camoufox');
+    expect(pickBackend('https://uk.TrustPilot.com/review/x')).toBe('camoufox');
+    expect(forcedWaitMs('https://uk.trustpilot.com/review/x')).toBe(20_000);
+  });
+
+  it('.it is a suffix on the hostname only, not the path, port or a longer TLD', () => {
+    expect(pickBackend('https://example.com/page.it')).toBe('scrapling');
+    expect(pickBackend('https://example.com:8443/?q=.it')).toBe('scrapling');
+    expect(pickBackend('https://example.it.com/')).toBe('scrapling');
+    expect(pickBackend('http://localhost.it:8080/')).toBe('camoufox');
+    expect(isItalianSource('https://example.com/')).toBe(false);
+  });
+
+  it('a country-specific trustpilot under .it is Italian and still forced to wait', () => {
+    expect(pickBackend('https://it.trustpilot.com/')).toBe('camoufox');
+    expect(pickBackend('https://trustpilot.it/')).toBe('camoufox');
+    expect(forcedWaitMs('https://trustpilot.it/')).toBeUndefined();
+  });
+
+  it('an unparseable URL is never Italian and never forced', () => {
+    expect(isItalianSource('consob.it')).toBe(false);
+    expect(forcedWaitMs('trustpilot.com')).toBeUndefined();
+  });
+});
+
 describe('forcedWaitMs', () => {
   it('forces the measured 20s settle on trustpilot only', () => {
     expect(forcedWaitMs('https://www.trustpilot.com/review/x')).toBe(20_000);
