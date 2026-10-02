@@ -57,6 +57,8 @@ export type Verdict = {
   /** Page-side timings the page reports (ms → s): load → submit, execute(). */
   page_dwell_s: number | null;
   mint_s: number | null;
+  /** Why no token: execute() rejected (its error, sanitized) or resolved empty. */
+  mint_error: string | null;
 };
 
 /** Normalize a siteverify JSON body. Pure: never throws on odd shapes. */
@@ -145,6 +147,7 @@ button{margin-top:20px;padding:10px 18px;font-size:15px}p{line-height:1.5;color:
 <input type="hidden" name="t_load" id="t_load" value="">
 <input type="hidden" name="t_submit" id="t_submit" value="">
 <input type="hidden" name="t_mint" id="t_mint" value="">
+<input type="hidden" name="mint_error" id="mint_error" value="">
 <label for="company">Ragione sociale *</label><input id="company" name="company" type="text" autocomplete="organization" required>
 <label for="email">Email aziendale</label><input id="email" name="email" type="text" autocomplete="email">
 <label for="phone">Telefono</label><input id="phone" name="phone" type="text" autocomplete="tel">
@@ -169,10 +172,12 @@ grecaptcha.ready(function () {
     document.getElementById('t_submit').value = String(t0);
     grecaptcha.execute(${key}, {action: ${act}}).then(function (token) {
       document.getElementById('t_mint').value = String(Date.now() - t0);
-      element.value = token;
+      if (!token) document.getElementById('mint_error').value = 'resolved-empty';
+      element.value = token || '';
       nativeSubmit.call(element.form);
-    }, function () {
+    }, function (err) {
       document.getElementById('t_mint').value = '-1';  // execute() rejected
+      document.getElementById('mint_error').value = 'rejected:' + String(err && (err.message || err)).slice(0, 80);
       nativeSubmit.call(element.form);  // let the verify report the missing token
     });
   });
@@ -238,6 +243,9 @@ export function mountOracle(app: Express, log: (...a: unknown[]) => void): void 
     const timings = {
       page_dwell_s: tLoad !== null && tSubmit !== null ? Math.round((tSubmit - tLoad) / 100) / 10 : null,
       mint_s: tMint !== null ? Math.round(tMint / 100) / 10 : null,
+      mint_error: typeof body.mint_error === 'string' && body.mint_error
+        ? body.mint_error.replace(/[^A-Za-z0-9 ._:()/-]/g, '').slice(0, 100) || null
+        : null,
     };
     if (!allowVerify()) {
       res.status(429).type('html').send(renderVerdict({ success: false, 'error-codes': ['oracle-rate-limited'] }));
@@ -249,6 +257,7 @@ export function mountOracle(app: Express, log: (...a: unknown[]) => void): void 
     log('oracle verdict', {
       success: verdict.success, score: verdict.score, action_ok: verdict.action_ok,
       codes: verdict['error-codes'], ip: verdict.client_ip, dwell: verdict.page_dwell_s,
+      mint_error: verdict.mint_error,
     });
     res.set('Cache-Control', 'no-store').type('html').send(renderVerdict(verdict));
   });

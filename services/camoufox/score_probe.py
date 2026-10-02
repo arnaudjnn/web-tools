@@ -104,6 +104,7 @@ def parse_verdict(html: str | None):
         "token_length": number("token_length"),
         "page_dwell_s": number("page_dwell_s"),
         "mint_s": number("mint_s"),
+        "mint_error": text("mint_error"),
     }
 
 

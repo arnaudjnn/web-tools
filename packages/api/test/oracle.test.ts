@@ -121,3 +121,10 @@ test('the verify limiter caps a minute window', () => {
   assert.equal(allowed, 30);
   assert.equal(allowVerify(t + 60_000, 30), true);
 });
+
+test('a rejected or empty execute() is reported, not silent', () => {
+  const html = renderOraclePage('K', 'a');
+  assert.match(html, /name="mint_error"/);
+  assert.match(html, /'rejected:' \+ String\(err/);
+  assert.match(html, /'resolved-empty'/);
+});
