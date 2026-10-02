@@ -89,6 +89,7 @@ from camoufox.utils import launch_options
 from form_flow import FormLive, validate_form
 from form_worker import FormRetryable, FormWorker, not_started, run_isolated_form
 import form_inspect
+import form_retry
 import launch_health
 import profile_store
 import score_probe
@@ -989,6 +990,13 @@ async def eval_(req: EvalRequest):
     return EvalResponse(**data)
 
 
+# A single attempt keeps its 360 s cap; a retrying call may ask for more so a
+# gated wizard can hold a second attempt. 540 s + the client's 60 s slack
+# stays under the toolkit's 600 s undici header timeout (packages/toolkit/src/http.ts).
+FORM_TIMEOUT_MAX_MS = 360_000
+FORM_TIMEOUT_RETRY_MAX_MS = 540_000
+
+
 class FormField(BaseModel):
     selector: str
     value: str | None = None
@@ -1011,7 +1019,7 @@ class FormSubmitRequest(BaseModel):
     wait_until: str = Field("domcontentloaded")
     wait_ms: int = Field(4000, ge=0, le=60_000)
     settle_ms: int = Field(20_000, ge=1000, le=120_000)
-    timeout_ms: int = Field(120_000, ge=1000, le=360_000, description="whole run INCLUDING the score gate's probes (a gated wizard: ~240 s + ~90 s)")
+    timeout_ms: int = Field(120_000, ge=1000, le=FORM_TIMEOUT_RETRY_MAX_MS, description="whole run INCLUDING the score gate's probes (a gated wizard: ~240 s + ~90 s); above 360 s only with retry_on_captcha_rejection")
     fresh_ip: bool = Field(True, description="new context + new exit IP (scoring anti-bot is per-IP)")
     exit_session: str | None = Field(None, description="pin the exit: same token = same IP, so a passing exit can be REUSED instead of re-searched")
     gate_text: str | None = Field(None, max_length=300, description="regex on button/link text; after step0, a matching gate is clicked ONCE (atoka business-email gate)")
@@ -1024,6 +1032,8 @@ class FormSubmitRequest(BaseModel):
     score_threshold: float = Field(0.7, ge=0, le=1)
     score_gate_tries: int = Field(3, ge=1, le=6)
     oracle_url: str | None = Field(None, max_length=500, description="the score oracle the gate probes (Tools passes its own)")
+    retry_on_captcha_rejection: int = Field(0, ge=0, le=form_retry.MAX_RETRIES, description="fresh attempts (new context, new exit, re-gated) after an explicit step-0 CAPTCHA refusal only (form_retry.py)")
+    captcha_rejection_text: str | None = Field(None, max_length=300, description="regex every error node of the re-rendered form must match to count as a CAPTCHA refusal; default form_retry.DEFAULT_CAPTCHA_REJECTION")
 
 
 class FormSubmitResponse(BaseModel):
@@ -1036,6 +1046,9 @@ class FormSubmitResponse(BaseModel):
     html: str
     ok: bool
     exit_session: str = ""
+    # Only with retry_on_captcha_rejection > 0: one entry per attempt, and
+    # form_submissions above is then the TOTAL across attempts.
+    attempts: list[dict] | None = None
 
 
 @app.post("/form-submit", response_model=FormSubmitResponse)
@@ -1045,12 +1058,81 @@ async def form_submit(req: FormSubmitRequest):
         # Before admission: a bad regex is the caller's error (400), never a
         # launched browser that dies as an unknown 502.
         validate_form(req.url, req.submission_urls, req.success_url, req.gate_text, req.completion_markers)
+        form_retry.compile_pattern(req.captcha_rejection_text)
     except (ValueError, re.error) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    retries = req.retry_on_captcha_rejection or 0
+    if req.timeout_ms > FORM_TIMEOUT_MAX_MS and not retries:
+        raise HTTPException(status_code=400, detail="timeout_ms above %d needs retry_on_captcha_rejection"
+                                                    % FORM_TIMEOUT_MAX_MS)
     session, pin = _resolve_form_session(req.profile, req.exit_session, req.fresh_ip, req.sticky_exit)
+    blocked = form_retry.blocked_reason(exit_session=req.exit_session, profile=req.profile,
+                                        sticky=_sticky(req.sticky_exit), fresh_ip=req.fresh_ip)
+    floor = {"s": 0.0}  # known only after an attempt ran (was it gated?)
+
+    async def attempt(n):
+        # Attempt 1 runs on the resolved session; a retry on a NEW exit token
+        # (fresh proxy session, new isolated context), gated again.
+        data, gate, used = await _form_attempt(req, deadline, session if n == 1 else secrets.token_hex(6),
+                                               retry=n > 1, attempt_n=n if retries else None)
+        floor["s"] = _attempt_floor_s(req, gate)
+        attempt.used = used
+        return data, (gate or {}).get("record")
+
+    attempt.used = session
+    try:
+        data = await form_retry.run_attempts(attempt, retries=retries, blocked=blocked,
+                                             deadline=deadline, floor_s=lambda: floor["s"])
+    except form_retry.RetryUnknown as unknown:
+        log.warning("form-submit retry %d outcome unknown (%s); not retried",
+                    len(unknown.attempts), unknown)
+        raise HTTPException(status_code=502, detail={
+            "message": "Form retry outcome unavailable; do not automatically retry",
+            "retryable": False, "attempts": unknown.attempts,
+            "form_submissions_before": unknown.form_submissions_before,
+        })
+    # A profile-pinned or gate-chosen exit (the final attempt's) is reported
+    # back — the caller did not choose it; otherwise echo what was passed.
+    session = attempt.used
+    pinned =(req.profile and _sticky(req.sticky_exit)) or (data.get("diagnostics") or {}).get("score_gate") is not None
+    return FormSubmitResponse(**data, exit_session=req.exit_session or (session if pinned else ""))
+
+
+def _attempt_floor_s(req, gate):
+    """The least budget a full retry needs: the form's own reserve, plus one
+    oracle candidate when the attempt was gated."""
+    wizard = bool(req.gate_text or req.step2 or req.completion_markers)
+    reserve = score_probe.GATE_RESERVE_WIZARD_S if wizard else score_probe.GATE_RESERVE_PLAIN_S
+    record = (gate or {}).get("record") or {}
+    gated = gate is not None and "skipped" not in record
+    return reserve + (score_probe.CANDIDATE_MIN_MS / 1000 + 5.0 if gated else 0.0)
+
+
+async def _form_attempt(req, deadline, session, *, retry=False, attempt_n=None):
+    """ONE form attempt on `session`: (data, gate, session used).
+
+    Raises the endpoint's HTTPExceptions on attempt 1 (503 retryable,
+    502 unknown). On a retry, a provably zero-POST refusal is
+    form_retry.AttemptRefused instead, so the loop can answer with the
+    previous attempt's (real) result.
+    """
     # One per job: the pre-POST mark the worker polls and the job's single
     # `form-run {json}` summary line (no values, tokens or bodies).
     live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
+    if attempt_n is not None:
+        live.note(attempt=attempt_n)
+    try:
+        return await _form_attempt_run(req, deadline, session, live)
+    except HTTPException as error:
+        detail = getattr(error, "detail", None)
+        if retry and getattr(error, "status_code", None) == 503 and isinstance(detail, dict) \
+                and detail.get("retryable") is True:
+            raise form_retry.AttemptRefused(detail.get("error") or detail.get("reason") or "not_submitted",
+                                            gate_record=detail.get("score_gate")) from error
+        raise
+
+
+async def _form_attempt_run(req, deadline, session, live):
     # Exit rotation (pre-input, once) only for an exit the caller did not
     # pin — neither an explicit exit_session nor a sticky profile's own.
     rotate = _form_rotator(req.exit_session, req.profile, req.sticky_exit,
@@ -1075,6 +1157,7 @@ async def form_submit(req: FormSubmitRequest):
             ready_expression=req.ready_expression, gate_text=req.gate_text,
             step2=[f.model_dump() for f in req.step2], step2_submit=req.step2_submit,
             completion_markers=req.completion_markers, stop_after_posts=req.stop_after_posts,
+            captcha_rejection_text=req.captcha_rejection_text,
             live=live), url=req.url, deadline=deadline, live=live)
     except FormRetryable as parked:
         # Parked on the one unbounded pre-POST call (the marker says where):
@@ -1097,14 +1180,11 @@ async def form_submit(req: FormSubmitRequest):
         log.warning("form-submit retryable: %s with zero POSTs", data.get("error"))
         raise HTTPException(status_code=503, detail={
             "message": "Form never submitted (%s); safe to retry" % data.get("error"),
-            "retryable": True,
+            "retryable": True, "reason": data.get("error"),
         })
     if gate is not None:
         data.setdefault("diagnostics", {})["score_gate"] = gate["record"]
-    # A profile-pinned or gate-chosen exit is reported back (the caller did
-    # not choose it); otherwise the contract is unchanged: echo what was passed.
-    pinned = (req.profile and _sticky(req.sticky_exit)) or gate is not None
-    return FormSubmitResponse(**data, exit_session=req.exit_session or (session if pinned else ""))
+    return data, gate, session
 
 
 async def _score_gate(req, session, deadline, live):

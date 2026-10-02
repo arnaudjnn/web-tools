@@ -36,6 +36,8 @@ import threading
 import time
 from urllib.parse import urlsplit, parse_qs
 
+import form_retry
+
 # Phase logs are the ONLY visibility into a flow that never returns: the
 # wedge handler sees a stackless greenlet and can only say "somewhere".
 log = logging.getLogger("camoufox.forms")
@@ -213,6 +215,7 @@ class FormLive:
             "total_s": round(_clock() - self.started, 1),
             "posts": posts,
             "rejected_after_posts": diagnostics.get("rejected_after_posts"),
+            "rejection": diagnostics.get("rejection"),
             "token_present": diagnostics.get("token_present"),
             "egress": ({"country": egress.get("country"), "asn": egress.get("asn")}
                        if isinstance(egress, dict) else None),
@@ -518,8 +521,11 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              require_captcha_token=False, ready_expression=None,
              gate_text=None, step2=None, step2_submit=None, completion_markers=None,
              stop_after_posts=None, live=None, exit_rotatable=False,
-             capture_submission_body=False):
+             capture_submission_body=False, captcha_rejection_text=None):
     targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
+    # What a re-rendered form's error nodes must ALL say for the answer to
+    # count as a CAPTCHA refusal (form_retry.py) — recorded, never acted on here.
+    rejection_re = form_retry.compile_pattern(captcha_rejection_text)
     # The caller (run_isolated_form, via the worker) owns the live object and
     # its summary line; a direct call (tests, fixtures) owns its own.
     owns_live = live is None
@@ -1059,6 +1065,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # timing, and the token must be minted after the interaction anyway.
         page.wait_for_timeout(min(random.randint(800, 2400), remaining()))
         diagnostics["submit_click_attempted"] = True
+        # The URL the form was submitted FROM: a refusal re-renders it here.
+        submitted_from = page.url
         page.locator(submit).click(timeout=remaining())
         phase = "outcome"
         live.enter("outcome")
@@ -1071,6 +1079,20 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     page.wait_for_load_state("networkidle", timeout=remaining(settle_ms))
             except Exception:
                 pass  # Rejections stay on the form. Capture them, don't resubmit.
+            if result["form_submissions"] == 1 and not (
+                    success_url and re.search(success_url, page.url)):
+                # One answered POST and no success: did the form come back
+                # with errors on it? Counts and booleans only (form_retry).
+                try:
+                    errs = page.evaluate("""(sel) => [...document.querySelectorAll(sel)]
+                        .map((e) => (e.textContent || '').replace(/\\s+/g, ' ').trim())
+                        .filter(Boolean)""", form_retry.ERROR_NODES)
+                except Exception:
+                    errs = None
+                if isinstance(errs, list) and errs:
+                    diagnostics["rejection"] = form_retry.rejection_record(
+                        [str(e) for e in errs], rejection_re, at_post=1, wizard=False,
+                        same_url=form_retry.same_page(page.url, submitted_from))
         else:
             # Wizard outcome walk. step0's answer is one of four shapes and
             # only the URL sometimes distinguishes them: the next step, a
@@ -1145,8 +1167,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     state = page.evaluate("""(sel) => {
                         const q = (s) => s ? document.querySelector(s) : null;
                         const visible = (el) => !!el && el.getBoundingClientRect().width > 0;
-                        const errs = [...document.querySelectorAll(
-                            '.error-msg,.invalid-feedback,.errorlist')]
+                        const errs = [...document.querySelectorAll(sel.errors)]
                             .map((e) => (e.textContent || '').replace(/\\s+/g, ' ').trim())
                             .filter(Boolean);
                         return {
@@ -1156,7 +1177,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                             errs,
                             text: (document.body.innerText || '').replace(/\\s+/g, ' ')
                         };
-                    }""", {"step0": step0_sel, "step2": step2_sel})
+                    }""", {"step0": step0_sel, "step2": step2_sel, "errors": form_retry.ERROR_NODES})
                 except Exception:
                     # Mid-navigation: the context will be back next tick.
                     try:
@@ -1221,6 +1242,9 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     # WHICH POST's answer carried the error (1 = step0,
                     # 2 = gate, 3 = step2) — the re-verify question's key.
                     diagnostics["rejected_after_posts"] = result["form_submissions"]
+                    diagnostics["rejection"] = form_retry.rejection_record(
+                        state["errs"], rejection_re, at_post=result["form_submissions"],
+                        wizard=True, same_url=form_retry.same_page(state["url"], submitted_from))
                     break
                 try:
                     page.wait_for_timeout(min(random.randint(700, 1300), remaining()))

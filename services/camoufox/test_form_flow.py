@@ -190,18 +190,25 @@ class FormTests(unittest.TestCase):
         self.assertEqual(d["page_script_errors"], 1)
         self.assertNotIn("private", str(result))
 
+    @staticmethod
+    def _form_handler(tree):
+        # The endpoint plus the one-attempt runner it loops over
+        # (retry_on_captcha_rejection): together they are the form path.
+        names = ("form_submit", "_form_attempt", "_form_attempt_run")
+        return "\n".join(ast.unparse(node) for node in tree.body
+                         if isinstance(node, ast.AsyncFunctionDef) and node.name in names)
+
     def test_forms_do_not_use_read_retry_wrapper(self):
         tree = ast.parse(pathlib.Path(__file__).with_name("app.py").read_text())
-        handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "form_submit")
-        self.assertNotIn("_run_render", ast.unparse(handler))
+        self.assertNotIn("_run_render", self._form_handler(tree))
 
     def test_forms_are_independent_of_shared_browser_recycling(self):
         tree = ast.parse(pathlib.Path(__file__).with_name("app.py").read_text())
-        handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "form_submit")
+        handler = self._form_handler(tree)
         recycle = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "recycle")
-        self.assertIn("_form_worker.run", ast.unparse(handler))
-        self.assertNotIn("_render_executor", ast.unparse(handler))
-        self.assertNotIn("_ensure_render_browser", ast.unparse(handler))
+        self.assertIn("_form_worker.run", handler)
+        self.assertNotIn("_render_executor", handler)
+        self.assertNotIn("_ensure_render_browser", handler)
         self.assertNotIn("_form_worker", ast.unparse(recycle))
 
     def test_text_fields_are_typed_not_filled(self):

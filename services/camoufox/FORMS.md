@@ -186,7 +186,9 @@ means unknown, never zero submissions or permission to replay. Do not add a
 generic HTTP retry policy to this endpoint — the ONLY sanctioned replay is the
 explicit 503 `retryable: true` above (bounded by the caller, e.g. two attempts
 ten seconds apart). Site rejections are returned as
-page content for the caller to interpret. Neither fields nor exception payloads
+page content for the caller to interpret; the one site answer the service
+itself may re-attempt, opt-in, is the explicit step-0 CAPTCHA refusal
+(`retry_on_captcha_rejection`, below). Neither fields nor exception payloads
 are logged by the form runner.
 
 `diagnostics` contains passive CAPTCHA script request/response counts, failing
@@ -212,7 +214,8 @@ this endpoint accepts. Provider-side solving (CapSolver, and its
 `CAPSOLVER_API_KEY`: measured on the form's own egress, page-minted tokens
 passed whenever any token passed, so the third-party credential bought
 nothing. A caller that needs a rejection retried rotates its exit and
-re-attempts — never a solver.
+re-attempts (`retry_on_captcha_rejection` does exactly that for a step-0
+CAPTCHA refusal) — never a solver.
 
 `ready_expression` optionally waits for a caller-supplied boolean expression in
 the page's main world before the single submit click. This is important with
@@ -274,7 +277,7 @@ every verdict is recorded. A caller-pinned `exit_session` with
 exit is tried first and re-pinned to the winner. No passing exit → `503
 {retryable:true, error:"no_scoring_exit", form_submissions:0, score_gate}`
 — only the oracle and the egress echo were contacted, never the target.
-Probes spend the caller's `timeout_ms` (max 360000), keeping 100 s back for
+Probes spend the caller's `timeout_ms` (max 360000; 540000 with retries), keeping 100 s back for
 a plain form and 240 s for a wizard; no candidate starts inside that
 reserve. The answer carries `diagnostics.score_gate {passed, tries, probed,
 skipped, scores, chosen_score, asn}` and the chosen `exit_session`. The gate
@@ -289,6 +292,61 @@ The probe reads its verdict from the verify page, or — when the page has not
 rendered within the 30 s outcome wait — from the submission POST's own
 response body once it has fully arrived (`capture_submission_body`, probe
 only). cf156g lost 10/82 scored POSTs as "capture misses" before this.
+
+## Retry on an explicit step-0 CAPTCHA refusal (`form_retry.py`)
+
+The gate cannot tell which exit the target will accept. Atoka batch 1
+(2026-10-03, 10 runs, headed, gated at 0.7): 5 completed (step-0 POST → 302
+`/complete/`), 4 were refused AT STEP 0 with the form re-rendered and "Error
+verifying reCAPTCHA" on it (`wizard_rejected`, one POST, status 200, same
+URL), 1 was `no_scoring_exit`. The oracle scores of passing exits (0.7–0.9)
+overlap the refused ones (0.7–0.8): reCAPTCHA v3 scores per site.
+
+`retry_on_captcha_rejection` (int, default 0, max 4) makes fresh attempts
+after THAT answer and no other. A retry needs ALL of:
+
+- the explicit first-POST rejection shape: `wizard_rejected` with
+  `rejected_after_posts == 1`, or on a plain form `ok:false` and `error:null`
+  after one answered POST;
+- EVERY error node of the re-rendered form (`.error-msg`, `.invalid-feedback`,
+  `.errorlist` — nothing else on the page is read) matching
+  `captcha_rejection_text` (a case-insensitive regex; default
+  `error verifying recaptcha|captcha (?:non |in)?valid|recaptcha`). A CAPTCHA
+  error next to a field error is not a CAPTCHA-only refusal;
+- exactly one POST, answered 2xx, and the page still on the URL it was
+  submitted from (the form re-rendered).
+
+Unknown outcomes, a 3xx, completion, a non-CAPTCHA validation error, the
+business-email gate, a later-step rejection and a reset are NEVER retried.
+The flow records the evidence as `diagnostics.rejection = {at_post, errors,
+captcha, same_url, wizard}` (counts and booleans, never the text; also in the
+`form-run` line), and the predicate reads only that.
+
+Each retry is a fresh attempt: a new isolated context on a new exit (fresh
+proxy session token), score-gated again when `score_gate` applies, with its
+own `form-run` line (`attempt: n`). A pinned identity is never retried — the
+same exit gets the same verdict: an explicit `exit_session`, a sticky
+profile, `fresh_ip: false` (the shared exit), and any named `profile` (its
+cookies and fingerprint are the identity). A retry starts only if the
+deadline still holds a full attempt: `max(the previous attempt's duration,
+the form's reserve — 100 s plain / 240 s wizard — plus one 65 s oracle
+candidate when gated)`. A gated wizard therefore needs about 150–180 s for
+the first attempt and 305 s more for a retry, so `timeout_ms` may go to
+540000 when (and only when) `retry_on_captcha_rejection > 0` — 540 s plus
+the client's 60 s slack stays under the toolkit's 600 s undici header
+timeout; a longer `timeout_ms` without retries is a 400.
+
+The answer is the FINAL attempt's result plus `attempts: [{n, error, ok,
+status, form_submissions, score_gate_score, asn}]`, `form_submissions` is the
+TOTAL across attempts (each refused attempt was a real POST), and
+`diagnostics.captcha_retry = {retries, attempted, stopped}` says why the loop
+ended (`null` = an answer that is not retried, `retries_exhausted`,
+`deadline`, `exit_pinned`, `exit_shared`, `profile`, `refused`). A retry that
+provably never reached the target (`no_scoring_exit`, a pre-click 503) ends
+the loop with the previous, real answer and an attempts entry `{status: 503,
+form_submissions: 0}`. A retry whose outcome is unknown is a 502 with
+`detail = {retryable: false, attempts, form_submissions_before}` — never
+replayed. Callers like Atoka pass `score_threshold: 0.8` (default stays 0.7).
 
 ## Score oracle and probe (`score_probe.py`)
 
