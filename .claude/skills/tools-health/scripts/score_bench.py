@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""reCAPTCHA v3 score bench for the FORM browser, against OUR oracle only.
+
+Runs N probes per configuration through the public Tools API
+(web_form_score_probe / web_form_warm / web_form_exit_select — REST-only
+diagnostics) and prints a score distribution table. Never targets a
+third-party form: every token is minted on our own key's page
+(/oracle/recaptcha on Tools) and verified by Tools.
+
+    # G2 matrix, 20 runs each (~30-60 s per probe; the sidecar is serial):
+    python3 score_bench.py --n 20
+    python3 score_bench.py --n 20 --configs baseline,headless,warm-sticky
+    # Camoufox version A/B is DEPLOY-level (one pinned browser per image):
+    python3 score_bench.py --n 20 --label cf152 --out cf152.jsonl
+    #   ...deploy the upgrade commit, then:
+    python3 score_bench.py --n 20 --label cf156 --out cf156.jsonl
+    python3 score_bench.py --report cf152.jsonl cf156.jsonl
+
+Key: WEB_TOOLS_API_KEY, else `railway variables -s Tools` (same as health.py).
+G2 target: the shipped configuration scores >= 0.7 on >= 95% of runs.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import statistics
+import sys
+import time
+import urllib.error
+import urllib.request
+from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from health import TOOLS_URL, api_key  # noqa: E402
+
+# name -> (description, setup, probe body factory(run_tag, i)).
+# setup: None | ("warm", {...}) | ("select", {...}) — run once per bench run.
+CONFIGS: dict[str, tuple] = {
+    "baseline": ("isolated, fresh_ip, headed, wait 4s, 2 fields (forms default)", None,
+                 lambda tag, i: {}),
+    "headless": ("as baseline, headless", None,
+                 lambda tag, i: {"headed": False}),
+    "fresh-profile": ("new named profile per run, fresh_ip", None,
+                      lambda tag, i: {"profile": f"bench-{tag}-fresh-{i}", "sticky_exit": False}),
+    "warm-sticky": ("one profile warmed once (google, youtube, origin), its pinned exit every run",
+                    ("warm", {"profile": "bench-{tag}-warm"}),
+                    lambda tag, i: {"profile": f"bench-{tag}-warm", "sticky_exit": True}),
+    "warm-fresh-ip": ("same warm profile cookies, new exit every run",
+                      ("warm", {"profile": "bench-{tag}-warmf", "sticky_exit": False}),
+                      lambda tag, i: {"profile": f"bench-{tag}-warmf", "sticky_exit": False}),
+    "sticky-isolated": ("isolated browser, ONE exit token for all runs", None,
+                        lambda tag, i: {"exit_session": f"b{tag}"[:24]}),
+    "selected-sticky": ("profile pinned by web_form_exit_select, its exit every run",
+                        ("select", {"profile": "bench-{tag}-sel"}),
+                        lambda tag, i: {"profile": f"bench-{tag}-sel", "sticky_exit": True}),
+    "dwell-0": ("as baseline, no dwell after load", None, lambda tag, i: {"wait_ms": 0}),
+    "dwell-15s": ("as baseline, 15 s dwell after load", None, lambda tag, i: {"wait_ms": 15000}),
+    "dwell-40s": ("as baseline, 40 s dwell after load", None, lambda tag, i: {"wait_ms": 40000}),
+    "typing-1": ("as baseline, 1 field typed", None, lambda tag, i: {"field_count": 1}),
+    "typing-3": ("as baseline, 3 fields typed", None, lambda tag, i: {"field_count": 3}),
+}
+DEFAULT_CONFIGS = ["baseline", "headless", "fresh-profile", "warm-sticky", "warm-fresh-ip",
+                   "sticky-isolated", "dwell-0", "dwell-40s"]
+
+
+def call(tool: str, body: dict, key: str, timeout: int = 420):
+    req = urllib.request.Request(
+        f"{TOOLS_URL}/api/v0/{tool}", data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+    started = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            outer = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}"}, round(time.time() - started, 1)
+    except Exception as e:  # network, timeout
+        return {"error": type(e).__name__}, round(time.time() - started, 1)
+    text = ((outer.get("content") or [{}])[0] or {}).get("text", "")
+    try:
+        return json.loads(text), round(time.time() - started, 1)
+    except ValueError:
+        return {"error": text[:200] or "unparseable"}, round(time.time() - started, 1)
+
+
+def setup(kind: str, body: dict, tag: str, key: str) -> dict:
+    body = {k: (v.format(tag=tag) if isinstance(v, str) else v) for k, v in body.items()}
+    if kind == "warm":
+        out, secs = call("web_form_warm", body, key)
+        print(f"  setup warm {body['profile']}: {secs}s visits="
+              f"{[(v.get('host'), v.get('ok')) for v in out.get('visits') or []]} error={out.get('error')}")
+    else:
+        out, secs = call("web_form_exit_select", body, key)
+        print(f"  setup exit-select {body['profile']}: {secs}s pinned={out.get('pinned')} "
+              f"tries={[t.get('score', t.get('skipped')) for t in out.get('tries') or []]}")
+    return out
+
+
+def run(configs, n, tag, label, out_path, key, threshold):
+    sink = open(out_path, "a") if out_path else None
+    rows = []
+    for name in configs:
+        desc, prep, factory = CONFIGS[name]
+        print(f"[{name}] {desc} — {n} runs")
+        if prep:
+            setup(prep[0], dict(prep[1]), tag, key)
+        for i in range(n):
+            body = {"threshold": threshold, **factory(tag, i)}
+            result, secs = call("web_form_score_probe", body, key)
+            row = {"label": label, "config": name, "i": i, "secs": secs, "at": int(time.time()),
+                   "score": result.get("score"), "passed": result.get("passed"),
+                   "error": result.get("error") or (result.get("form") or {}).get("error"),
+                   "codes": result.get("error-codes"), "egress": result.get("egress"),
+                   "blocked": result.get("blocked"), "exit_ip_changed": result.get("exit_ip_changed"),
+                   "dwell_s": (result.get("verdict") or {}).get("page_dwell_s")}
+            rows.append(row)
+            if sink:
+                sink.write(json.dumps(row) + "\n")
+                sink.flush()
+            eg = row["egress"] or {}
+            print(f"  {i + 1:>3}/{n} score={row['score']} {secs:>5}s ip={eg.get('ip')} "
+                  f"asn={eg.get('asn')} err={row['error']}")
+    if sink:
+        sink.close()
+    report(rows, threshold)
+
+
+def pct(values, q):
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(q * (len(ordered) - 1) + 0.5))]
+
+
+def report(rows, threshold=0.7):
+    groups = defaultdict(list)
+    for row in rows:
+        groups[(row.get("label") or "", row["config"])].append(row)
+    head = (f"{'label':<8} {'config':<16} {'n':>3} {'scored':>6} {'mean':>5} {'p10':>4} {'med':>4} "
+            f"{'min':>4} {'>=' + str(threshold):>6} {'>=0.5':>6} {'err':>4} {'IPs':>4} {'ASNs':>4}  histogram")
+    print("\n" + head + "\n" + "-" * len(head))
+    for (label, config), items in sorted(groups.items()):
+        scores = [r["score"] for r in items if isinstance(r.get("score"), (int, float))]
+        n = len(items)
+        ips = {(r.get("egress") or {}).get("ip") for r in items} - {None}
+        asns = {(r.get("egress") or {}).get("asn") for r in items} - {None}
+        hist = defaultdict(int)
+        for s in scores:
+            hist[round(s, 1)] += 1
+        # The rate is over ALL runs: a run with no verdict is a failed run.
+        at_t = sum(1 for s in scores if s >= threshold) / n if n else 0
+        at_5 = sum(1 for s in scores if s >= 0.5) / n if n else 0
+        fmt = lambda v: "-" if v is None else f"{v:.2f}"  # noqa: E731
+        print(f"{label:<8} {config:<16} {n:>3} {len(scores):>6} "
+              f"{fmt(statistics.mean(scores) if scores else None):>5} {fmt(pct(scores, 0.1)):>4} "
+              f"{fmt(statistics.median(scores) if scores else None):>4} {fmt(min(scores) if scores else None):>4} "
+              f"{at_t:>6.0%} {at_5:>6.0%} {n - len(scores):>4} {len(ips):>4} {len(asns):>4}  "
+              + " ".join(f"{k:.1f}:{v}" for k, v in sorted(hist.items())))
+    print(f"\nG2: ship a configuration with >={threshold} on >=95% of runs (column '>={threshold}').")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--n", type=int, default=20, help="probes per configuration (default 20)")
+    ap.add_argument("--configs", default=",".join(DEFAULT_CONFIGS),
+                    help=f"comma list from: {', '.join(CONFIGS)}")
+    ap.add_argument("--tag", default=time.strftime("%m%d%H%M"), help="profile-name suffix (fresh profiles per bench)")
+    ap.add_argument("--label", default="", help="free label, e.g. the deployed camoufox version")
+    ap.add_argument("--out", help="append raw rows as JSONL")
+    ap.add_argument("--threshold", type=float, default=0.7)
+    ap.add_argument("--report", nargs="+", metavar="JSONL", help="only re-print the table from saved rows")
+    ap.add_argument("--list", action="store_true", help="list configurations")
+    args = ap.parse_args()
+    if args.list:
+        for name, (desc, prep, _) in CONFIGS.items():
+            print(f"{name:<16} {desc}" + (f"  [setup: {prep[0]}]" if prep else ""))
+        return
+    if args.report:
+        rows = []
+        for path in args.report:
+            with open(path) as handle:
+                rows += [json.loads(line) for line in handle if line.strip()]
+        report(rows, args.threshold)
+        return
+    configs = [c.strip() for c in args.configs.split(",") if c.strip()]
+    unknown = [c for c in configs if c not in CONFIGS]
+    if unknown:
+        sys.exit(f"unknown configs: {unknown} (see --list)")
+    key = api_key()
+    if not key:
+        sys.exit("score_bench: cannot read API_KEY (set WEB_TOOLS_API_KEY or `railway link`)")
+    run(configs, args.n, args.tag, args.label, args.out, key, args.threshold)
+
+
+if __name__ == "__main__":
+    main()
