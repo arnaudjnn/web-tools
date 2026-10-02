@@ -19,7 +19,12 @@
 
 import { Config } from './config.js';
 
-export class CamoufoxError extends Error {}
+export class CamoufoxError extends Error {
+  /** HTTP status of a non-2xx sidecar answer; undefined when none arrived. */
+  status?: number;
+  /** The sidecar's parsed `detail` (FastAPI), e.g. `{message, retryable}`. */
+  detail?: unknown;
+}
 
 async function call<T>(path: string, body: Record<string, unknown>, timeoutMs: number): Promise<T> {
   if (!Config.camoufox.url) {
@@ -42,7 +47,15 @@ async function call<T>(path: string, body: Record<string, unknown>, timeoutMs: n
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    throw new CamoufoxError(`camoufox ${path} HTTP ${response.status}: ${text.slice(0, 300)}`);
+    const error = new CamoufoxError(`camoufox ${path} HTTP ${response.status}: ${text.slice(0, 300)}`);
+    error.status = response.status;
+    try {
+      const parsed = JSON.parse(text) as { detail?: unknown };
+      error.detail = parsed && typeof parsed === 'object' && 'detail' in parsed ? parsed.detail : parsed;
+    } catch {
+      error.detail = undefined;
+    }
+    throw error;
   }
 
   return (await response.json()) as T;
@@ -54,6 +67,19 @@ export type CamoufoxEval = { status: number; url: string; result: unknown };
 export type CamoufoxBytes = { status: number; b64: string };
 export type CamoufoxFormSubmit = { contract_version: number; form_submissions: number; error: string | null; status: number; url: string; html: string; ok: boolean; exit_session: string; diagnostics: Record<string, unknown> };
 export type CamoufoxSpaFetch = { status: number; text: string };
+export type CamoufoxFormInspect = {
+  ok: boolean;
+  error: string | null;
+  form_submissions: 0;
+  status: number;
+  url: string;
+  forms: Array<Record<string, unknown>>;
+  captcha: Array<Record<string, unknown>>;
+  cookie_banners: Array<Record<string, unknown>>;
+  wizard: Record<string, unknown>;
+  diagnostics: Record<string, unknown>;
+  exit_session: string;
+};
 
 /** Fully-rendered DOM through the Italian residential exit. */
 export function camoufoxRender(params: {
@@ -202,6 +228,35 @@ export function camoufoxFormSubmit(params: {
       ...(params.completionMarkers ? { completion_markers: params.completionMarkers } : {}),
       ...(params.profile ? { profile: params.profile } : {}),
       ...(params.stopAfterPosts ? { stop_after_posts: params.stopAfterPosts } : {}),
+    },
+    timeoutMs + 60_000,
+  );
+}
+
+/** Read-only: the page's forms, fields, submit, CAPTCHA, honeypots, banners.
+ * Never fills or clicks; every mutating request is aborted. */
+export function camoufoxFormInspect(params: {
+  url: string;
+  waitUntil?: string;
+  waitMs?: number;
+  timeoutMs?: number;
+  freshIp?: boolean;
+  exitSession?: string;
+  headed?: boolean;
+  profile?: string;
+}): Promise<CamoufoxFormInspect> {
+  const timeoutMs = params.timeoutMs ?? 60_000;
+  return call<CamoufoxFormInspect>(
+    '/form-inspect',
+    {
+      url: params.url,
+      ...(params.waitUntil ? { wait_until: params.waitUntil } : {}),
+      ...(params.waitMs !== undefined ? { wait_ms: params.waitMs } : {}),
+      timeout_ms: timeoutMs,
+      fresh_ip: params.freshIp !== false,
+      ...(params.exitSession ? { exit_session: params.exitSession } : {}),
+      ...(params.headed ? { headed: true } : {}),
+      ...(params.profile ? { profile: params.profile } : {}),
     },
     timeoutMs + 60_000,
   );

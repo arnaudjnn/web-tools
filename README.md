@@ -103,7 +103,7 @@ Browser form execution uses Camoufox's [single-attempt form contract](services/c
 
 ## Tools
 
-The server exposes fifteen tools. Two more, `web_form_inspect` and `web_agent`, are [coming](#coming-soon).
+The server exposes sixteen tools. One more, `web_agent`, is [coming](#coming-soon).
 
 ### `web_search`
 
@@ -248,6 +248,31 @@ rendering the page as text would lose the document.
 Returns `{ status, url, size_b64, b64 }`. A non-2xx arrives in `status` rather
 than raised, so a caller fetching a PDF that 404s still learns what happened.
 
+### `web_form_inspect`
+
+Read a form without submitting it: call this **first**, then `web_form_submit`
+once. Same browser path as the submit, but it never fills, clicks or dismisses
+anything, and it blocks every mutating request (any origin).
+
+| Parameter                  | Type               | Description |
+| -------------------------- | ------------------ | ----------- |
+| `url`                      | string (required)  | Page holding the form |
+| `wait_until`, `wait_ms`    | (optional)         | Navigation condition and settle after load (default 4000 ms) |
+| `timeout_ms`               | number (optional)  | Whole-run deadline (default: 60000) |
+| `fresh_ip`, `exit_session` | (optional)         | Exit IP; reuse the `exit_session` token to submit from the same IP |
+| `profile`, `headed`        | (optional)         | As `web_form_submit` |
+
+It returns `{ ok, url, status, forms, captcha, cookie_banners, wizard, diagnostics }`.
+Each form has `action`, `method`, `fields`, `submit_candidates`,
+`honeypot_candidates` and `suggested`. Each field is
+`{ selector, name, type, action, label, required, placeholder?, autocomplete?, options? }`.
+A radio group is one field: to choose an option, check its `options[].selector`.
+`suggested` is a ready `web_form_submit` request (required fields, best submit
+control, `dismiss`, `captcha_field`). Add the values and leave out the
+honeypots. `captcha` names the provider (reCAPTCHA v2/v3/enterprise, hCaptcha,
+Turnstile) and says whether a sitekey is present; the key itself is never
+returned. No field values are ever returned, and any failure is safe to retry.
+
 ### `web_form_submit`
 
 Fill a form and click submit **once** in a real browser (Camoufox, on the
@@ -295,8 +320,13 @@ own reservation *before* calling it, and treat a lost response, a timeout, or a
 sanctioned replay is the sidecar's **503 with `retryable: true`**. It is sent
 only when the service can prove that nothing was posted: the run stalled before
 the click, or failed at launch, navigation or field filling with zero POSTs.
-Through the Tools API it currently arrives as an error result whose text
-contains `HTTP 503` and `"retryable":true`. Replay at most a couple of times,
+Through the Tools API every failure is structured JSON with `isError: true`:
+
+- `{ ok: false, retryable: true, outcome: "not_submitted", form_submissions: 0 }`: replay is allowed.
+- `{ retryable: false, outcome: "unknown" }`: never replay.
+- `{ retryable: false, outcome: "invalid_request" }`: your own validation error.
+
+Answered runs carry `retryable: false`. Replay at most a couple of times,
 seconds apart. Do not wrap this tool in a generic HTTP retry policy.
 
 ### `web_eval`
@@ -368,9 +398,6 @@ call, and over-counting a cost estimate is the safe direction.
 
 Not shipped yet; the names and shapes below may change.
 
-- **`web_form_inspect`**: read a form without submitting it. It will report fields,
-  selectors, required flags and CAPTCHA scripts, so a caller can build the
-  `fields` list for `web_form_submit` without hand-reading the page.
 - **`web_agent`**: give it a task in plain language and it browses until done,
   then returns a structured result within a step cap. It will be built on
   [browser-use](https://github.com/browser-use/browser-use) in Chromium.

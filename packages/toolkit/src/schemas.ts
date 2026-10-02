@@ -157,25 +157,34 @@ export const WebBytesInput = z.object({
   timeout_ms: z.number().min(1000).max(180000).optional().describe('Fetch timeout (default: 60000)'),
 });
 
+// One control to fill; web_form_inspect's fields[].selector/action map 1:1.
+const FormField = z.object({
+  selector: z.string().describe('CSS selector of the control (from web_form_inspect)'),
+  value: z.string().optional().describe('Text to type, or the option value for action=select'),
+  action: z.enum(['type', 'check', 'select']).optional().describe('Default: type'),
+});
+
+const ProfileName = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
+  .max(64);
+
 export const WebFormSubmitInput = z.object({
   url: z.string().url().describe('URL of the page holding the form'),
-  fields: z
-    .array(
-      z.object({
-        selector: z.string().describe('CSS selector of the control'),
-        value: z.string().optional().describe('text to type, or option value for action=select'),
-        action: z.enum(['type', 'check', 'select']).optional().describe('default: type'),
-      }),
-    )
-    .describe('Controls to fill, in order'),
-  submit: z.string().describe('CSS selector of the submit control'),
-  dismiss: z.array(z.string()).optional().describe('Selectors clicked first (cookie walls)'),
+  fields: z.array(FormField).describe('Controls to fill, in order. Never include honeypot_candidates'),
+  submit: z.string().describe('CSS selector of the submit control, clicked exactly once'),
+  dismiss: z.array(z.string()).optional().describe('Cookie-banner selectors clicked before filling'),
   success_url: z.string().optional().describe('Regex; a final URL matching it means success'),
-  submission_urls: z.array(z.string().url()).min(1).max(10).optional().describe('Same-origin form POST URLs sharing one submission budget; defaults to url'),
-  captcha_field: z.string().min(1).max(100).optional().describe('POST field to check for token presence, never its value'),
-  require_captcha_token: z.boolean().optional().describe('Block the form POST when its CAPTCHA field is empty/unreadable; no retry'),
+  submission_urls: z
+    .array(z.string().url())
+    .min(1)
+    .max(10)
+    .optional()
+    .describe('Same-origin POST URLs counted as the submission (default: url)'),
+  captcha_field: z.string().min(1).max(100).optional().describe('POST field checked for token presence (never its value)'),
+  require_captcha_token: z.boolean().optional().describe('Block the POST when captcha_field is empty; no retry'),
   ready_expression: z.string().min(1).max(2000).optional().describe('Main-world boolean expression required before clicking submit'),
-  inspect_only: z.boolean().optional().describe('Navigate without filling/clicking; block same-origin mutating requests'),
+  inspect_only: z.boolean().optional().describe('Navigate only (no fill/click); prefer web_form_inspect'),
   wait_until: z.enum(['load', 'domcontentloaded', 'networkidle', 'commit']).optional(),
   wait_ms: z.number().min(0).max(60000).optional().describe('Settle after load (default: 4000)'),
   settle_ms: z.number().min(1000).max(120000).optional().describe('Wait for the outcome (default: 20000)'),
@@ -184,51 +193,50 @@ export const WebFormSubmitInput = z.object({
   exit_session: z
     .string()
     .optional()
-    .describe('Pin the exit: same token = same IP, so a passing exit can be reused instead of re-searched'),
-  headed: z
-    .boolean()
-    .optional()
-    .describe('Headed browser under xvfb for score-gated forms; headless fleets score 0 on reCAPTCHA v3'),
+    .describe('Pin the exit IP: the same token reuses the same IP (keep one that passed)'),
+  profile: ProfileName.optional().describe(
+    'Named persistent browser profile: cookies + fingerprint reused across calls (default: isolated)',
+  ),
+  headed: z.boolean().optional().describe('Headed browser; needed by score-gated forms (reCAPTCHA v3)'),
   gate_text: z
     .string()
     .min(1)
     .max(300)
     .optional()
-    .describe('Regex on button/link text; after step0 a matching gate (e.g. business-email warning) is clicked ONCE'),
+    .describe('Wizard: regex on a button/link shown after the first POST; clicked once'),
   step2: z
-    .array(
-      z.object({
-        selector: z.string().describe('CSS selector of the control'),
-        value: z.string().optional().describe('text to type, or option value for action=select'),
-        action: z.enum(['type', 'check', 'select']).optional().describe('default: type'),
-      }),
-    )
+    .array(FormField)
     .optional()
-    .describe("A wizard's second step: filled and submitted only if/when that step renders"),
+    .describe("Wizard: the second step's controls, filled only if that step renders"),
   step2_submit: z
     .string()
     .min(1)
     .max(300)
     .optional()
-    .describe("CSS selector of step2's submit control (default: 'form button')"),
+    .describe("Wizard: step2's submit selector (default: 'form button')"),
   completion_markers: z
     .array(z.string().min(1))
     .max(10)
     .optional()
-    .describe('Regexes on body text; a match counts as completion even when the URL never changes'),
-  profile: z
-    .string()
-    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
-    .max(64)
-    .optional()
-    .describe('Named persistent profile: warm cookies + fingerprint reused across submissions (empty = isolated)'),
+    .describe('Wizard: regexes on body text meaning done when the URL never changes'),
   stop_after_posts: z
     .number()
     .int()
     .min(1)
     .max(3)
     .optional()
-    .describe('Wizard warm-up: stop once this many form POSTs have been answered (e.g. 1 = step0 only)'),
+    .describe('Wizard warm-up: return after this many POSTs (1 = first step only)'),
+});
+
+export const WebFormInspectInput = z.object({
+  url: z.string().url().describe('URL of the page holding the form'),
+  wait_until: z.enum(['load', 'domcontentloaded', 'networkidle', 'commit']).optional(),
+  wait_ms: z.number().min(0).max(60000).optional().describe('Settle after load so late forms/banners render (default: 4000)'),
+  timeout_ms: z.number().min(1000).max(180000).optional().describe('Whole-run deadline (default: 60000)'),
+  fresh_ip: z.boolean().optional().describe('New context + exit IP (default: true)'),
+  exit_session: z.string().optional().describe('Pin the exit IP; reuse the token in web_form_submit to submit from the same IP'),
+  profile: ProfileName.optional().describe('Named persistent profile; the visit warms it for a later submit'),
+  headed: z.boolean().optional().describe('Headed browser (as web_form_submit)'),
 });
 
 export const WebEvalInput = z.object({

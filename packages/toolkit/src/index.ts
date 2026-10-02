@@ -13,6 +13,8 @@ export {
   WebSpaFetchInput,
   WebRecycleInput,
   WebUsageStatsInput,
+  WebFormSubmitInput,
+  WebFormInspectInput,
 } from './schemas.js';
 
 export { tools, toolsByName } from './tools.js';
@@ -31,6 +33,7 @@ export {
   web_bytes,
   web_eval,
   web_form_submit,
+  web_form_inspect,
   web_spa_fetch,
   web_recycle,
   functionMap,
@@ -46,6 +49,7 @@ export {
   camoufoxBytes,
   camoufoxSpaFetch,
   camoufoxRecycle,
+  camoufoxFormInspect,
   CamoufoxError,
 } from './camoufox.js';
 export { pickBackend, isItalianSource } from './routing.js';

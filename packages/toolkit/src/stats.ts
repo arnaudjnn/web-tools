@@ -23,6 +23,7 @@ export type ToolName =
   | 'web_bytes'
   | 'web_eval'
   | 'web_form_submit'
+  | 'web_form_inspect'
   | 'web_spa_fetch';
 
 const startedAt = new Date().toISOString();
@@ -40,6 +41,7 @@ const counts: Record<ToolName, number> = {
   web_bytes: 0,
   web_eval: 0,
   web_form_submit: 0,
+  web_form_inspect: 0,
   web_spa_fetch: 0,
 };
 
@@ -57,6 +59,7 @@ const bytes: Record<ToolName, number> = {
   web_bytes: 0,
   web_eval: 0,
   web_form_submit: 0,
+  web_form_inspect: 0,
   web_spa_fetch: 0,
 };
 
@@ -73,6 +76,7 @@ const errors: Record<ToolName, number> = {
   web_bytes: 0,
   web_eval: 0,
   web_form_submit: 0,
+  web_form_inspect: 0,
   web_spa_fetch: 0,
 };
 
@@ -96,6 +100,7 @@ const PROXY_BACKED: ToolName[] = [
   'web_bytes',
   'web_eval',
   'web_form_submit',
+  'web_form_inspect',
   'web_spa_fetch',
   'web_archive',
   'web_snapshots',

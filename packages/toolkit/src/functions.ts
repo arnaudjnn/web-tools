@@ -6,6 +6,8 @@ import {
   camoufoxScreenshot,
   camoufoxSpaFetch,
   camoufoxFormSubmit,
+  camoufoxFormInspect,
+  CamoufoxError,
 } from './camoufox.js';
 import { forcedWaitMs, isItalianSource, prefersCamoufox } from './routing.js';
 import {
@@ -552,6 +554,47 @@ export async function web_bytes(params: Record<string, unknown>): Promise<ToolRe
 }
 
 /**
+ * The structured failure of a form call, so an agent never parses a string to
+ * learn whether it may replay:
+ *   503 + detail.retryable → {retryable:true, form_submissions:0}: provably
+ *       nothing was sent; the same identity may be replayed (bounded).
+ *   400/422 → invalid_request: rejected before any browser ran.
+ *   anything else (502, lost response, timeout) → outcome 'unknown': a POST
+ *       may have left; never replay.
+ */
+function failureReason(err: unknown): string {
+  const detail = err instanceof CamoufoxError ? err.detail : undefined;
+  if (detail && typeof detail === 'object' && 'message' in detail) {
+    return String((detail as { message: unknown }).message);
+  }
+  return typeof detail === 'string' ? detail : errMsg(err);
+}
+
+function formFailure(err: unknown): Record<string, unknown> {
+  const status = err instanceof CamoufoxError ? err.status : undefined;
+  const detail = err instanceof CamoufoxError ? err.detail : undefined;
+  const reason = failureReason(err);
+  if (status === 503 && detail && typeof detail === 'object' && (detail as { retryable?: unknown }).retryable === true) {
+    return { ok: false, retryable: true, outcome: 'not_submitted', form_submissions: 0, status, error: reason };
+  }
+  if (status === 400 || status === 422) {
+    return {
+      ok: false,
+      retryable: false,
+      outcome: 'invalid_request',
+      form_submissions: 0,
+      status,
+      error: status === 422 ? JSON.stringify(detail ?? reason).slice(0, 500) : reason,
+    };
+  }
+  return { ok: false, retryable: false, outcome: 'unknown', form_submissions: null, status: status ?? 0, error: reason };
+}
+
+function formResult(tool: 'web_form_submit' | 'web_form_inspect', body: Record<string, unknown>, isError: boolean): ToolResult {
+  return trace(tool, { content: [{ type: 'text', text: JSON.stringify(body) }], isError });
+}
+
+/**
  * Fill and submit a form in the residential Firefox.
  *
  * web_execute_js runs scripts from Scrapling; this is the same idea driven
@@ -564,10 +607,13 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
   const submit = params.submit as string | undefined;
   const fields = params.fields as Array<Record<string, unknown>> | undefined;
   if (!url || !submit || !Array.isArray(fields)) {
-    return {
-      content: [{ type: 'text', text: 'web_form_submit error: `url`, `fields` and `submit` are required' }],
-      isError: true,
-    };
+    return formResult('web_form_submit', {
+      ok: false,
+      retryable: false,
+      outcome: 'invalid_request',
+      form_submissions: 0,
+      error: '`url`, `fields` and `submit` are required',
+    }, true);
   }
   try {
     const r = await camoufoxFormSubmit({
@@ -595,22 +641,52 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       profile: params.profile as string | undefined,
       stopAfterPosts: typeof params.stop_after_posts === 'number' ? params.stop_after_posts : undefined,
     });
-    return trace('web_form_submit', {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(r),
-        },
-      ],
-      isError: false,
-    });
+    // An answered run is never auto-replayable, whatever its outcome: the
+    // only sanctioned replay is the 503 below.
+    return formResult('web_form_submit', { ...r, retryable: false }, false);
   } catch (err) {
-    const msg = errMsg(err);
-    log('web_form_submit failed:', msg);
-    return trace('web_form_submit', {
-      content: [{ type: 'text', text: `web_form_submit error: ${msg}` }],
-      isError: true,
+    const failure = formFailure(err);
+    log('web_form_submit failed:', failure.outcome, failure.status);
+    return formResult('web_form_submit', failure, true);
+  }
+}
+
+/**
+ * Read-only: describe a page's forms so an agent can build web_form_submit's
+ * `fields[]` without hand-writing selectors. Same browser path as the submit;
+ * nothing is filled or clicked and every mutating request is aborted, so any
+ * failure is safe to retry.
+ */
+export async function web_form_inspect(params: Record<string, unknown>): Promise<ToolResult> {
+  const url = params.url as string | undefined;
+  if (!url) {
+    return formResult('web_form_inspect', { ok: false, retryable: false, error: '`url` is required' }, true);
+  }
+  try {
+    const r = await camoufoxFormInspect({
+      url,
+      waitUntil: params.wait_until as string | undefined,
+      waitMs: typeof params.wait_ms === 'number' ? params.wait_ms : undefined,
+      timeoutMs: typeof params.timeout_ms === 'number' ? params.timeout_ms : undefined,
+      freshIp: params.fresh_ip !== false,
+      exitSession: params.exit_session as string | undefined,
+      headed: params.headed === true,
+      profile: params.profile as string | undefined,
     });
+    return formResult('web_form_inspect', r, false);
+  } catch (err) {
+    const status = err instanceof CamoufoxError ? err.status : undefined;
+    const invalid = status === 400 || status === 422;
+    log('web_form_inspect failed:', errMsg(err));
+    return formResult('web_form_inspect', {
+      ok: false,
+      // Read-only: nothing can have been submitted, so only a bad request
+      // is not worth repeating.
+      retryable: !invalid,
+      form_submissions: 0,
+      status: status ?? 0,
+      error: failureReason(err),
+    }, true);
   }
 }
 
@@ -727,6 +803,7 @@ export const functionMap: Record<string, (params: any) => Promise<any>> = {
   web_bytes,
   web_eval,
   web_form_submit,
+  web_form_inspect,
   web_spa_fetch,
   web_recycle,
 };

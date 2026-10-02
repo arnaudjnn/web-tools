@@ -1,6 +1,6 @@
 # Deploy and Host Web Tools on Railway
 
-Web Tools is an open-source web toolkit that gives AI agents fifteen tools to search, read, and act on the web (fetch, crawl, screenshot, archive, fill forms), available as an MCP server, REST API, and CLI. It consumes zero LLM tokens for web access, so your models spend their budget on reasoning, not searching.
+Web Tools is an open-source web toolkit that gives AI agents sixteen tools to search, read, and act on the web (fetch, crawl, screenshot, archive, fill forms), available as an MCP server, REST API, and CLI. It consumes zero LLM tokens for web access, so your models spend their budget on reasoning, not searching.
 
 ## About Hosting Web Tools
 
@@ -55,7 +55,7 @@ curl -X POST https://your-server.up.railway.app/api/v0/web_search \
   -d '{"query": "railway deployment"}'
 ```
 
-The fifteen tools available are: `web_search`, `web_fetch`, `web_html`, `web_screenshot`, `web_pdf`, `web_execute_js`, `web_crawl`, `web_bytes`, `web_form_submit`, `web_eval`, `web_spa_fetch`, `web_recycle`, `web_snapshots`, `web_archive`, and `web_usage_stats`.
+The sixteen tools available are: `web_search`, `web_fetch`, `web_html`, `web_screenshot`, `web_pdf`, `web_execute_js`, `web_crawl`, `web_bytes`, `web_form_inspect`, `web_form_submit`, `web_eval`, `web_spa_fetch`, `web_recycle`, `web_snapshots`, `web_archive`, and `web_usage_stats`.
 
 Callers never choose a fetch engine. Which of the two browsers serves a URL, and whether it egresses through a residential proxy, in what country, or solves a JS challenge, is decided from the host inside the server. Adding a knob for it would put the burden of knowing which engine can reach which site on every caller. When the preferred engine fails, the server falls back to the other one and reports both causes only when both fail.
 

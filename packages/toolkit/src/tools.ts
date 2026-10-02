@@ -14,6 +14,7 @@ import {
   WebRecycleInput,
   WebUsageStatsInput,
   WebFormSubmitInput,
+  WebFormInspectInput,
 } from './schemas.js';
 import type { ToolDefinition } from './types.js';
 
@@ -141,12 +142,32 @@ export const tools: ToolDefinition[] = [
     },
   },
   {
+    name: 'web_form_inspect',
+    description:
+      "Read-only: list a page's visible forms as ready-to-use web_form_submit input. Per form: " +
+      'action, method, fields {selector, name, type, action, label, required, placeholder, options}, ' +
+      'submit_candidates, honeypot_candidates (never fill these) and a `suggested` request skeleton. ' +
+      'Page-wide: captcha provider, cookie_banners (dismiss selectors) and wizard hints. Never ' +
+      'fills, clicks or reveals field values; every mutating request is blocked. Radios: check one ' +
+      'options[].selector. Safe to retry.',
+    parameters: WebFormInspectInput,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
     name: 'web_form_submit',
     description:
-      'Fill required fields and click submit once in an isolated browser context. ' +
-      'Returns the outgoing form POST count, its HTTP status and resulting page. ' +
-      'Duplicate matching POSTs are blocked; browser failures are never retried. ' +
-      'A lost response means unknown outcome, not permission to retry. The caller owns durable reservations.',
+      'Fill fields and click submit ONCE in an isolated residential browser; returns ' +
+      "form_submissions, the POST's status, ok and the resulting page. How to: call " +
+      'web_form_inspect first, take its `suggested` (add values; skip honeypots), then submit ' +
+      'once. Multi-step forms: gate_text, step2, step2_submit, completion_markers. ' +
+      'Replay rule: replay only when the result has retryable:true (nothing was sent); ' +
+      'never on outcome:"unknown" (a POST may have left) and never on an answered result. ' +
+      'Persist your own reservation before calling.',
     parameters: WebFormSubmitInput,
     annotations: {
       readOnlyHint: false,

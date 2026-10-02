@@ -82,6 +82,14 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   matches `cannot switch to a different thread` (fresh thread + one retry).
   Without that, every later render 502s and the toolkit silently falls back to
   the wrong-country exit — observed live 2026-09-27.
+- **`web_form_inspect` is the agent's first step and is strictly read-only**
+  (`form_inspect.py`, mounted with one `register()` call in `app.py`; its
+  file is in the Dockerfile `COPY` list). Its guard aborts EVERY mutating
+  request on any origin, and it never returns a value. Its `suggested` output
+  is the `/form-submit` request, which `test_form_inspect.py` proves by
+  submitting it through `run_form` to the loopback fixture.
+  `web_form_submit` failures are structured: replay only on
+  `retryable:true`, never on `outcome:"unknown"`.
 - **Forms are single-attempt, never solver-gated**: CapSolver was removed
   2026-09-29 (last third-party credential; page-minted tokens passed whenever
   any token passed, so it bought nothing) — the endpoint accepts only the
