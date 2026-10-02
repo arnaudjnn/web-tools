@@ -111,7 +111,8 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["form_submissions"], 1)
         self.assertEqual(summary["phase"], "fields")
         self.assertEqual(set(summary["durations_s"]), {"navigation", "fields"})
-        self.assertEqual(summary["posts"], [{"n": 0, "token": True, "mint_age_s": 71.3}])
+        self.assertEqual(summary["posts"], [{"n": 0, "token": True, "mint_age_s": 71.3,
+                                             "same_as_first": None, "reloads": None}])
         self.assertEqual(summary["egress"], {"country": "Italy", "asn": 30722})
         self.assertEqual(summary["profile"], "warm-1")
         self.assertTrue(summary["headed"])

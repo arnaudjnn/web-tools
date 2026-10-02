@@ -26,10 +26,12 @@ interaction, not a spoof. The ~one minute this costs per form is the price of
 the score, not waste.
 """
 import contextlib
+import hashlib
 import json
 import logging
 import random
 import re
+import secrets
 import threading
 import time
 from urllib.parse import urlsplit, parse_qs
@@ -149,7 +151,8 @@ class FormLive:
             durations[self.phase] = round(
                 durations.get(self.phase, 0.0) + _clock() - self._phase_at, 1)
         egress = diagnostics.get("egress") or None
-        posts = [{"n": p.get("n"), "token": p.get("token"), "mint_age_s": p.get("mint_age_s")}
+        posts = [{"n": p.get("n"), "token": p.get("token"), "mint_age_s": p.get("mint_age_s"),
+                  "same_as_first": p.get("same_as_first"), "reloads": p.get("reloads")}
                  for p in list(diagnostics.get("submission_tokens") or [])]
         out = {
             "error": result.get("error"),
@@ -164,6 +167,7 @@ class FormLive:
             "durations_s": durations,
             "total_s": round(_clock() - self.started, 1),
             "posts": posts,
+            "rejected_after_posts": diagnostics.get("rejected_after_posts"),
             "token_present": diagnostics.get("token_present"),
             "egress": ({"country": egress.get("country"), "asn": egress.get("asn")}
                        if isinstance(egress, dict) else None),
@@ -228,7 +232,7 @@ def validate_form(url, submission_urls, success_url, gate_text=None, completion_
 _NO_TOKEN = ("", "null", "undefined", "false")
 
 
-def _token_shape(request, captcha_field):
+def _token_shape(request, captcha_field, salt=None):
     """A POST body's captcha SHAPE — presence and lengths, never a value.
 
     keep_blank_values: an absent key means "not in the form", [''] means
@@ -237,6 +241,12 @@ def _token_shape(request, captcha_field):
     blank). `present` is the configured field alone (the guard's input);
     `any` is either watched field (the per-POST record). None when the body
     cannot be read at all.
+
+    With `salt`, `digest` identifies the carried token(s) so a later POST can
+    say whether it re-sent the FIRST POST's token (a stale re-send) or a new
+    one (the page minted on that click) — gate re-verify forensics. The
+    digest is per-run salted and stays in the caller's memory; only the
+    resulting boolean is ever recorded.
     """
     try:
         values = parse_qs(request.post_data or "", keep_blank_values=True)
@@ -248,9 +258,13 @@ def _token_shape(request, captcha_field):
         found = values.get(name, [])
         return len(found) == 1 and found[0].strip().lower() not in _NO_TOKEN
 
+    tokens = [values[name][0] for name in watch if carried(name)]
+    digest = (hashlib.sha256((salt + "\x00".join(tokens)).encode()).hexdigest()
+              if salt and tokens else None)
     return {"present": carried(captcha_field or "g-recaptcha-response"),
             "any": any(carried(name) for name in watch),
-            "lengths": {name: [len(v) for v in values.get(name, [])] for name in watch}}
+            "lengths": {name: [len(v) for v in values.get(name, [])] for name in watch},
+            "digest": digest}
 
 
 # Navigation failures by CODE — the engine's error token, never its message
@@ -394,6 +408,9 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
     owns_live = live is None
     live = live if live is not None else FormLive()
     deadline = time.monotonic() + timeout_ms / 1000
+    # Gate re-verify forensics: the first POST's token digest (salted per run,
+    # memory only) — see _token_shape.
+    token_memory = {"salt": secrets.token_hex(16), "first": None}
     result = {"contract_version": 2, "status": 0, "url": url, "html": "",
               "ok": False, "form_submissions": 0, "error": None}
     diagnostics = {"inspection_only": inspect_only, "captcha_script_requests": 0,
@@ -452,9 +469,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             # assumption no measurement had tested. Record every POST; the
             # FIRST one's shape is also the run's token_present (the guard's
             # input) and must survive a later POST that carries nothing.
-            shape = _token_shape(route.request, captcha_field)
+            shape = _token_shape(route.request, captcha_field, token_memory["salt"])
             if shape is not None:
                 minted = diagnostics.get("last_captcha_mint")
+                digest = shape.pop("digest", None)
+                if result["form_submissions"] == 0:
+                    token_memory["first"] = digest
                 diagnostics.setdefault("submission_tokens", []).append({
                     "n": result["form_submissions"],
                     "path": urlsplit(route.request.url).path,
@@ -462,6 +482,13 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     "mint_age_s": (round(now - minted, 1)
                                    if minted is not None else None),
                     "lengths": shape["lengths"],
+                    # reloads: api2/reload responses so far (no change since
+                    # the previous POST = nothing minted in between);
+                    # same_as_first: this POST re-sent the first POST's token.
+                    "reloads": diagnostics.get("captcha_reloads", 0),
+                    "same_as_first": (digest == token_memory["first"]
+                                      if result["form_submissions"] and digest and token_memory["first"]
+                                      else None),
                 })
             if result["form_submissions"] == 0:
                 if shape is None:
@@ -503,6 +530,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         try:
             if captcha_request(response.request) and "/reload" in urlsplit(response.url).path:
                 diagnostics["last_captcha_mint"] = time.monotonic()
+                diagnostics["captcha_reloads"] = diagnostics.get("captcha_reloads", 0) + 1
         except Exception:
             pass
         if captcha_request(response.request) and response.request.resource_type == "script":
@@ -903,6 +931,9 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     break
                 if state["errs"] and not business_only:
                     wizard_error = "wizard_rejected"
+                    # WHICH POST's answer carried the error (1 = step0,
+                    # 2 = gate, 3 = step2) — the re-verify question's key.
+                    diagnostics["rejected_after_posts"] = result["form_submissions"]
                     break
                 try:
                     page.wait_for_timeout(min(random.randint(700, 1300), remaining()))

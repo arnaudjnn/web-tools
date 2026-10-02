@@ -405,7 +405,8 @@ class FormTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         line = next(m for m in messages if m.startswith("form-run "))
         summary = json.loads(line[len("form-run "):])
-        self.assertEqual(summary["posts"], [{"n": 0, "token": True, "mint_age_s": None}])
+        self.assertEqual(summary["posts"], [{"n": 0, "token": True, "mint_age_s": None,
+                                             "same_as_first": None, "reloads": 0}])
         self.assertTrue(summary["token_present"])
         joined = "\n".join(messages)
         for secret in ("private-value", "private-token", "private-email"):
