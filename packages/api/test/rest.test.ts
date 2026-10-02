@@ -99,7 +99,7 @@ describe('MCP', () => {
   it('lists every tool with its annotations', async () => {
     const client = await connect();
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(15);
+    expect(tools).toHaveLength(17);
     expect(tools.find((t) => t.name === 'web_recycle')?.annotations?.destructiveHint).toBe(true);
   });
 });

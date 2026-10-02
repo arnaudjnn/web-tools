@@ -17,7 +17,8 @@ liveness. A liveness check passes through all of it.
 
 | what you see | what it actually is |
 | --- | --- |
-| `web_search` returns `[]`, HTTP 200, ~15.2s | every SearXNG engine timing out |
+| `web_search` returns `[]`, HTTP 200, ~15.2s | every SearXNG engine timing out (before 2026-10-02; now an HTTP 500 naming the `unresponsive_engines`) |
+| `web_crawl` succeeds with `renderer=local` | Scrapling `/markdown` is unreachable or erroring; the Tools process rendered the markdown itself |
 | `web_html` returns 200 with `mode=camoufox` on a host that should be stealth | the Scrapling sidecar is unreachable; the fallback served it |
 | `web_html` on a `.it` host with `mode=fast` | Camoufox is unreachable, wrong country |
 | a fetch takes much longer than its timeout then succeeds | the preferred sidecar timed out, the fallback served it |

@@ -175,6 +175,17 @@ def check_probes_deep(findings: list[dict], key: str) -> None:
         if res.get("isError"):
             findings.append({"check": "probe", "service": "Scrapling", "severity": "error",
                              "detail": "web_crawl returned an error", "action": "redeploy"})
+        else:
+            # The toolkit renders markdown locally when Scrapling's /markdown
+            # cannot answer, so success alone no longer proves the sidecar is
+            # rendering. `renderer` says who did.
+            row = (json.loads(res["content"][0]["text"]).get("results") or [{}])[0]
+            if row.get("renderer") != "scrapling":
+                findings.append({"check": "probe", "service": "Scrapling", "severity": "error",
+                                 "detail": f"web_crawl rendered by renderer={row.get('renderer')} "
+                                           f"mode={row.get('mode')} (expected scrapling): "
+                                           "/markdown is down, the local fallback served it",
+                                 "action": "redeploy"})
     except Exception as e:
         findings.append({"check": "probe", "service": "Scrapling", "severity": "error",
                          "detail": f"web_crawl failed: {type(e).__name__}", "action": "redeploy"})

@@ -193,3 +193,44 @@ describe('errors are counted for every tool', () => {
     expect(s.web_usage_stats.calls).toBe(1);
   });
 });
+
+describe('forms and agent on the shared client and counter', () => {
+  const form = { url: 'https://www.example.it/f', fields: [{ selector: '#a', value: 'x' }], submit: 'button' };
+
+  it('web_form_submit: a 503 retryable detail survives the shared client', async () => {
+    fakeSidecars({ camoufox: () => ({ status: 503, json: { detail: { message: 'browser not ready', retryable: true } } }) });
+    const r = await functionMap.web_form_submit(form);
+    expect(r.isError).toBe(true);
+    expect(bodyOf(r)).toEqual({
+      ok: false, retryable: true, outcome: 'not_submitted', form_submissions: 0, status: 503, error: 'browser not ready',
+    });
+    expect(getStats().by_tool.web_form_submit).toMatchObject({ calls: 1, errors: 1 });
+  });
+
+  it('web_form_submit: 422 is invalid_request; 502 and a lost response are unknown', async () => {
+    fakeSidecars({ camoufox: () => ({ status: 422, json: { detail: [{ loc: ['body', 'fields'] }] } }) });
+    expect(bodyOf(await functionMap.web_form_submit(form))).toMatchObject({ outcome: 'invalid_request', retryable: false });
+    fakeSidecars({ camoufox: () => ({ status: 502, json: { detail: 'boom' } }) });
+    expect(bodyOf(await functionMap.web_form_submit(form))).toMatchObject({ outcome: 'unknown', form_submissions: null, error: 'boom' });
+    fakeSidecars({ camoufox: () => 'timeout' });
+    expect(bodyOf(await functionMap.web_form_submit(form))).toMatchObject({ outcome: 'unknown', status: 0 });
+  });
+
+  it('web_form_inspect: failures are retryable unless the request was invalid, and counted', async () => {
+    fakeSidecars({ camoufox: () => ({ status: 502, json: { detail: 'nav failed' } }) });
+    expect(bodyOf(await functionMap.web_form_inspect({ url: 'https://www.example.it/f' }))).toMatchObject({
+      retryable: true, form_submissions: 0, status: 502, error: 'nav failed',
+    });
+    expect(getStats().by_tool.web_form_inspect.errors).toBe(1);
+  });
+
+  it('web_agent: disabled is an isError result; a transport failure is counted', async () => {
+    fakeSidecars({ scrapling: () => ({ status: 503, json: { disabled: true, reason: 'no key' } }) });
+    const r = await functionMap.web_agent({ task: 't', start_url: 'https://example.com/' });
+    expect(r).toEqual({ content: [{ type: 'text', text: 'web_agent disabled: no key' }], isError: true });
+    fakeSidecars({});
+    const down = await functionMap.web_agent({ task: 't', start_url: 'https://example.com/' });
+    expect(down.content[0]).toMatchObject({ text: expect.stringMatching(/^web_agent error: scrapling \/agent failed/) });
+    expect(getStats().by_tool.web_agent).toMatchObject({ calls: 1, errors: 1 });
+  });
+});
