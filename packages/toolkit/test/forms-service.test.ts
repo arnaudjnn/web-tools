@@ -89,7 +89,12 @@ describe('score gate wire', () => {
 
   it('the schema allows a gated wizard deadline (360 s) and bounds the gate', () => {
     expect(WebFormSubmitInput.safeParse({ ...FORM, timeout_ms: 360_000 }).success).toBe(true);
-    expect(WebFormSubmitInput.safeParse({ ...FORM, timeout_ms: 360_001 }).success).toBe(false);
+    // Up to 540 s for a retrying call (the sidecar 400s >360 s without
+    // retry_on_captcha_rejection; the schema must stay a plain object for MCP).
+    expect(WebFormSubmitInput.safeParse({ ...FORM, timeout_ms: 540_000, retry_on_captcha_rejection: 1 }).success).toBe(true);
+    expect(WebFormSubmitInput.safeParse({ ...FORM, timeout_ms: 540_001 }).success).toBe(false);
+    expect(WebFormSubmitInput.safeParse({ ...FORM, retry_on_captcha_rejection: 5 }).success).toBe(false);
+    expect(WebFormSubmitInput.safeParse({ ...FORM, retry_on_captcha_rejection: 1.5 }).success).toBe(false);
     expect(WebFormSubmitInput.safeParse({ ...FORM, score_gate_tries: 7 }).success).toBe(false);
     expect(WebFormSubmitInput.safeParse({ ...FORM, score_threshold: 1.5 }).success).toBe(false);
   });

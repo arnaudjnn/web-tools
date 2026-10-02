@@ -128,6 +128,52 @@ describe('web_form_submit outcomes', () => {
     });
   });
 
+  it('passes retry_on_captcha_rejection, captcha_rejection_text and score_threshold through', async () => {
+    const { calls } = await submitWith(() => ({ json: { ok: true } }), {
+      ...FORM,
+      retry_on_captcha_rejection: 2,
+      captcha_rejection_text: 'verifica non riuscita',
+      score_threshold: 0.8,
+      timeout_ms: 540_000,
+    });
+    expect(calls[0]!.body).toMatchObject({
+      retry_on_captcha_rejection: 2,
+      captcha_rejection_text: 'verifica non riuscita',
+      score_threshold: 0.8,
+      timeout_ms: 540_000,
+    });
+    // 0 is the default: not sent.
+    const plain = await submitWith(() => ({ json: { ok: true } }), { ...FORM, retry_on_captcha_rejection: 0 });
+    expect(plain.calls[0]!.body).not.toHaveProperty('retry_on_captcha_rejection');
+  });
+
+  it('a retried run carries attempts[] and the total form_submissions', async () => {
+    const answer = {
+      contract_version: 2, ok: true, form_submissions: 2, status: 302, url: 'https://www.example.it/done', error: null,
+      attempts: [
+        { n: 1, error: 'wizard_rejected', ok: false, status: 200, form_submissions: 1, score_gate_score: 0.8, asn: 3269 },
+        { n: 2, error: null, ok: true, status: 302, form_submissions: 1, score_gate_score: 0.9, asn: 1267 },
+      ],
+    };
+    const { body } = await submitWith(() => ({ json: answer }), { ...FORM, retry_on_captcha_rejection: 1 });
+    expect(body).toEqual({ ...answer, retryable: false });
+    // Without retries the sidecar's attempts:null never reaches the caller.
+    const single = await submitWith(() => ({ json: { ...answer, attempts: null } }));
+    expect(single.body).not.toHaveProperty('attempts');
+  });
+
+  it('an unknown retry keeps the known attempts but never a total', async () => {
+    const attempts = [{ n: 1, error: 'wizard_rejected', form_submissions: 1 }, { n: 2, error: 'outcome_unknown', form_submissions: null }];
+    const { body } = await submitWith(() => ({
+      status: 502,
+      json: { detail: { message: 'Form retry outcome unavailable', retryable: false, attempts, form_submissions_before: 1 } },
+    }));
+    expect(body).toEqual({
+      ok: false, retryable: false, outcome: 'unknown', form_submissions: null, status: 502,
+      error: 'Form retry outcome unavailable', attempts, form_submissions_before: 1,
+    });
+  });
+
   it('sends the minimal body by default; fresh_ip:false is honoured', async () => {
     const { calls } = await submitWith(() => ({ json: { ok: true } }), { ...FORM, fresh_ip: false, wait_ms: 'soon' });
     expect(calls[0]!.body).toEqual({ url: FORM.url, fields: FORM.fields, submit: 'button', timeout_ms: 120_000, fresh_ip: false });

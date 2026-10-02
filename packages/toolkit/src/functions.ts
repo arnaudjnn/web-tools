@@ -389,7 +389,13 @@ function formFailure(err: unknown): Record<string, unknown> {
       error: status === 422 ? JSON.stringify(detail ?? reason).slice(0, 500) : reason,
     };
   }
-  return { ok: false, retryable: false, outcome: 'unknown', form_submissions: null, status: status ?? 0, error: reason };
+  // A retry whose outcome is unknown (retry_on_captcha_rejection): the
+  // earlier attempts' POSTs are known and reported; the total is not.
+  const retried = detail && typeof detail === 'object' ? (detail as { attempts?: unknown; form_submissions_before?: unknown }) : undefined;
+  return {
+    ok: false, retryable: false, outcome: 'unknown', form_submissions: null, status: status ?? 0, error: reason,
+    ...(Array.isArray(retried?.attempts) ? { attempts: retried.attempts, form_submissions_before: retried.form_submissions_before } : {}),
+  };
 }
 
 function formResult(tool: 'web_form_submit' | 'web_form_inspect', body: Record<string, unknown>, isError: boolean): ToolResult {
@@ -448,10 +454,15 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       scoreGateTries: typeof params.score_gate_tries === 'number' ? params.score_gate_tries : undefined,
       // The gate probes OUR oracle; the sidecar only gates when it has one.
       oracleUrl: params.score_gate === false || params.inspect_only === true ? undefined : (Config.oracleUrl ?? undefined),
+      retryOnCaptchaRejection: typeof params.retry_on_captcha_rejection === 'number' ? params.retry_on_captcha_rejection : undefined,
+      captchaRejectionText: typeof params.captcha_rejection_text === 'string' ? params.captcha_rejection_text : undefined,
     });
     // An answered run is never auto-replayable, whatever its outcome: the
     // only sanctioned replay is the 503 below.
-    return formResult('web_form_submit', { ...r, retryable: false }, false);
+    // The sidecar's model always carries `attempts` (null unless retrying):
+    // a single-attempt answer keeps its v2 shape.
+    const { attempts, ...answer } = r;
+    return formResult('web_form_submit', { ...answer, ...(attempts ? { attempts } : {}), retryable: false }, false);
   } catch (err) {
     const failure = formFailure(err);
     log('web_form_submit failed:', failure.outcome, failure.status);

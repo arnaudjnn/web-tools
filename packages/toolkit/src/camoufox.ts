@@ -40,7 +40,12 @@ export type CamoufoxRender = { status: number; url: string; html: string };
 export type CamoufoxScreenshot = { status: number; url: string; b64: string };
 export type CamoufoxEval = { status: number; url: string; result: unknown };
 export type CamoufoxBytes = { status: number; b64: string };
-export type CamoufoxFormSubmit = { contract_version: number; form_submissions: number; error: string | null; status: number; url: string; html: string; ok: boolean; exit_session: string; diagnostics: Record<string, unknown> };
+export type CamoufoxFormSubmit = {
+  contract_version: number; form_submissions: number; error: string | null; status: number; url: string; html: string; ok: boolean;
+  exit_session: string; diagnostics: Record<string, unknown>;
+  /** With retry_on_captcha_rejection: one entry per attempt; form_submissions is then the total. */
+  attempts?: Array<Record<string, unknown>> | null;
+};
 export type CamoufoxSpaFetch = { status: number; text: string };
 
 export type CamoufoxFormInspect = {
@@ -186,6 +191,11 @@ export function camoufoxFormSubmit(params: {
   scoreGateTries?: number;
   /** The score oracle the gate probes (Config.oracleUrl). */
   oracleUrl?: string;
+  /** Fresh attempts after an explicit step-0 CAPTCHA refusal only (0-4;
+   *  the sidecar decides, form_retry.py). */
+  retryOnCaptchaRejection?: number;
+  /** Regex every error node must match to count as that refusal. */
+  captchaRejectionText?: string;
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 120_000;
   return formsCall<CamoufoxFormSubmit>(
@@ -219,6 +229,8 @@ export function camoufoxFormSubmit(params: {
       ...(params.scoreThreshold !== undefined ? { score_threshold: params.scoreThreshold } : {}),
       ...(params.scoreGateTries !== undefined ? { score_gate_tries: params.scoreGateTries } : {}),
       ...(params.oracleUrl ? { oracle_url: params.oracleUrl } : {}),
+      ...(params.retryOnCaptchaRejection ? { retry_on_captcha_rejection: params.retryOnCaptchaRejection } : {}),
+      ...(params.captchaRejectionText ? { captcha_rejection_text: params.captchaRejectionText } : {}),
     },
     timeoutMs + 60_000,
   );

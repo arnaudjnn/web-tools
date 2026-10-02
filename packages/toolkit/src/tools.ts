@@ -175,6 +175,7 @@ export const tools: ToolDefinition[] = [
       "form_submissions, the POST's status, ok and the resulting page. How to: call " +
       'web_form_inspect first, take its `suggested` (add values; skip honeypots), then submit ' +
       'once. Multi-step forms: gate_text, step2, step2_submit, completion_markers. ' +
+      'retry_on_captcha_rejection: fresh attempts only after an explicit step-0 CAPTCHA refusal (attempts[] in the result). ' +
       'Replay rule: replay only when the result has retryable:true (nothing was sent); ' +
       'never on outcome:"unknown" (a POST may have left) and never on an answered result. ' +
       'Persist your own reservation before calling.',

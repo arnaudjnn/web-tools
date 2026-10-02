@@ -196,6 +196,14 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   under the threshold. `diagnostics.score_gate` records what was tried. The
   implicit gate is skipped (`timeout_too_short`) below 165 s (305 s for a
   wizard), i.e. at the 120 s default.
+- **The gate cannot pick the winner** (Atoka 2026-10-03: passing exits
+  scored 0.7–0.9, step-0 refusals 0.7–0.8 — the target scores per site).
+  `retry_on_captcha_rejection` (0–4, `form_retry.py`) re-attempts ONLY an
+  explicit step-0 CAPTCHA refusal (one 2xx POST, same URL, every error node
+  matching `captcha_rejection_text`) on a new context + new exit, re-gated;
+  never with a pinned exit/profile, never past the deadline. `timeout_ms` may
+  then go to 540000 (undici's 600 s header timeout minus the client slack).
+  `form_submissions` is the total; `attempts[]` lists each.
 
 ## reCAPTCHA v3 score oracle (G2)
 

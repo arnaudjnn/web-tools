@@ -210,9 +210,11 @@ export const WebFormSubmitInput = z.object({
   timeout_ms: z
     .number()
     .min(1000)
-    .max(360000)
+    .max(540000)
     .optional()
-    .describe('Whole-run deadline incl. the score gate (default: 120000; a wizard needs ~240000, plus ~90000 when gated)'),
+    .describe(
+      'Whole-run deadline incl. the score gate and any retries (default: 120000; a wizard needs ~240000, plus ~90000 when gated). Above 360000 only with retry_on_captcha_rejection',
+    ),
   fresh_ip: z.boolean().optional().describe('New context + exit IP (default: true)'),
   exit_session: z
     .string()
@@ -262,6 +264,21 @@ export const WebFormSubmitInput = z.object({
     ),
   score_threshold: z.number().min(0).max(1).optional().describe('Score gate threshold (default: 0.7)'),
   score_gate_tries: z.number().int().min(1).max(6).optional().describe('Exits the score gate probes at most (default: 3)'),
+  retry_on_captcha_rejection: z
+    .number()
+    .int()
+    .min(0)
+    .max(4)
+    .optional()
+    .describe(
+      'Fresh attempts (new context, new exit, re-gated) ONLY after an explicit step-0 CAPTCHA refusal: one 2xx POST, same URL, every error node matching captcha_rejection_text. Never with a pinned exit_session/profile; each must fit timeout_ms. Default 0. Result adds attempts[] and form_submissions is the total',
+    ),
+  captcha_rejection_text: z
+    .string()
+    .min(1)
+    .max(300)
+    .optional()
+    .describe("Regex (case-insensitive) every error node of the re-rendered form must match (default: 'error verifying recaptcha|captcha (?:non |in)?valid|recaptcha')"),
 });
 
 export const WebFormInspectInput = z.object({
