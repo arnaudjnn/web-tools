@@ -57,6 +57,10 @@ CONFIGS: dict[str, tuple] = {
     "dwell-0": ("as baseline, no dwell after load", None, lambda tag, i: {"wait_ms": 0}),
     "dwell-15s": ("as baseline, 15 s dwell after load", None, lambda tag, i: {"wait_ms": 15000}),
     "dwell-40s": ("as baseline, 40 s dwell after load", None, lambda tag, i: {"wait_ms": 40000}),
+    # Google's challenge_ts measured ~= page load, not execute(): does a long
+    # dwell (Atoka's step0 fill is 60-140 s) age the token toward expiry?
+    "dwell-60s": ("as baseline, 60 s dwell after load (token-age test)", None,
+                  lambda tag, i: {"wait_ms": 60000, "timeout_ms": 180000}),
     "typing-1": ("as baseline, 1 field typed", None, lambda tag, i: {"field_count": 1}),
     "typing-3": ("as baseline, 3 fields typed", None, lambda tag, i: {"field_count": 3}),
 }
@@ -112,7 +116,14 @@ def run(configs, n, tag, label, out_path, key, threshold):
                    "error": result.get("error") or (result.get("form") or {}).get("error"),
                    "codes": result.get("error-codes"), "egress": result.get("egress"),
                    "blocked": result.get("blocked"), "exit_ip_changed": result.get("exit_ip_changed"),
-                   "dwell_s": (result.get("verdict") or {}).get("page_dwell_s")}
+                   "dwell_s": (result.get("verdict") or {}).get("page_dwell_s"),
+                   "token_age_s": (result.get("verdict") or {}).get("token_age_s"),
+                   "subs": (result.get("form") or {}).get("form_submissions"),
+                   # POSTed but no verdict read back: Google may still have
+                   # scored it (Tools logs `oracle verdict`) — a probe miss,
+                   # not a score.
+                   "capture_miss": bool((result.get("form") or {}).get("form_submissions")
+                                        and result.get("verdict") is None)}
             rows.append(row)
             if sink:
                 sink.write(json.dumps(row) + "\n")
