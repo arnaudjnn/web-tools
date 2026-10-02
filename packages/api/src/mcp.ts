@@ -5,6 +5,7 @@ export function createServer(): McpServer {
   const server = new McpServer({ name: 'web_tools', version: '1.0.0' }, { capabilities: { logging: {} } });
 
   for (const tool of tools) {
+    if (tool.restOnly) continue;
     const handler = functionMap[tool.name];
     server.registerTool(
       tool.name,

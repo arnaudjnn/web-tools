@@ -238,6 +238,10 @@ export const WebFormSubmitInput = z.object({
     .max(10)
     .optional()
     .describe('Wizard: regexes on body text meaning done when the URL never changes'),
+  sticky_exit: z
+    .boolean()
+    .optional()
+    .describe("With a profile: reuse the exit pinned in the profile (pin one on first use). Default: the sidecar's FORM_PROFILE_STICKY_EXIT"),
   stop_after_posts: z
     .number()
     .int()
@@ -341,3 +345,10 @@ export const WebRecycleInput = z
 export const WebUsageStatsInput = z
   .object({})
   .describe('Process-local usage counters. No parameters.');
+
+// REST-only stealth-score diagnostics: the sidecar's pydantic models validate
+// the fields (services/camoufox/score_probe.py), so this stays an open record.
+export const WebStealthDiagnosticInput = z
+  .object({})
+  .passthrough()
+  .describe('Passed through to the Camoufox stealth-score endpoint (fields: score_probe.py).');

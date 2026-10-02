@@ -9,7 +9,9 @@ import {
   camoufoxRender,
   camoufoxScreenshot,
   camoufoxSpaFetch,
+  camoufoxStealth,
 } from './camoufox.js';
+import { Config } from './config.js';
 import { web_agent } from './agent.js';
 import { errMsg, log } from './log.js';
 import { renderMarkdown } from './markdown.js';
@@ -433,6 +435,7 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       completionMarkers: params.completion_markers as string[] | undefined,
       profile: params.profile as string | undefined,
       stopAfterPosts: typeof params.stop_after_posts === 'number' ? params.stop_after_posts : undefined,
+      stickyExit: typeof params.sticky_exit === 'boolean' ? params.sticky_exit : undefined,
     });
     // An answered run is never auto-replayable, whatever its outcome: the
     // only sanctioned replay is the 503 below.
@@ -559,6 +562,21 @@ function instrument(tool: ToolName, impl: (params: any) => Promise<ToolResult>) 
   };
 }
 
+// Stealth-score diagnostics (REST-only): the FORM browser's reCAPTCHA v3 score
+// against OUR key (packages/api/src/oracle.ts) — the only score to tune on.
+function stealth(path: string, needsOracle: boolean) {
+  return async (params: Record<string, unknown>): Promise<ToolResult> => {
+    const body: Record<string, unknown> = { ...params };
+    const oracle = Config.oracleUrl;
+    if (needsOracle && !body.oracle_url && oracle) body.oracle_url = oracle;
+    if (path === '/form-warm' && !body.target_url && oracle) body.target_url = new URL(oracle).origin + '/';
+    if (needsOracle && !body.oracle_url) {
+      return { content: [{ type: 'text', text: 'oracle URL unknown (set RECAPTCHA_ORACLE_URL or pass oracle_url)' }], isError: true };
+    }
+    return { content: [{ type: 'text', text: JSON.stringify(await camoufoxStealth(path, body)) }], isError: false };
+  };
+}
+
 const impls: Record<ToolName, (params: any) => Promise<ToolResult>> = {
   web_search,
   web_fetch,
@@ -577,6 +595,10 @@ const impls: Record<ToolName, (params: any) => Promise<ToolResult>> = {
   web_spa_fetch,
   web_recycle,
   web_agent,
+  web_form_score_probe: stealth('/form-score-probe', true),
+  web_form_warm: stealth('/form-warm', false),
+  web_form_exit_select: stealth('/form-exit-select', true),
+  web_form_exits: stealth('/form-exits', false),
 };
 
 /** Every tool, instrumented: counted in /stats, never throws. Inputs must be validated. */

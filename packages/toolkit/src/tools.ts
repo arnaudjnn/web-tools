@@ -17,6 +17,7 @@ import {
   WebFormSubmitInput,
   WebFormInspectInput,
   WebAgentInput,
+  WebStealthDiagnosticInput,
 } from './schemas.js';
 import type { ToolDefinition, ToolName } from './types.js';
 
@@ -260,6 +261,38 @@ export const tools: ToolDefinition[] = [
       idempotentHint: true,
       openWorldHint: false,
     },
+  },
+  // REST-only (restOnly): the form browser's reCAPTCHA v3 score against our
+  // own oracle — a tuning instrument, not an agent capability. Never on MCP.
+  {
+    name: 'web_form_score_probe',
+    description:
+      'One oracle-scored run of the form browser (same path as web_form_submit): {score, egress, exit_session}. ' +
+      'Fields: profile, headed, fresh_ip, exit_session, sticky_exit, wait_ms, field_count, action, threshold, timeout_ms.',
+    parameters: WebStealthDiagnosticInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    restOnly: true,
+  },
+  {
+    name: 'web_form_warm',
+    description: 'Warm a named profile on its pinned exit: google.com, youtube.com, then target_url, with dwell and scroll.',
+    parameters: WebStealthDiagnosticInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    restOnly: true,
+  },
+  {
+    name: 'web_form_exit_select',
+    description: 'Probe candidate exits with the oracle (blocklisted IPs/ASNs skipped) and pin the first passing one to `profile`.',
+    parameters: WebStealthDiagnosticInput,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    restOnly: true,
+  },
+  {
+    name: 'web_form_exits',
+    description: 'The exit-quality blocklist and the exits pinned per profile.',
+    parameters: WebStealthDiagnosticInput,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    restOnly: true,
   },
 ];
 

@@ -72,7 +72,6 @@ import random
 import re
 import secrets
 import threading
-import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -87,6 +86,8 @@ from form_flow import FormLive, validate_form
 from form_worker import FormRetryable, FormWorker, run_isolated_form
 import form_inspect
 import launch_health
+import profile_store
+import score_probe
 
 
 PROXY_URL = os.environ.get("PROXY_URL", "")
@@ -638,9 +639,9 @@ _CAMOUFOX_VERSION = _camoufox_version()
 
 
 def _profile_dir(profile: str) -> str:
-    root = os.environ.get("FORM_PROFILE_DIR") or os.path.join(
-        tempfile.gettempdir(), "form-profiles")
-    return os.path.join(root, profile)
+    # FORM_PROFILE_DIR must point at a Railway VOLUME in production: the
+    # default under the temp dir is wiped by every redeploy. See profile_store.
+    return profile_store.profile_dir(profile)
 
 
 def _form_browser(session, main_world_eval=False, headed=False, profile=None):
@@ -664,16 +665,15 @@ def _form_browser(session, main_world_eval=False, headed=False, profile=None):
     # worker's single admission, so the profile dir is never opened twice.
     directory = _profile_dir(profile)
     os.makedirs(directory, exist_ok=True)
-    opts_file = os.path.join(directory, "fingerprint.json")
-    if os.path.exists(opts_file):
-        with open(opts_file) as handle:
-            opts = json.load(handle)
-    else:
+    # profile_store strips its own meta (the pinned exit) and returns None
+    # for options drawn for a browser build this image no longer ships (an
+    # upgrade on a persistent volume): redraw then, keep the cookies.
+    opts = profile_store.load_launch_opts(directory)
+    if opts is None:
         opts = launch_options(headless=headless, geoip=True, humanize=True, proxy=proxy,
                               timeout=30000, main_world_eval=main_world_eval,
                               user_data_dir=directory)
-        with open(opts_file, "w") as handle:
-            json.dump(opts, handle)
+        profile_store.save_launch_opts(directory, opts)
     opts["proxy"] = proxy
     opts["headless"] = headless
     opts["user_data_dir"] = directory
@@ -980,6 +980,7 @@ class FormSubmitRequest(BaseModel):
     step2_submit: str | None = Field(None, max_length=300, description="CSS selector of step2's submit control; defaults to 'form button'")
     completion_markers: list[str] = Field(default_factory=list, max_length=10, description="regexes on body text; a match counts as completion even when the URL does not change")
     profile: str | None = Field(None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$", description="named persistent profile: warm cookies/fingerprint reused across submissions (empty = isolated, default)")
+    sticky_exit: bool | None = Field(None, description="with a profile: reuse the exit pinned in its fingerprint.json (pin a new one on first use); None = FORM_PROFILE_STICKY_EXIT")
 
 
 class FormSubmitResponse(BaseModel):
@@ -1003,7 +1004,7 @@ async def form_submit(req: FormSubmitRequest):
         validate_form(req.url, req.submission_urls, req.success_url, req.gate_text, req.completion_markers)
     except (ValueError, re.error) as e:
         raise HTTPException(status_code=400, detail=str(e))
-    session = req.exit_session or (secrets.token_hex(6) if req.fresh_ip else _form_proxy_session)
+    session, pin = _resolve_form_session(req.profile, req.exit_session, req.fresh_ip, req.sticky_exit)
     # One per job: the pre-POST mark the worker polls and the job's single
     # `form-run {json}` summary line (no values, tokens or bodies).
     live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
@@ -1044,7 +1045,26 @@ async def form_submit(req: FormSubmitRequest):
             "message": "Form never submitted (%s); safe to retry" % data.get("error"),
             "retryable": True,
         })
-    return FormSubmitResponse(**data, exit_session=req.exit_session or "")
+    # A profile-pinned exit is reported back (the caller did not choose it);
+    # otherwise the contract is unchanged: echo what the caller passed.
+    return FormSubmitResponse(**data, exit_session=req.exit_session or (session if req.profile and _sticky(req.sticky_exit) else ""))
+
+
+def _sticky(flag) -> bool:
+    return profile_store.sticky_default() if flag is None else bool(flag)
+
+
+def _resolve_form_session(profile, exit_session, fresh_ip, sticky_exit):
+    """Exit token for one form browser; pins it to a sticky profile up front
+    (before launch) so the identity stays on the exit it was first seen from
+    even when the outcome is unknown."""
+    session, pin = profile_store.resolve_exit_session(
+        profile=profile, exit_session=exit_session, fresh_ip=fresh_ip,
+        sticky=_sticky(sticky_exit), shared=_form_proxy_session,
+        new_token=lambda: secrets.token_hex(6))
+    if pin:
+        profile_store.remember_exit(profile, session)
+    return session, pin
 
 
 def _retryable_zero_post(data: dict) -> bool:
@@ -1073,6 +1093,12 @@ def _retryable_zero_post(data: dict) -> bool:
 # Read-only sibling of /form-submit: same browser path and admission.
 form_inspect.register(app, worker=_form_worker, form_browser=_form_browser,
                       shared_session=_form_proxy_session, camoufox=_CAMOUFOX_VERSION)
+
+# Stealth-score diagnostics: oracle probe, warm routine, exit selection —
+# the SAME factory, worker and launch path as /form-submit (score_probe.py).
+score_probe.register(app, worker=_form_worker, browser_factory=_form_browser,
+                     run_isolated=run_isolated_form, resolve_session=_resolve_form_session,
+                     camoufox=_CAMOUFOX_VERSION)
 
 
 class BytesRequest(BaseModel):

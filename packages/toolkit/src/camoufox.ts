@@ -163,6 +163,9 @@ export function camoufoxFormSubmit(params: {
   profile?: string;
   /** Wizard warm-up: stop once this many POSTs were answered (1-3). */
   stopAfterPosts?: number;
+  /** With a profile: reuse the exit pinned in its fingerprint.json (pin one
+   *  on first use). Omit = the sidecar's FORM_PROFILE_STICKY_EXIT. */
+  stickyExit?: boolean;
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 120_000;
   return call<CamoufoxFormSubmit>(
@@ -191,9 +194,17 @@ export function camoufoxFormSubmit(params: {
       ...(params.completionMarkers ? { completion_markers: params.completionMarkers } : {}),
       ...(params.profile ? { profile: params.profile } : {}),
       ...(params.stopAfterPosts ? { stop_after_posts: params.stopAfterPosts } : {}),
+      ...(params.stickyExit !== undefined ? { sticky_exit: params.stickyExit } : {}),
     },
     timeoutMs + 60_000,
   );
+}
+
+/** Stealth-score diagnostics (services/camoufox/score_probe.py): the body is
+ *  passed through in snake_case; the client waits a minute past timeout_ms. */
+export function camoufoxStealth(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const timeoutMs = typeof body.timeout_ms === 'number' ? body.timeout_ms : 180_000;
+  return call<Record<string, unknown>>(path, body, timeoutMs + 60_000);
 }
 
 /** Read-only: the page's forms, fields, submit, CAPTCHA, honeypots, banners.

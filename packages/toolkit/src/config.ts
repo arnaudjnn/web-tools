@@ -7,6 +7,10 @@ const envSchema = z.object({
   API_KEY: z.string().min(1, 'API_KEY is required'),
   SCRAPLING_URL: z.string().default('http://scrapling.railway.internal:8000'),
   CAMOUFOX_URL: z.string().default('http://camoufox.railway.internal:8000'),
+  // Score oracle (packages/api/src/oracle.ts): served on THIS service's public
+  // domain (the one registered on the reCAPTCHA key).
+  RECAPTCHA_ORACLE_URL: z.string().url().optional(),
+  RAILWAY_PUBLIC_DOMAIN: z.string().optional(),
 });
 // No PROXY_* here and never will be: proxy credentials belong to the sidecars
 // that own the egress (services/scrapling, services/camoufox), not to the
@@ -27,6 +31,10 @@ export const Config = {
   camoufox: {
     url: env.CAMOUFOX_URL,
   },
+  // Where the form browser finds the score oracle (via its residential exit).
+  oracleUrl:
+    env.RECAPTCHA_ORACLE_URL ??
+    (env.RAILWAY_PUBLIC_DOMAIN ? `https://${env.RAILWAY_PUBLIC_DOMAIN}/oracle/recaptcha` : null),
   // Must stay comfortably ABOVE SearXNG's own `outgoing.request_timeout`
   // (15s in services/searxng/settings.yml). At 15 it raced SearXNG exactly:
   // responses landed at ~15.13s, the client aborted at 15.00s, and every

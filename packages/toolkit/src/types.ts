@@ -21,6 +21,11 @@ export const TOOL_NAMES = [
   'web_recycle',
   'web_usage_stats',
   'web_agent',
+  // REST-only stealth-score diagnostics (restOnly below; services/camoufox/score_probe.py).
+  'web_form_score_probe',
+  'web_form_warm',
+  'web_form_exit_select',
+  'web_form_exits',
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -39,6 +44,8 @@ export type ToolDefinition = {
   annotations: ToolAnnotations;
   /** 'data': REST answers with the bare JSON payload (`ToolResult.data`), 500 on error. */
   output?: 'data';
+  /** Served on REST only, never registered on MCP (tuning diagnostics). */
+  restOnly?: true;
 };
 
 // ── Results ──────────────────────────────────────────────────────────
