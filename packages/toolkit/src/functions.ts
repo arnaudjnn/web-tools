@@ -593,6 +593,7 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       step2Submit: params.step2_submit as string | undefined,
       completionMarkers: params.completion_markers as string[] | undefined,
       profile: params.profile as string | undefined,
+      stopAfterPosts: typeof params.stop_after_posts === 'number' ? params.stop_after_posts : undefined,
     });
     return trace('web_form_submit', {
       content: [

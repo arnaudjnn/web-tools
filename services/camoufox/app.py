@@ -80,6 +80,7 @@ from pydantic import BaseModel, Field
 
 from camoufox.sync_api import Camoufox
 from camoufox.utils import launch_options
+from form_flow import validate_form
 from form_worker import FormRetryable, FormWorker, run_isolated_form
 import launch_health
 
@@ -975,6 +976,12 @@ class FormSubmitResponse(BaseModel):
 @app.post("/form-submit", response_model=FormSubmitResponse)
 async def form_submit(req: FormSubmitRequest):
     deadline = time.monotonic() + req.timeout_ms / 1000
+    try:
+        # Before admission: a bad regex is the caller's error (400), never a
+        # launched browser that dies as an unknown 502.
+        validate_form(req.url, req.submission_urls, req.success_url, req.gate_text, req.completion_markers)
+    except (ValueError, re.error) as e:
+        raise HTTPException(status_code=400, detail=str(e))
     session = req.exit_session or (secrets.token_hex(6) if req.fresh_ip else _form_proxy_session)
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.

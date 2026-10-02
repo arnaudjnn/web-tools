@@ -69,7 +69,8 @@ def not_started(url, error):
 
 def run_isolated_form(browser_factory, *, deadline, **params):
     """No request can reach the target until browser and context are ready."""
-    validate_form(params["url"], params.get("submission_urls"), params.get("success_url"))
+    validate_form(params["url"], params.get("submission_urls"), params.get("success_url"),
+                  params.get("gate_text"), params.get("completion_markers"))
     manager = context = None
     context_owned = True
     try:

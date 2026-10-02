@@ -179,7 +179,7 @@ export const WebFormSubmitInput = z.object({
   wait_until: z.enum(['load', 'domcontentloaded', 'networkidle', 'commit']).optional(),
   wait_ms: z.number().min(0).max(60000).optional().describe('Settle after load (default: 4000)'),
   settle_ms: z.number().min(1000).max(120000).optional().describe('Wait for the outcome (default: 20000)'),
-  timeout_ms: z.number().min(1000).max(180000).optional(),
+  timeout_ms: z.number().min(1000).max(240000).optional().describe('Whole-run deadline (default: 120000; a wizard needs ~240000)'),
   fresh_ip: z.boolean().optional().describe('New context + exit IP (default: true)'),
   exit_session: z
     .string()
@@ -222,6 +222,13 @@ export const WebFormSubmitInput = z.object({
     .max(64)
     .optional()
     .describe('Named persistent profile: warm cookies + fingerprint reused across submissions (empty = isolated)'),
+  stop_after_posts: z
+    .number()
+    .int()
+    .min(1)
+    .max(3)
+    .optional()
+    .describe('Wizard warm-up: stop once this many form POSTs have been answered (e.g. 1 = step0 only)'),
 });
 
 export const WebEvalInput = z.object({

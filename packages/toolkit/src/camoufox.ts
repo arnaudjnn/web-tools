@@ -172,6 +172,8 @@ export function camoufoxFormSubmit(params: {
   completionMarkers?: string[];
   /** Named persistent profile (warm cookies/fingerprint); omit = isolated. */
   profile?: string;
+  /** Wizard warm-up: stop once this many POSTs were answered (1-3). */
+  stopAfterPosts?: number;
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 120_000;
   return call<CamoufoxFormSubmit>(
@@ -199,6 +201,7 @@ export function camoufoxFormSubmit(params: {
       ...(params.step2Submit ? { step2_submit: params.step2Submit } : {}),
       ...(params.completionMarkers ? { completion_markers: params.completionMarkers } : {}),
       ...(params.profile ? { profile: params.profile } : {}),
+      ...(params.stopAfterPosts ? { stop_after_posts: params.stopAfterPosts } : {}),
     },
     timeoutMs + 60_000,
   );
