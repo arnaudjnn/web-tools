@@ -67,8 +67,11 @@ def not_started(url, error):
             "diagnostics": {"submit_click_attempted": False, "token_present": None}}
 
 
-def run_isolated_form(browser_factory, *, deadline, **params):
-    """No request can reach the target until browser and context are ready."""
+def run_isolated_form(browser_factory, *, deadline, runner=None, **params):
+    """No request can reach the target until browser and context are ready.
+
+    `runner` replaces run_form for a read-only job (form_inspect) that shares
+    the same launch, retry and teardown."""
     validate_form(params["url"], params.get("submission_urls"), params.get("success_url"),
                   params.get("gate_text"), params.get("completion_markers"))
     manager = context = None
@@ -128,7 +131,7 @@ def run_isolated_form(browser_factory, *, deadline, **params):
         # Do not catch unexpected exceptions here as "zero submissions": once
         # page execution starts, missing evidence means an unknown outcome.
         log.info("form phase: entering run_form (budget=%sms)", budget)
-        return run_form(context, timeout_ms=budget, **params)
+        return (runner or run_form)(context, timeout_ms=budget, **params)
     finally:
         closes = []
         if context is not None and context_owned:

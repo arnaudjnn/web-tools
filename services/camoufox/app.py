@@ -39,6 +39,9 @@ POST /form-submit { url, fields[], submit, dismiss?, success_url?, fresh_ip? }
                             # isolated, single attempt; never replayed on failure
                             # CAPTCHA: the page's own handler mints any token
                             # (observation only: captcha_field/require_captcha_token)
+POST /form-inspect { url, wait_ms?, exit_session?, headed?, profile? }
+    → { forms[{fields, submit_candidates, honeypot_candidates, suggested}],
+        captcha, cookie_banners, wizard }  # read-only; never fills or clicks
 POST /bytes { url, timeout_ms? }
     → { status, b64 }       # residential binary fetch (PDFs) through the same exit
 POST /recycle {}           # drop both the Akamai warmed session and the render browser
@@ -82,6 +85,7 @@ from camoufox.sync_api import Camoufox
 from camoufox.utils import launch_options
 from form_flow import validate_form
 from form_worker import FormRetryable, FormWorker, run_isolated_form
+import form_inspect
 import launch_health
 
 
@@ -1043,6 +1047,11 @@ def _retryable_zero_post(data: dict) -> bool:
         and data.get("form_submissions") == 0
         and not diagnostics.get("submit_click_attempted")
     )
+
+
+# Read-only sibling of /form-submit: same browser path and admission.
+form_inspect.register(app, worker=_form_worker, form_browser=_form_browser,
+                      shared_session=_form_proxy_session)
 
 
 class BytesRequest(BaseModel):

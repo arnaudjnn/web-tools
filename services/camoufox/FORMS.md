@@ -142,6 +142,37 @@ Omit `profile` for the default isolated browser per submit. Profiles are
 per-replica (ephemeral filesystem) and never opened concurrently — the form
 worker's admission is serial.
 
+`/form-inspect` (Tools: `web_form_inspect`, module `form_inspect.py`) is
+the read-only step an agent takes BEFORE submitting. It runs under the same form
+worker admission, the same `_form_browser` launch path (exit, `headed`,
+`profile`) and the same `run_isolated_form` launch retry and teardown. It never
+fills, clicks or dismisses anything, and its route guard aborts every
+non-GET/HEAD/OPTIONS request to ANY origin. That is stricter than
+`inspect_only`, which blocks same-origin only: an inspection has no reason to
+send even a beacon. For each visible form it returns stable selectors (`#id`,
+else `tag[name="..."]`, scoped by the form when that name is ambiguous), the
+`/form-submit` field `action`, labels, `required` (HTML, aria, or a trailing
+`*`), select/radio options, submit candidates and honeypot candidates. A
+hidden, offscreen, aria-hidden or `tabindex=-1` text input counts as a
+honeypot. So does a trap-like name. A hidden container holding several
+controls does not: that is a later wizard step. Each form also gets a
+`suggested` `/form-submit` skeleton. Page-wide, it reports CAPTCHA providers
+(reCAPTCHA v2/invisible/v3/enterprise, hCaptcha, Turnstile; presence of a
+sitekey, never the key), cookie-banner dismiss candidates and wizard hints.
+It never returns VALUES: not typed, default, selected or hidden ones (only the
+names of hidden inputs). Every failure is a 503 `retryable: true`, since
+nothing can have been submitted. A form inside a child frame carries
+`frame_url`; `/form-submit` drives only the main frame.
+
+The toolkit turns a failed `/form-submit` into structured JSON
+(`isError: true`), so agents never parse an error string:
+
+- a 503 with `retryable: true` becomes `{ok:false, retryable:true, outcome:"not_submitted", form_submissions:0}`;
+- a 400 or 422 becomes `{retryable:false, outcome:"invalid_request"}`;
+- anything else (a 502, a lost response, a client timeout) becomes `{retryable:false, outcome:"unknown", form_submissions:null}`.
+
+An answered run always carries `retryable: false`.
+
 Tests (only our loopback fixture receives submissions):
 
 ```
