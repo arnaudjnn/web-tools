@@ -198,7 +198,7 @@ class AgentLoop(unittest.TestCase):
         os.environ["CAMOUFOX_URL"] = self.base  # the fake /form-submit above
         call = {"submit_form_via_web_tools": {
             "url": self.base + "/", "submit": "#f button",
-            "fields": [{"selector": "input[name=email]", "value": "secret@example.com"}],
+            "fields": [{"selector": "input[name=email]", "value": "secret@example.com", "action": "type"}],
         }}
         try:
             r = self.run_agent(
@@ -228,6 +228,99 @@ class AgentLoop(unittest.TestCase):
         # the off-fence host must never have been asked for anything.
         self.assertNotIn("localhost", _Handler.get_hosts, r)
         self.assertIn("127.0.0.1", _Handler.get_hosts)
+
+
+@unittest.skipUnless(HAVE_BROWSER, "browser-use not installed in this interpreter")
+class StepSchema(unittest.TestCase):
+    """The per-step schema sent as output_config.format (no network)."""
+
+    def schema(self, **req):
+        tools, out = ar.build_tools({"task": "x", **req}, {"form_budget": 1, "form_submissions": []}, ["e.com"], 1e12)
+        return ar.agent_output_schema(tools, out)
+
+    def test_every_object_is_closed_and_constraint_free(self):
+        def walk(node, in_props=False):
+            if isinstance(node, dict):
+                if not in_props:
+                    if node.get("type") == "object" or "properties" in node:
+                        self.assertIs(node.get("additionalProperties"), False, node)
+                    for bad in ar._UNSUPPORTED_SCHEMA_KEYS:
+                        self.assertNotIn(bad, node)
+                for k, v in node.items():
+                    if k == "properties":
+                        for sub in v.values():
+                            walk(sub)
+                    else:
+                        walk(v)
+            elif isinstance(node, list):
+                for n in node:
+                    walk(n)
+        walk(self.schema(allow_form_submit=True, output_schema={"type": "object", "properties": {"a": {"type": "string"}}}))
+
+    def test_action_envelope_is_compact_and_round_trips(self):
+        s = self.schema(allow_form_submit=True)
+        generic, done = s["properties"]["action"]["items"]["anyOf"]
+        self.assertEqual(set(generic["properties"]), {"name", "params"})
+        self.assertEqual(list(done["properties"]), ["done"])  # the final result stays fully typed
+        names = set(generic["properties"]["name"]["enum"])
+        self.assertIn("submit_form_via_web_tools", names)
+        self.assertIn("click", names)
+        self.assertFalse(names & set(ar.EXCLUDED_ACTIONS))
+        self.assertNotIn("anyOf", json.dumps(generic))  # grammar size no longer grows per action
+
+        tools, _ = ar.build_tools({"task": "x"}, {"form_budget": 1, "form_submissions": []}, ["e.com"], 1e12)
+        from browser_use.agent.views import AgentOutput
+        from browser_use.llm.schema import SchemaOptimizer
+        out = AgentOutput.type_with_custom_actions_no_thinking(tools.registry.create_action_model())
+        self.assertNotIn("thinking", out.model_json_schema()["properties"])  # reasoning_extraction trap
+        _, catalog, spec = ar.compact_action_envelope(
+            ar.to_structured_output_schema(SchemaOptimizer.create_optimized_json_schema(out)))
+        self.assertIn("- evaluate:", catalog)
+        js = 'document.querySelector("h1").textContent'
+        data = {"evaluation_previous_goal": "", "memory": "", "next_goal": "", "action": [
+            {"name": "click", "params": [{"key": "index", "value": "3"}]},
+            {"name": "evaluate", "params": [{"key": "code", "value": js}]},
+            {"name": "scroll", "params": [{"key": "down", "value": "true"}, {"key": "pages", "value": "1"},
+                                          {"key": "index", "value": "null"}]},
+            {"done": {"text": "ok", "success": True, "files_to_display": []}},
+        ]}
+        parsed = out.model_validate(ar.expand_action_envelope(data, spec))
+        dumped = [a.model_dump(exclude_none=True) for a in parsed.action]
+        self.assertEqual(dumped[0], {"click": {"index": 3}})
+        self.assertEqual(dumped[1], {"evaluate": {"code": js}})
+        self.assertEqual(dumped[2]["scroll"]["down"], True)
+        self.assertEqual(dumped[3]["done"]["text"], "ok")
+
+    def test_done_only_step_has_no_empty_enum(self):
+        # browser-use's last step offers `done` alone (DoneAgentOutput).
+        from browser_use.agent.views import AgentOutput
+        from browser_use.llm.schema import SchemaOptimizer
+        tools, _ = ar.build_tools({"task": "x"}, {"form_budget": 1, "form_submissions": []}, ["e.com"], 1e12)
+        done_only = tools.registry.create_action_model(include_actions=["done"])
+        out = AgentOutput.type_with_custom_actions_no_thinking(done_only)
+        s, _, spec = ar.compact_action_envelope(
+            ar.to_structured_output_schema(SchemaOptimizer.create_optimized_json_schema(out)))
+        self.assertEqual(spec, {})
+        self.assertEqual(list(s["properties"]["action"]["items"]["properties"]), ["done"])
+
+
+@unittest.skipUnless(HAVE_BROWSER and os.environ.get("AGENT_LIVE_ANTHROPIC_KEY"), "set AGENT_LIVE_ANTHROPIC_KEY to compile against the API")
+class LiveGrammar(StepSchema):
+    """Costs three tiny requests. Run after touching EXCLUDED_ACTIONS or the bridge:
+    the API rejects an over-large grammar with 400 'compiled grammar is too large'."""
+
+    def test_grammar_compiles_for_every_configuration(self):
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=os.environ["AGENT_LIVE_ANTHROPIC_KEY"])
+        model = os.environ.get("AGENT_LLM_MODEL", "claude-sonnet-5-5")
+        for req in ({}, {"allow_form_submit": True},
+                    {"allow_form_submit": True, "output_schema": {"type": "object", "properties": {"a": {"type": "string"}}}}):
+            with self.subTest(**{k: bool(v) for k, v in req.items()}):
+                client.messages.create(
+                    model=model, max_tokens=64, messages=[{"role": "user", "content": "say done"}],
+                    extra_body={"output_config": {"effort": "low", "format": {"type": "json_schema", "schema": self.schema(**req)}}},
+                )
 
 
 @unittest.skipUnless(HAVE_FASTAPI and HAVE_BROWSER, "fastapi/httpx + browser-use needed for endpoint tests")

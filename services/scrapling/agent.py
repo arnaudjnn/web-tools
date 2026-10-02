@@ -66,6 +66,7 @@ MAX_TIMEOUT_MS = 300_000
 _PASS_ENV = (
     "PATH", "HOME", "LANG", "TMPDIR", "PLAYWRIGHT_BROWSERS_PATH",
     "AGENT_LLM_PROVIDER", "AGENT_LLM_MODEL", "AGENT_LLM_API_KEY", "AGENT_LLM_BASE_URL",
+    "AGENT_LLM_EFFORT", "AGENT_LLM_FALLBACKS",
     "AGENT_PROFILE_DIR", "PROXY_URL", "CAMOUFOX_URL",
 )
 # Providers that run without a key (a local model server; the offline test script).
