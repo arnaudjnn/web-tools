@@ -715,6 +715,7 @@ broken or open.
 | `SEARXNG_URL` | No | SearXNG URL (default: `http://searxng.railway.internal:8080`) |
 | `SCRAPLING_URL` | No | Scrapling URL (default: `http://scrapling.railway.internal:8000`) |
 | `CAMOUFOX_URL` | No | Camoufox URL (default: `http://camoufox.railway.internal:8000`) |
+| `CAMOUFOX_FORMS_URL` | No | Forms-only Camoufox (`CAMOUFOX_ROLE=forms`) that takes every form call (default: `CAMOUFOX_URL`) |
 | `SEARXNG_ENGINES` | No | Default engines (e.g. `"brave,bing"`) |
 | `PROXY_URL` | No | Rotating residential proxy. Set on the **SearXNG**, **Scrapling** and **Camoufox** services, not the server. US-geo for Scrapling, **IT-geo** for Camoufox. |
 

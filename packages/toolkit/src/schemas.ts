@@ -207,7 +207,12 @@ export const WebFormSubmitInput = z.object({
   wait_until: z.enum(['load', 'domcontentloaded', 'networkidle', 'commit']).optional(),
   wait_ms: z.number().min(0).max(60000).optional().describe('Settle after load (default: 4000)'),
   settle_ms: z.number().min(1000).max(120000).optional().describe('Wait for the outcome (default: 20000)'),
-  timeout_ms: z.number().min(1000).max(240000).optional().describe('Whole-run deadline (default: 120000; a wizard needs ~240000)'),
+  timeout_ms: z
+    .number()
+    .min(1000)
+    .max(360000)
+    .optional()
+    .describe('Whole-run deadline incl. the score gate (default: 120000; a wizard needs ~240000, plus ~90000 when gated)'),
   fresh_ip: z.boolean().optional().describe('New context + exit IP (default: true)'),
   exit_session: z
     .string()
@@ -249,6 +254,14 @@ export const WebFormSubmitInput = z.object({
     .max(3)
     .optional()
     .describe('Wizard warm-up: return after this many POSTs (1 = first step only)'),
+  score_gate: z
+    .boolean()
+    .optional()
+    .describe(
+      'Probe candidate exits on our reCAPTCHA oracle first (same launch config) and run the form on the first that scores >= score_threshold. Default: on when headed and no exit_session is pinned; false disables. Nothing reaches the target before it passes; no passing exit = 503 retryable no_scoring_exit',
+    ),
+  score_threshold: z.number().min(0).max(1).optional().describe('Score gate threshold (default: 0.7)'),
+  score_gate_tries: z.number().int().min(1).max(6).optional().describe('Exits the score gate probes at most (default: 3)'),
 });
 
 export const WebFormInspectInput = z.object({

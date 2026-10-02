@@ -7,6 +7,9 @@ const envSchema = z.object({
   API_KEY: z.string().min(1, 'API_KEY is required'),
   SCRAPLING_URL: z.string().default('http://scrapling.railway.internal:8000'),
   CAMOUFOX_URL: z.string().default('http://camoufox.railway.internal:8000'),
+  // The dedicated forms service (Camoufox-Forms: same image, CAMOUFOX_ROLE=forms).
+  // Every form call goes here; unset = the shared Camoufox, as before.
+  CAMOUFOX_FORMS_URL: z.string().optional(),
   // Score oracle (packages/api/src/oracle.ts): served on THIS service's public
   // domain (the one registered on the reCAPTCHA key).
   RECAPTCHA_ORACLE_URL: z.string().url().optional(),
@@ -17,6 +20,11 @@ const envSchema = z.object({
 // process that routes requests.
 
 const env = envSchema.parse(process.env);
+
+/** Where form calls go: CAMOUFOX_FORMS_URL, else the shared CAMOUFOX_URL. */
+export function formsUrl(e: { CAMOUFOX_FORMS_URL?: string; CAMOUFOX_URL: string }): string {
+  return e.CAMOUFOX_FORMS_URL?.trim() || e.CAMOUFOX_URL;
+}
 
 export const Config = {
   apiKey: env.API_KEY,
@@ -30,6 +38,10 @@ export const Config = {
   },
   camoufox: {
     url: env.CAMOUFOX_URL,
+  },
+  // form-submit, form-inspect, score-probe, warm, exit-select, exits.
+  camoufoxForms: {
+    url: formsUrl(env),
   },
   // Where the form browser finds the score oracle (via its residential exit).
   oracleUrl:

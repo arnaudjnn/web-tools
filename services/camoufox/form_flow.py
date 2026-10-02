@@ -76,6 +76,8 @@ CAPTCHA_READY_POLL_MS = 250
 # the gate saw no failure yet, reloaded, and the reload ABORTED the slow
 # download (NS_BINDING_ABORTED) — then the reload failed too.
 CAPTCHA_LIB_INFLIGHT_S = 15.0
+# How long the score probe waits for its submission's response body.
+SUBMISSION_BODY_WAIT_S = 30.0
 # A library body cut mid-transfer on THIS exit: a reload on the same exit
 # repeats it (cf156g 18:47:52: NS_ERROR_NET_PARTIAL_TRANSFER twice). With an
 # unpinned exit the worker relaunches once on a fresh one instead
@@ -515,7 +517,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
              require_captcha_token=False, ready_expression=None,
              gate_text=None, step2=None, step2_submit=None, completion_markers=None,
-             stop_after_posts=None, live=None, exit_rotatable=False):
+             stop_after_posts=None, live=None, exit_rotatable=False,
+             capture_submission_body=False):
     targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
     # The caller (run_isolated_form, via the worker) owns the live object and
     # its summary line; a direct call (tests, fixtures) owns its own.
@@ -661,9 +664,16 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                      "after_response": id(request) in captcha_answered}
             diagnostics["captcha_failed"] = (diagnostics["captcha_failed"] + [entry])[-10:]
 
+    submission_done = []  # the submission POST(s) whose response body fully arrived
+
     def request_finished(request):
         # The library's body fully arrived: the network half of "usable".
         lib_inflight.discard(id(request))
+        try:
+            if capture_submission_body and is_submission(request):
+                submission_done.append(request)
+        except Exception:
+            pass
         try:
             if (captcha_request(request)
                     and captcha_path_class(request.url) == "recaptcha__*.js"):
@@ -1224,6 +1234,26 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             # A page still navigating at the deadline yields no DOM; the
             # url/status/error already captured stay valid evidence.
             result["html"] = ""
+        if capture_submission_body and result["form_submissions"]:
+            # The score probe's verdict is the submission's own RESPONSE: read
+            # it from the wire instead of hoping the page navigated in time
+            # (cf156g: 10/82 scored POSTs lost when the verify page had not
+            # rendered by the outcome wait). Waits up to SUBMISSION_BODY_WAIT_S
+            # for the body to finish; reads it only once finished, so the
+            # read itself cannot block. Never used for real forms' bodies.
+            waited = 0.0
+            while not submission_done and waited < SUBMISSION_BODY_WAIT_S:
+                try:
+                    page.wait_for_timeout(min(250, remaining()))
+                except TimeoutError:
+                    break
+                waited += 0.25
+            if submission_done:
+                try:
+                    response = submission_done[-1].response()
+                    result["submission_body"] = response.text() if response is not None else ""
+                except Exception:
+                    result["submission_body"] = None
         if wizard:
             try:
                 final_text = re.sub(r"\s+", " ",

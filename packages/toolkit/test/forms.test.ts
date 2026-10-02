@@ -11,7 +11,7 @@ const bodyOf = (r: { content: Array<{ type: string; text?: string }> }) => JSON.
 afterEach(() => vi.unstubAllGlobals());
 
 async function submitWith(camoufox: Handler, params: Record<string, unknown> = FORM) {
-  const calls = fakeSidecars({ camoufox, scrapling: () => ({ json: {} }) });
+  const calls = fakeSidecars({ camoufoxForms: camoufox, scrapling: () => ({ json: {} }) });
   const r = await functionMap.web_form_submit(params);
   return { r, body: bodyOf(r), calls };
 }
@@ -61,7 +61,7 @@ describe('web_form_submit outcomes', () => {
   it('is never retried and never falls back to scrapling, whatever the failure', async () => {
     for (const reply of ['refused', 'timeout', { status: 502, text: 'x' }, { status: 503, json: { detail: { retryable: true } } }] as const) {
       const { calls, body } = await submitWith(() => reply);
-      expect(calls.map((c) => `${c.host}${c.path}`)).toEqual(['camoufox/form-submit']);
+      expect(calls.map((c) => `${c.host}${c.path}`)).toEqual(['camoufox-forms/form-submit']);
       expect(body.ok).toBe(false);
     }
   });
@@ -141,17 +141,17 @@ describe('web_form_inspect', () => {
   };
 
   it('passes the sidecar answer through unchanged', async () => {
-    const calls = fakeSidecars({ camoufox: () => ({ json: INSPECT }) });
+    const calls = fakeSidecars({ camoufoxForms: () => ({ json: INSPECT }) });
     const r = await functionMap.web_form_inspect({ url: INSPECT.url });
     expect(r.isError).toBe(false);
     expect(bodyOf(r)).toEqual(INSPECT);
     expect(calls).toEqual([
-      { host: 'camoufox', path: '/form-inspect', body: { url: INSPECT.url, timeout_ms: 60_000, fresh_ip: true } },
+      { host: 'camoufox-forms', path: '/form-inspect', body: { url: INSPECT.url, timeout_ms: 60_000, fresh_ip: true } },
     ]);
   });
 
   it('forwards its options', async () => {
-    const calls = fakeSidecars({ camoufox: () => ({ json: INSPECT }) });
+    const calls = fakeSidecars({ camoufoxForms: () => ({ json: INSPECT }) });
     await functionMap.web_form_inspect({
       url: INSPECT.url, wait_until: 'load', wait_ms: 10, timeout_ms: 5000, fresh_ip: false, exit_session: 'x', headed: true, profile: 'p',
     });
@@ -161,14 +161,14 @@ describe('web_form_inspect', () => {
   });
 
   it('a bad request is not retryable; a transport failure is (it is read-only)', async () => {
-    fakeSidecars({ camoufox: () => ({ status: 422, json: { detail: 'bad url' } }) });
+    fakeSidecars({ camoufoxForms: () => ({ status: 422, json: { detail: 'bad url' } }) });
     expect(bodyOf(await functionMap.web_form_inspect({ url: INSPECT.url }))).toEqual({
       ok: false, retryable: false, form_submissions: 0, status: 422, error: 'bad url',
     });
     fakeSidecars({});
     const down = bodyOf(await functionMap.web_form_inspect({ url: INSPECT.url }));
     expect(down).toMatchObject({ ok: false, retryable: true, form_submissions: 0, status: 0 });
-    expect(down.error).toMatch(/camoufox \/form-inspect unreachable/);
+    expect(down.error).toMatch(/camoufox-forms \/form-inspect unreachable/);
   });
 
   it('requires url', async () => {

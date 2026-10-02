@@ -95,6 +95,13 @@ def step(*actions: dict, goal: str = "next") -> dict:
 
 
 class PureHelpers(unittest.TestCase):
+    def test_form_bridge_prefers_the_dedicated_forms_service(self):
+        both = {"CAMOUFOX_URL": "http://camoufox:8000", "CAMOUFOX_FORMS_URL": "http://camoufox-forms:8000"}
+        self.assertEqual(ar.forms_url(both), "http://camoufox-forms:8000")
+        self.assertEqual(ar.forms_url({"CAMOUFOX_URL": "http://camoufox:8000"}), "http://camoufox:8000")
+        self.assertEqual(ar.forms_url({"CAMOUFOX_URL": "http://c:1", "CAMOUFOX_FORMS_URL": " "}), "http://c:1")
+        self.assertEqual(ar.forms_url({}), "")
+
     def test_normalize_domains(self):
         self.assertEqual(ar.normalize_domains(None, "https://www.example.com/x"), ["example.com"])
         self.assertEqual(ar.normalize_domains(["*.Foo.com", "https://bar.io/p", "foo.com"], None), ["foo.com", "bar.io"])

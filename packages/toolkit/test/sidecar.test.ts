@@ -179,7 +179,7 @@ describe('isUnreachable', () => {
 
 describe('client deadlines sit above the sidecar deadline', () => {
   it('scrapling +25 s, camoufox +30 s, forms +60 s', async () => {
-    fakeSidecars({ scrapling: () => ({ json: {} }), camoufox: () => ({ json: {} }) });
+    fakeSidecars({ scrapling: () => ({ json: {} }), camoufox: () => ({ json: {} }), camoufoxForms: () => ({ json: {} }) });
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     await scraplingFetch({ url: 'https://e.com/', timeoutMs: 10_000 });
     await camoufoxRender({ url: 'https://e.com/', timeoutMs: 10_000 });

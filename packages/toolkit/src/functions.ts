@@ -370,7 +370,14 @@ function formFailure(err: unknown): Record<string, unknown> {
   const detail = err instanceof CamoufoxError ? err.detail : undefined;
   const reason = failureReason(err);
   if (status === 503 && detail && typeof detail === 'object' && (detail as { retryable?: unknown }).retryable === true) {
-    return { ok: false, retryable: true, outcome: 'not_submitted', form_submissions: 0, status, error: reason };
+    // A named zero-POST failure (e.g. no_scoring_exit) keeps its code and
+    // the score gate's record; otherwise the message is the error.
+    const d = detail as { error?: unknown; score_gate?: unknown };
+    return {
+      ok: false, retryable: true, outcome: 'not_submitted', form_submissions: 0, status,
+      error: typeof d.error === 'string' ? d.error : reason,
+      ...(d.score_gate !== undefined ? { score_gate: d.score_gate } : {}),
+    };
   }
   if (status === 400 || status === 422) {
     return {
@@ -436,6 +443,11 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       profile: params.profile as string | undefined,
       stopAfterPosts: typeof params.stop_after_posts === 'number' ? params.stop_after_posts : undefined,
       stickyExit: typeof params.sticky_exit === 'boolean' ? params.sticky_exit : undefined,
+      scoreGate: typeof params.score_gate === 'boolean' ? params.score_gate : undefined,
+      scoreThreshold: typeof params.score_threshold === 'number' ? params.score_threshold : undefined,
+      scoreGateTries: typeof params.score_gate_tries === 'number' ? params.score_gate_tries : undefined,
+      // The gate probes OUR oracle; the sidecar only gates when it has one.
+      oracleUrl: params.score_gate === false || params.inspect_only === true ? undefined : (Config.oracleUrl ?? undefined),
     });
     // An answered run is never auto-replayable, whatever its outcome: the
     // only sanctioned replay is the 503 below.

@@ -9,6 +9,8 @@ export default defineConfig({
       API_KEY: 'test-key',
       SCRAPLING_URL: 'http://scrapling.test:8000',
       CAMOUFOX_URL: 'http://camoufox.test:8000',
+      // The dedicated forms service: every form call must land HERE.
+      CAMOUFOX_FORMS_URL: 'http://camoufox-forms.test:8000',
       SEARXNG_URL: 'http://searxng.test:8080',
     },
     coverage: {

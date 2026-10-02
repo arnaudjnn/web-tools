@@ -134,7 +134,10 @@ def probe_params(page_url, verify_url, field_count, wait_ms, rng=random):
         "submission_urls": [verify_url],
         "captcha_field": "g-recaptcha-response",
         "wait_ms": wait_ms,
-        "settle_ms": 20000,
+        # Up to 30 s for the verify page; and the verdict is read from the
+        # POST's own response body when the page has not rendered by then.
+        "settle_ms": 30000,
+        "capture_submission_body": True,
     }
 
 
@@ -142,7 +145,9 @@ def summarize_probe(data, *, session, profile, headed, threshold, started):
     """Probe answer: verdict + exit, never the page's HTML or a token."""
     data = data or {}
     diagnostics = data.get("diagnostics") or {}
-    verdict = parse_verdict(data.get("html"))
+    # The page first; the submission's own response body when the page had
+    # not navigated in time (a "capture miss": Google scored it, we lost it).
+    verdict = parse_verdict(data.get("html")) or parse_verdict(data.get("submission_body"))
     egress = diagnostics.get("egress") or {}
     score = verdict["score"] if verdict else None
     return {
@@ -442,45 +447,130 @@ async def form_warm(req: WarmRequest):
     return data
 
 
+# A candidate needs a pre-check (~5-30 s) and a full humanized probe (~25-40 s).
+CANDIDATE_MIN_MS = 60_000
+
+
+async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries, end,
+                           reserve_s=0.0, sessions=()):
+    """Probe candidate exits on OUR oracle; stop at the first scoring >= threshold.
+
+    Shared by /form-exit-select and the form score gate. Each candidate gets
+    a cheap headless egress pre-check first: an IP or ASN the blocklist
+    already knows as low-scoring is skipped for the price of one launch, not
+    a whole humanized form. Every verdict is recorded in the blocklist.
+    `sessions` are tried first (a sticky profile's own exit), then fresh
+    tokens. `reserve_s` is budget kept back for the caller (the form itself):
+    no candidate starts unless it fits before `end - reserve_s`. Only our
+    oracle and the egress echo are ever contacted here.
+
+    Returns {passed, session, score, egress, tries}.
+    """
+    tries = []
+    queue = list(sessions)
+    for _ in range(max_tries):
+        left_ms = int((end - reserve_s - time.monotonic()) * 1000)
+        if left_ms < CANDIDATE_MIN_MS:
+            break
+        session = queue.pop(0) if queue else secrets.token_hex(6)
+        pre = await run_egress(session, min(30_000, left_ms - 45_000))
+        egress = pre.get("egress") or {}
+        reason = profile_store.blocked_reason(egress.get("ip"), egress.get("asn"), threshold)
+        if reason:
+            tries.append({"skipped": reason, "egress": egress})
+            continue
+        started = time.monotonic()
+        left_ms = int((end - reserve_s - time.monotonic()) * 1000)
+        data = await run_probe(oracle_url=oracle_url, session=session, profile=profile,
+                               headed=headed, wait_ms=4000, field_count=2, action=None,
+                               timeout_ms=max(10_000, min(120_000, left_ms - 5_000)))
+        summary = summarize_probe(data, session=session, profile=profile, headed=headed,
+                                  threshold=threshold, started=started)
+        _record(summary, threshold, True)
+        tries.append({k: summary[k] for k in ("score", "passed", "egress", "error-codes", "blocked")}
+                     | {"error": summary["form"]["error"]})
+        if summary["passed"]:
+            return {"passed": True, "session": session, "score": summary["score"],
+                    "egress": summary["egress"], "tries": tries}
+    return {"passed": False, "session": None, "score": None, "egress": None, "tries": tries}
+
+
+# ── the score gate for real submits (/form-submit score_gate) ────────
+#
+# Before a real form, candidate exits are probed on OUR oracle with the
+# form's own launch config (headed, profile or isolated); the form then runs
+# pinned to the first exit that scores >= threshold. Nothing touches the
+# target before that, so a gate that finds no exit is provably zero-POST.
+GATE_RESERVE_PLAIN_S = 100.0   # a one-POST form: launch + nav + fill + outcome
+GATE_RESERVE_WIZARD_S = 240.0  # a wizard needs ~240 s on its own
+
+
+def gate_wanted(score_gate, headed, exit_session, inspect_only):
+    """Explicit score_gate wins; default on when headed and no exit is pinned."""
+    if inspect_only:
+        return False
+    if score_gate is not None:
+        return bool(score_gate)
+    return bool(headed and not exit_session)
+
+
+def form_reserve_s(timeout_ms, wizard):
+    """Budget kept back for the form itself out of the caller's timeout_ms
+    (squeezed, never below 30 s, so an explicit gate on a short deadline
+    still fits one candidate)."""
+    want = GATE_RESERVE_WIZARD_S if wizard else GATE_RESERVE_PLAIN_S
+    return min(want, max(30.0, timeout_ms / 1000 - CANDIDATE_MIN_MS / 1000 - 5.0))
+
+
+def gate_fits(timeout_ms, wizard):
+    """Does the deadline hold the full form reserve AND one candidate? An
+    IMPLICIT gate is skipped when not (default 120 s plain form: no), so the
+    default-on gate never turns a call that used to run into a 503."""
+    want = GATE_RESERVE_WIZARD_S if wizard else GATE_RESERVE_PLAIN_S
+    return timeout_ms / 1000 >= want + CANDIDATE_MIN_MS / 1000 + 5.0
+
+
+async def run_gate(*, oracle_url, profile, headed, threshold, tries, deadline, reserve_s,
+                   sessions=()):
+    outcome = await probe_candidates(oracle_url=oracle_url, profile=profile, headed=headed,
+                                     threshold=threshold, max_tries=tries, end=deadline,
+                                     reserve_s=reserve_s, sessions=sessions)
+    log.info("score gate: passed=%s score=%s asn=%s after %d tries (profile=%s headed=%s)",
+             outcome["passed"], outcome["score"], (outcome["egress"] or {}).get("asn"),
+             len(outcome["tries"]), profile, headed)
+    return outcome
+
+
+def gate_record(outcome):
+    """diagnostics.score_gate: what the gate tried and what it chose (no tokens)."""
+    tries = outcome.get("tries") or []
+    egress = outcome.get("egress") or {}
+    return {"passed": bool(outcome.get("passed")), "tries": len(tries),
+            "probed": sum(1 for t in tries if "skipped" not in t),
+            "skipped": [t["skipped"] for t in tries if "skipped" in t],
+            "scores": [t.get("score") for t in tries if "skipped" not in t],
+            "chosen_score": outcome.get("score"), "asn": egress.get("asn")}
+
+
 async def form_exit_select(req: ExitSelectRequest):
     try:
         oracle_urls(req.oracle_url)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
     end = time.monotonic() + req.timeout_ms / 1000
-    tries = []
-    for _ in range(req.max_tries):
-        left_ms = int((end - time.monotonic()) * 1000)
-        if left_ms < 60_000:
-            break
-        session = secrets.token_hex(6)
-        # Cheap pre-check (one headless navigation) before a full probe: a
-        # known-bad IP or ASN costs a launch, not a whole humanized form.
-        pre = await run_egress(session, min(30_000, left_ms - 45_000))
-        egress = pre.get("egress") or {}
-        reason = profile_store.blocked_reason(egress.get("ip"), egress.get("asn"), req.threshold)
-        if reason:
-            tries.append({"skipped": reason, "egress": egress})
-            continue
-        started = time.monotonic()
-        left_ms = int((end - time.monotonic()) * 1000)
-        # Candidates are probed ISOLATED (no profile): the profile must not be
-        # seen from every exit that gets rejected on the way.
-        data = await run_probe(oracle_url=req.oracle_url, session=session, profile=None,
-                               headed=req.headed, wait_ms=4000, field_count=2, action=None,
-                               timeout_ms=max(10_000, min(120_000, left_ms - 5_000)))
-        summary = summarize_probe(data, session=session, profile=None, headed=req.headed,
-                                  threshold=req.threshold, started=started)
-        _record(summary, req.threshold, True)
-        tries.append({k: summary[k] for k in ("score", "passed", "egress", "error-codes", "blocked")}
-                     | {"error": summary["form"]["error"]})
-        if summary["passed"]:
-            profile_store.remember_exit(req.profile, session, ip=summary["egress"]["ip"], score=summary["score"])
-            log.info("exit select: pinned profile=%s ip=%s score=%s after %d tries",
-                     req.profile, summary["egress"]["ip"], summary["score"], len(tries))
-            return {"pinned": True, "profile": req.profile, "exit_session": session,
-                    "score": summary["score"], "tries": tries,
-                    "profile_persistent": profile_store.is_persistent_root()}
+    # Candidates are probed ISOLATED (no profile): the profile must not be
+    # seen from every exit that gets rejected on the way.
+    outcome = await probe_candidates(oracle_url=req.oracle_url, profile=None, headed=req.headed,
+                                     threshold=req.threshold, max_tries=req.max_tries, end=end)
+    tries = outcome["tries"]
+    if outcome["passed"]:
+        session = outcome["session"]
+        profile_store.remember_exit(req.profile, session, ip=outcome["egress"]["ip"], score=outcome["score"])
+        log.info("exit select: pinned profile=%s ip=%s score=%s after %d tries",
+                 req.profile, outcome["egress"]["ip"], outcome["score"], len(tries))
+        return {"pinned": True, "profile": req.profile, "exit_session": session,
+                "score": outcome["score"], "tries": tries,
+                "profile_persistent": profile_store.is_persistent_root()}
     log.info("exit select: nothing pinned for profile=%s after %d tries", req.profile, len(tries))
     return {"pinned": False, "profile": req.profile, "tries": tries,
             "profile_persistent": profile_store.is_persistent_root()}

@@ -42,6 +42,7 @@ def _install_stubs():
         on_event = _decorator
         get = _decorator
         post = _decorator
+        middleware = _decorator
 
     fastapi.FastAPI = _App
     fastapi.HTTPException = type("HTTPException", (Exception,), {})
@@ -312,12 +313,33 @@ class BlocklistTests(_Root):
                                                        now=1000 + profile_store.IP_TTL_S + 1))
         self.assertIsNone(profile_store.blocked_reason("9.9.9.9", 3269, 0.7, now=1001))
 
-    def test_a_good_last_score_unblocks_the_ip(self):
+    def test_the_ip_mean_gates_not_just_its_last_score(self):
+        # Score-gated exits (2026-10-02): an exit is skipped while its
+        # recorded MEAN is under the threshold — one good run after a bad
+        # one does not clear it, a sustained good record does.
         profile_store.record_exit_score("1.2.3.4", 3269, 0.1, 0.7, now=1000)
         profile_store.record_exit_score("1.2.3.4", 3269, 0.9, 0.7, now=1100)
-        self.assertIsNone(profile_store.blocked_reason("1.2.3.4", 3269, 0.7, now=1200))
+        self.assertEqual(profile_store.blocked_reason("1.2.3.4", 3269, 0.7, now=1200), "ip_low_score")
         entry = profile_store.load_blocklist()["ips"]["1.2.3.4"]
-        self.assertEqual((entry["n"], entry["low"], entry["last"]), (2, 1, 0.9))
+        self.assertEqual((entry["n"], entry["low"], entry["last"], entry["sum"]), (2, 1, 0.9, 1.0))
+        profile_store.record_exit_score("5.6.7.8", None, 0.6, 0.7, now=1000)
+        profile_store.record_exit_score("5.6.7.8", None, 0.9, 0.7, now=1100)
+        profile_store.record_exit_score("5.6.7.8", None, 0.9, 0.7, now=1150)
+        self.assertIsNone(profile_store.blocked_reason("5.6.7.8", None, 0.7, now=1200))
+
+    def test_an_entry_from_before_the_mean_starts_from_its_last_score(self):
+        data = profile_store.load_blocklist()
+        data["ips"]["1.1.1.1"] = {"n": 1, "low": 0, "last": 0.9, "at": 1000, "asn": 1}
+        profile_store._write_json(profile_store._blocklist_path(), data)
+        profile_store.record_exit_score("1.1.1.1", 1, 0.9, 0.7, now=1100)
+        self.assertEqual(profile_store.load_blocklist()["ips"]["1.1.1.1"]["sum"], 1.8)
+
+    def test_an_asn_with_a_low_mean_is_skipped(self):
+        # Not 80 % low, but a mean under the threshold on a sustained record.
+        scores = [0.9, 0.9, 0.3, 0.3, 0.5]
+        for i, score in enumerate(scores):
+            profile_store.record_exit_score(f"10.1.0.{i}", 30722, score, 0.7, now=1000)
+        self.assertEqual(profile_store.blocked_reason("10.1.9.9", 30722, 0.7, now=1001), "asn_low_scores")
 
     def test_asn_needs_a_sustained_record(self):
         for i in range(profile_store.ASN_MIN_SAMPLES - 1):

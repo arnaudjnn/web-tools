@@ -533,13 +533,20 @@ async def _wait_devtools_port(user_data_dir: Path, timeout_s: float = 15.0) -> i
     raise RuntimeError("Chromium did not publish a DevTools port")
 
 
+def forms_url(env=None) -> str:
+    """The Camoufox that takes form submits: the dedicated forms service
+    (CAMOUFOX_FORMS_URL) when set, else the shared one (CAMOUFOX_URL)."""
+    env = os.environ if env is None else env
+    return (env.get("CAMOUFOX_FORMS_URL") or "").strip() or env.get("CAMOUFOX_URL", "")
+
+
 def build_tools(req: dict, state: dict, domains: list[str], deadline: float):
     """The action space and output model for one run (shared with the grammar test)."""
     from browser_use import Tools
 
     tools = Tools(exclude_actions=EXCLUDED_ACTIONS)
     if req.get("allow_form_submit"):
-        build_form_bridge(tools, state, domains, deadline, os.environ.get("CAMOUFOX_URL", ""))
+        build_form_bridge(tools, state, domains, deadline, forms_url())
     output_model = None
     if req.get("output_schema"):
         from browser_use.tools.extraction.schema_utils import schema_dict_to_pydantic_model
@@ -597,7 +604,7 @@ def build_form_bridge(tools, state: dict, domains: list[str], deadline: float, c
         if remaining < FORM_MIN_BUDGET_S:
             return ActionResult(error="not enough time left in this run to submit safely; not submitted")
         if not camoufox_url:
-            return ActionResult(error="form bridge unavailable: CAMOUFOX_URL is not set on this sidecar")
+            return ActionResult(error="form bridge unavailable: neither CAMOUFOX_FORMS_URL nor CAMOUFOX_URL is set on this sidecar")
 
         timeout_ms = int(min(240.0, remaining - 15) * 1000)
         body = {

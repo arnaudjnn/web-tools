@@ -41,6 +41,7 @@ def _install_stubs():
         on_event = _decorator
         get = _decorator
         post = _decorator
+        middleware = _decorator
 
     fastapi.FastAPI = _App
     fastapi.HTTPException = type("HTTPException", (Exception,), {})

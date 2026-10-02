@@ -23,6 +23,19 @@ export const camoufox = createSidecar({
 const call = <T>(path: string, body: Record<string, unknown>, clientTimeoutMs: number) =>
   camoufox.post<T>(path, body, clientTimeoutMs);
 
+// Every FORM call goes to the dedicated forms service (CAMOUFOX_FORMS_URL;
+// falls back to CAMOUFOX_URL). Its own breaker: a forms outage must not
+// demote the readers, nor the other way round. Never a fallback to Scrapling.
+export const camoufoxForms = createSidecar({
+  name: 'camoufox-forms',
+  url: () => Config.camoufoxForms.url,
+  error: (m, s, d) => new CamoufoxError(m, s, d),
+  onTrip: (reason) => log(`[camoufox-forms] unreachable (${reason}); skipping it for 60s.`),
+});
+
+const formsCall = <T>(path: string, body: Record<string, unknown>, clientTimeoutMs: number) =>
+  camoufoxForms.post<T>(path, body, clientTimeoutMs);
+
 export type CamoufoxRender = { status: number; url: string; html: string };
 export type CamoufoxScreenshot = { status: number; url: string; b64: string };
 export type CamoufoxEval = { status: number; url: string; result: unknown };
@@ -166,9 +179,16 @@ export function camoufoxFormSubmit(params: {
   /** With a profile: reuse the exit pinned in its fingerprint.json (pin one
    *  on first use). Omit = the sidecar's FORM_PROFILE_STICKY_EXIT. */
   stickyExit?: boolean;
+  /** Score-gate the exit on our oracle before the form (the sidecar's default:
+   *  on when headed and no exitSession is pinned). false disables it. */
+  scoreGate?: boolean;
+  scoreThreshold?: number;
+  scoreGateTries?: number;
+  /** The score oracle the gate probes (Config.oracleUrl). */
+  oracleUrl?: string;
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 120_000;
-  return call<CamoufoxFormSubmit>(
+  return formsCall<CamoufoxFormSubmit>(
     '/form-submit',
     {
       url: params.url,
@@ -195,6 +215,10 @@ export function camoufoxFormSubmit(params: {
       ...(params.profile ? { profile: params.profile } : {}),
       ...(params.stopAfterPosts ? { stop_after_posts: params.stopAfterPosts } : {}),
       ...(params.stickyExit !== undefined ? { sticky_exit: params.stickyExit } : {}),
+      ...(params.scoreGate !== undefined ? { score_gate: params.scoreGate } : {}),
+      ...(params.scoreThreshold !== undefined ? { score_threshold: params.scoreThreshold } : {}),
+      ...(params.scoreGateTries !== undefined ? { score_gate_tries: params.scoreGateTries } : {}),
+      ...(params.oracleUrl ? { oracle_url: params.oracleUrl } : {}),
     },
     timeoutMs + 60_000,
   );
@@ -204,7 +228,7 @@ export function camoufoxFormSubmit(params: {
  *  passed through in snake_case; the client waits a minute past timeout_ms. */
 export function camoufoxStealth(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
   const timeoutMs = typeof body.timeout_ms === 'number' ? body.timeout_ms : 180_000;
-  return call<Record<string, unknown>>(path, body, timeoutMs + 60_000);
+  return formsCall<Record<string, unknown>>(path, body, timeoutMs + 60_000);
 }
 
 /** Read-only: the page's forms, fields, submit, CAPTCHA, honeypots, banners.
@@ -220,7 +244,7 @@ export function camoufoxFormInspect(params: {
   profile?: string;
 }): Promise<CamoufoxFormInspect> {
   const timeoutMs = params.timeoutMs ?? 60_000;
-  return call<CamoufoxFormInspect>(
+  return formsCall<CamoufoxFormInspect>(
     '/form-inspect',
     {
       url: params.url,

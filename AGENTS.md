@@ -1,7 +1,9 @@
 # web-tools — the map
 
 Five Railway services: **Tools** (Next-less Node server: MCP + REST + CLI host),
-**Scrapling** sidecar, **Camoufox** sidecar, **SearXNG**, **Redis**. Public endpoint
+**Scrapling** sidecar, **Camoufox** sidecar, **SearXNG**, **Redis** — plus an
+optional sixth, **Camoufox-Forms** (the same Camoufox image with
+`CAMOUFOX_ROLE=forms`: form endpoints only, see below). Public endpoint
 is Tools only; the sidecars are internal. Auth is `Authorization: Bearer <API_KEY>`
 (the REST routes read only that header or `?api_key=` — `X-API-Key` does not work).
 
@@ -109,7 +111,7 @@ form_submissions, error}`. Traps:
   `allow_mutations`. Forms go through `submit_form_via_web_tools`, which is offered
   only with `allow_form_submit` and calls Camoufox `/form-submit` once per run. The
   budget is spent before the call, and only a 503 `retryable` (zero POSTs) refunds it.
-  The sidecar needs `CAMOUFOX_URL` for this.
+  The sidecar needs `CAMOUFOX_FORMS_URL` (else `CAMOUFOX_URL`) for this.
 - **The LLM step contract is structured outputs.** Four traps, all measured on
   `claude-sonnet-5-5` on 2026-10-02:
   - Forced `tool_choice` returns a 400 on Sonnet/Opus 5.5.
@@ -167,6 +169,33 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   `parked_step`, `nav_error`. Count G1 (`posts` non-empty / all runs) from it
   rather than from caller-side bookkeeping. The live mark is per job
   (`FormLive`), not a module global.
+
+## Camoufox-Forms (`CAMOUFOX_ROLE=forms`, same image)
+
+- **Forms get their own service.** On cf156g (2026-10-02) 12 of 18 form
+  failures were the shared host degrading under render/Akamai load (`can't
+  start new thread`, `Page crashed`, launch SIGSEGV) — nothing the form flow
+  can retry. `CAMOUFOX_ROLE=forms` skips the render prewarm, the Akamai
+  keepalive and the spa sessions; `/form-*` and `/healthz` work, every other
+  endpoint answers `503 {role:"forms"}`. The default role `all` is today's
+  Camoufox, unchanged.
+- **Routing**: Tools sends every form call (`form-submit`, `form-inspect`,
+  `form-score-probe`, `form-warm`, `form-exit-select`, `form-exits`) to
+  `CAMOUFOX_FORMS_URL`, falling back to `CAMOUFOX_URL`; it has its own
+  breaker. Scrapling's agent form bridge reads the same variable.
+- **It needs the forms' own env**: `PROXY_URL`, `FORM_PROFILE_DIR` + a volume
+  (profiles and the exit blocklist move with it), `FORM_WEDGE_EXIT_S`,
+  `LAUNCH_FAIL_STREAK` (image defaults). Keep `WORKERS=1`; scale by replicas.
+- **Score-gated exits**: a headed `web_form_submit` without a pinned
+  `exit_session` probes up to `score_gate_tries` (3) exits on our oracle with
+  its own launch config and runs on the first scoring ≥ `score_threshold`
+  (0.7); none → `503 retryable {error:"no_scoring_exit", form_submissions:0}`.
+  Nothing reaches the target before the gate passes. Probes spend the
+  caller's `timeout_ms` (max 360000; a gated wizard ≈ 240 s + 90 s). Every
+  verdict feeds the exit blocklist, which skips an IP or ASN whose MEAN is
+  under the threshold. `diagnostics.score_gate` records what was tried. The
+  implicit gate is skipped (`timeout_too_short`) below 165 s (305 s for a
+  wizard), i.e. at the 120 s default.
 
 ## reCAPTCHA v3 score oracle (G2)
 

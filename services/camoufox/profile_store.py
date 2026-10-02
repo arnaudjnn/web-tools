@@ -214,7 +214,11 @@ def record_exit_score(ip, asn, score, threshold, now=None) -> dict:
     low = score is None or score < threshold
     if ip:
         entry = data["ips"].get(ip) or {"n": 0, "low": 0}
-        entry.update(n=entry["n"] + 1, low=entry["low"] + int(low), last=score, at=now, asn=asn)
+        # sum: the mean is what gates an exit (an entry written before the
+        # mean existed starts its sum from its last verdict).
+        base = entry.get("sum", (entry.get("last") or 0.0) * entry["n"])
+        entry.update(n=entry["n"] + 1, low=entry["low"] + int(low), last=score, at=now, asn=asn,
+                     sum=round(base + (score or 0.0), 3))
         data["ips"][ip] = entry
         if len(data["ips"]) > MAX_IPS:
             for stale in sorted(data["ips"], key=lambda k: data["ips"][k].get("at", 0))[:len(data["ips"]) - MAX_IPS]:
@@ -232,20 +236,25 @@ def record_exit_score(ip, asn, score, threshold, now=None) -> dict:
 def blocked_reason(ip, asn, threshold=0.7, now=None, data=None):
     """Why this exit should not be used, or None.
 
-    An IP is blocked while its LAST verdict is under the threshold and fresh
-    (IP_TTL_S). An ASN is blocked only on a sustained record: at least
-    ASN_MIN_SAMPLES verdicts with ASN_BAD_RATIO of them low — one ASN carries
-    a whole carrier's households, and one bad night must not ban it.
+    An IP is blocked while its record is fresh (IP_TTL_S) and either its
+    LAST verdict or its MEAN is under the threshold. An ASN is blocked only
+    on a sustained record — at least ASN_MIN_SAMPLES verdicts — whose MEAN is
+    under the threshold or ASN_BAD_RATIO of them low: one ASN carries a whole
+    carrier's households, and one bad night must not ban it.
     """
     now = now if now is not None else time.time()
     data = data if data is not None else load_blocklist()
     entry = data["ips"].get(ip) if ip else None
     if entry and now - entry.get("at", 0) < IP_TTL_S:
         last = entry.get("last")
-        if last is None or last < threshold:
+        n = entry.get("n") or 0
+        mean = entry["sum"] / n if n and "sum" in entry else last
+        if last is None or last < threshold or (mean is not None and mean < threshold):
             return "ip_low_score"
     if asn is not None:
         stats = data["asns"].get(str(asn))
-        if stats and stats.get("n", 0) >= ASN_MIN_SAMPLES and stats["low"] / stats["n"] >= ASN_BAD_RATIO:
+        n = (stats or {}).get("n", 0)
+        if stats and n >= ASN_MIN_SAMPLES and (
+                stats.get("sum", threshold * n) / n < threshold or stats["low"] / n >= ASN_BAD_RATIO):
             return "asn_low_scores"
     return None

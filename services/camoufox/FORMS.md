@@ -254,6 +254,42 @@ exists (a browser upgrade on the volume) redraws its fingerprint and keeps
 its cookies. The token selects an exit; the provider may still recycle the
 IP behind it, which `exit_ip`/`exit_ip_changed` make visible.
 
+## Dedicated service and score-gated exits
+
+`CAMOUFOX_ROLE=forms` runs this image as a forms-only service: no render or
+Akamai prewarm, no keepalive; `/form-*` and `/healthz` work and every other
+endpoint answers `503 {role:"forms"}`. Tools routes every form call to
+`CAMOUFOX_FORMS_URL` (fallback `CAMOUFOX_URL`), and so does Scrapling's agent
+bridge. The default role `all` is unchanged.
+
+`score_gate` (default: on when `headed` and no `exit_session`; `false`
+disables) probes candidate exits on our oracle BEFORE the form, with the
+form's own launch config (headed, the caller's profile or isolated), and
+runs the form pinned to the first exit scoring ≥ `score_threshold` (0.7), up
+to `score_gate_tries` (3). Each candidate gets the exit-select pre-check
+(skip an IP/ASN the blocklist knows as low: a fresh IP whose last score or
+mean is under the threshold, an ASN with ≥5 verdicts whose mean is) and
+every verdict is recorded. A caller-pinned `exit_session` with
+`score_gate: true` is judged once, never replaced; a sticky profile's own
+exit is tried first and re-pinned to the winner. No passing exit → `503
+{retryable:true, error:"no_scoring_exit", form_submissions:0, score_gate}`
+— only the oracle and the egress echo were contacted, never the target.
+Probes spend the caller's `timeout_ms` (max 360000), keeping 100 s back for
+a plain form and 240 s for a wizard; no candidate starts inside that
+reserve. The answer carries `diagnostics.score_gate {passed, tries, probed,
+skipped, scores, chosen_score, asn}` and the chosen `exit_session`. The gate
+needs `oracle_url` (Tools passes its own); an implicit gate without one is
+skipped (`{skipped:"no_oracle"}`), an explicit one is a 400. An implicit
+gate also needs room for the reserve plus one candidate (≥165 s plain,
+≥305 s wizard); on a shorter `timeout_ms` (the 120 s default) it is skipped
+(`{skipped:"timeout_too_short"}`) so the default never turns a call that
+used to run into a 503 — pass a longer deadline, or `score_gate: true`.
+
+The probe reads its verdict from the verify page, or — when the page has not
+rendered within the 30 s outcome wait — from the submission POST's own
+response body once it has fully arrived (`capture_submission_body`, probe
+only). cf156g lost 10/82 scored POSTs as "capture misses" before this.
+
 ## Score oracle and probe (`score_probe.py`)
 
 Our own reCAPTCHA v3 key scores the form browser: Tools serves the page and

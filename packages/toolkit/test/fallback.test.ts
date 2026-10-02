@@ -198,7 +198,7 @@ describe('forms and agent on the shared client and counter', () => {
   const form = { url: 'https://www.example.it/f', fields: [{ selector: '#a', value: 'x' }], submit: 'button' };
 
   it('web_form_submit: a 503 retryable detail survives the shared client', async () => {
-    fakeSidecars({ camoufox: () => ({ status: 503, json: { detail: { message: 'browser not ready', retryable: true } } }) });
+    fakeSidecars({ camoufoxForms: () => ({ status: 503, json: { detail: { message: 'browser not ready', retryable: true } } }) });
     const r = await functionMap.web_form_submit(form);
     expect(r.isError).toBe(true);
     expect(bodyOf(r)).toEqual({
@@ -208,16 +208,16 @@ describe('forms and agent on the shared client and counter', () => {
   });
 
   it('web_form_submit: 422 is invalid_request; 502 and a lost response are unknown', async () => {
-    fakeSidecars({ camoufox: () => ({ status: 422, json: { detail: [{ loc: ['body', 'fields'] }] } }) });
+    fakeSidecars({ camoufoxForms: () => ({ status: 422, json: { detail: [{ loc: ['body', 'fields'] }] } }) });
     expect(bodyOf(await functionMap.web_form_submit(form))).toMatchObject({ outcome: 'invalid_request', retryable: false });
-    fakeSidecars({ camoufox: () => ({ status: 502, json: { detail: 'boom' } }) });
+    fakeSidecars({ camoufoxForms: () => ({ status: 502, json: { detail: 'boom' } }) });
     expect(bodyOf(await functionMap.web_form_submit(form))).toMatchObject({ outcome: 'unknown', form_submissions: null, error: 'boom' });
-    fakeSidecars({ camoufox: () => 'timeout' });
+    fakeSidecars({ camoufoxForms: () => 'timeout' });
     expect(bodyOf(await functionMap.web_form_submit(form))).toMatchObject({ outcome: 'unknown', status: 0 });
   });
 
   it('web_form_inspect: failures are retryable unless the request was invalid, and counted', async () => {
-    fakeSidecars({ camoufox: () => ({ status: 502, json: { detail: 'nav failed' } }) });
+    fakeSidecars({ camoufoxForms: () => ({ status: 502, json: { detail: 'nav failed' } }) });
     expect(bodyOf(await functionMap.web_form_inspect({ url: 'https://www.example.it/f' }))).toMatchObject({
       retryable: true, form_submissions: 0, status: 502, error: 'nav failed',
     });

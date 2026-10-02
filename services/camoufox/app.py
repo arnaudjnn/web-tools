@@ -61,6 +61,10 @@ Env
 - PROXY_URL        http://user:pass@host:port  (Evomi; _country-IT in the
                    password for the Italian exit Akamai expects).
 - NAV_TIMEOUT_MS   navigation timeout (default 60000).
+- CAMOUFOX_ROLE    `all` (default: every endpoint) or `forms` — the dedicated
+                   forms service: no render/Akamai prewarm, no keepalive, and
+                   every non-form endpoint answers 503 {role: "forms"}. Only
+                   /form-* and /healthz do work there (same image).
 """
 from __future__ import annotations
 
@@ -83,7 +87,7 @@ from pydantic import BaseModel, Field
 from camoufox.sync_api import Camoufox
 from camoufox.utils import launch_options
 from form_flow import FormLive, validate_form
-from form_worker import FormRetryable, FormWorker, run_isolated_form
+from form_worker import FormRetryable, FormWorker, not_started, run_isolated_form
 import form_inspect
 import launch_health
 import profile_store
@@ -99,6 +103,23 @@ AK_INPAGE_TIMEOUT_MS = int(os.environ.get("AK_INPAGE_TIMEOUT_MS", "45000"))
 # warmed page every KEEPALIVE_SEC so the cookie stays mature between
 # requests (set 0 to disable).
 KEEPALIVE_SEC = float(os.environ.get("KEEPALIVE_SEC", "4"))
+
+
+def _role() -> str:
+    """`forms` = the dedicated forms service; anything else = `all`."""
+    return "forms" if os.environ.get("CAMOUFOX_ROLE", "all").strip().lower() == "forms" else "all"
+
+
+ROLE = _role()
+# The forms role serves ONLY these; everything else (render, eval, screenshot,
+# bytes, spa-fetch, recycle) is refused so nobody uses it by mistake — its
+# browsers were never started there.
+_FORMS_ROLE_PATHS = ("/healthz", "/docs", "/openapi.json")
+
+
+def role_allows(path: str, role: str | None = None) -> bool:
+    role = role or ROLE
+    return role != "forms" or path.startswith("/form-") or path in _FORMS_ROLE_PATHS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("camoufox")
@@ -697,6 +718,15 @@ def _do_bytes(url, timeout_ms) -> dict:
 app = FastAPI(title="camoufox", version="1.0.0")
 
 
+@app.middleware("http")
+async def _role_gate(request, call_next):
+    if not role_allows(request.url.path):
+        return JSONResponse(status_code=503, content={"detail": {
+            "role": ROLE, "retryable": False,
+            "message": "this Camoufox runs CAMOUFOX_ROLE=forms: only /form-* and /healthz"}})
+    return await call_next(request)
+
+
 @app.on_event("startup")
 async def _prewarm_render() -> None:
     """Launch the render browser before the first request needs it.
@@ -708,7 +738,13 @@ async def _prewarm_render() -> None:
 
     The Akamai warmed page stays lazy — it is keyed by (base_url, warm_path), so
     there is nothing to warm until a caller says which origin it wants.
+
+    The forms role has no render browser at all: the form browsers are
+    per-job, and a prewarmed reader would only compete with them.
     """
+    if ROLE == "forms":
+        log.info("CAMOUFOX_ROLE=forms: no render prewarm, no keepalive, form endpoints only")
+        return
     loop = asyncio.get_running_loop()
 
     async def warm() -> None:
@@ -723,7 +759,7 @@ async def _prewarm_render() -> None:
 
 @app.on_event("startup")
 async def _start_keepalive():
-    if KEEPALIVE_SEC <= 0:
+    if KEEPALIVE_SEC <= 0 or ROLE == "forms":
         return
 
     async def loop_ka():
@@ -829,9 +865,12 @@ async def healthz():
     # sending it work — measured as a ~50-70% error rate across two replicas,
     # cured only by a redeploy. Report it, and fail the check so an orchestrator
     # configured to watch this path can replace the replica instead of a human.
-    healthy = akamai_responsive and not _render_broken
+    # The forms role starts no render browser, so its health is the form
+    # launches' (launch_health sheds a replica that cannot launch at all).
+    healthy = akamai_responsive and (ROLE == "forms" or not _render_broken)
     body = {
         "ok": healthy,
+        "role": ROLE,
         "pid": os.getpid(),
         "session_ready": _page is not None,
         "akamai_worker_responsive": akamai_responsive,
@@ -972,7 +1011,7 @@ class FormSubmitRequest(BaseModel):
     wait_until: str = Field("domcontentloaded")
     wait_ms: int = Field(4000, ge=0, le=60_000)
     settle_ms: int = Field(20_000, ge=1000, le=120_000)
-    timeout_ms: int = Field(120_000, ge=1000, le=240_000)
+    timeout_ms: int = Field(120_000, ge=1000, le=360_000, description="whole run INCLUDING the score gate's probes (a gated wizard: ~240 s + ~90 s)")
     fresh_ip: bool = Field(True, description="new context + new exit IP (scoring anti-bot is per-IP)")
     exit_session: str | None = Field(None, description="pin the exit: same token = same IP, so a passing exit can be REUSED instead of re-searched")
     gate_text: str | None = Field(None, max_length=300, description="regex on button/link text; after step0, a matching gate is clicked ONCE (atoka business-email gate)")
@@ -981,6 +1020,10 @@ class FormSubmitRequest(BaseModel):
     completion_markers: list[str] = Field(default_factory=list, max_length=10, description="regexes on body text; a match counts as completion even when the URL does not change")
     profile: str | None = Field(None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$", description="named persistent profile: warm cookies/fingerprint reused across submissions (empty = isolated, default)")
     sticky_exit: bool | None = Field(None, description="with a profile: reuse the exit pinned in its fingerprint.json (pin a new one on first use); None = FORM_PROFILE_STICKY_EXIT")
+    score_gate: bool | None = Field(None, description="probe exits on the oracle first and run on the first scoring >= score_threshold; None = on when headed and no exit_session")
+    score_threshold: float = Field(0.7, ge=0, le=1)
+    score_gate_tries: int = Field(3, ge=1, le=6)
+    oracle_url: str | None = Field(None, max_length=500, description="the score oracle the gate probes (Tools passes its own)")
 
 
 class FormSubmitResponse(BaseModel):
@@ -1012,6 +1055,13 @@ async def form_submit(req: FormSubmitRequest):
     # pin — neither an explicit exit_session nor a sticky profile's own.
     rotate = _form_rotator(req.exit_session, req.profile, req.sticky_exit,
                            bool(req.ready_expression), req.headed)
+    gate = None
+    if score_probe.gate_wanted(req.score_gate, req.headed, req.exit_session, req.inspect_only):
+        gate = await _score_gate(req, session, deadline, live)
+        session = gate["session"]
+        # The gate chose this exit on its score: the form runs ON it, so no
+        # rotation away from it.
+        rotate = None
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
         data = await _form_worker.run(partial(run_isolated_form,
@@ -1049,9 +1099,60 @@ async def form_submit(req: FormSubmitRequest):
             "message": "Form never submitted (%s); safe to retry" % data.get("error"),
             "retryable": True,
         })
-    # A profile-pinned exit is reported back (the caller did not choose it);
-    # otherwise the contract is unchanged: echo what the caller passed.
-    return FormSubmitResponse(**data, exit_session=req.exit_session or (session if req.profile and _sticky(req.sticky_exit) else ""))
+    if gate is not None:
+        data.setdefault("diagnostics", {})["score_gate"] = gate["record"]
+    # A profile-pinned or gate-chosen exit is reported back (the caller did
+    # not choose it); otherwise the contract is unchanged: echo what was passed.
+    pinned = (req.profile and _sticky(req.sticky_exit)) or gate is not None
+    return FormSubmitResponse(**data, exit_session=req.exit_session or (session if pinned else ""))
+
+
+async def _score_gate(req, session, deadline, live):
+    """Probe exits on OUR oracle before the form; returns {session, record}.
+
+    Raises 400 when gating was asked for explicitly without an oracle, and
+    503 retryable `no_scoring_exit` when no candidate scores >= threshold —
+    provably zero POSTs: only the oracle and the egress echo were contacted,
+    never the target.
+    """
+    if not req.oracle_url:
+        if req.score_gate:
+            raise HTTPException(status_code=400, detail="score_gate needs oracle_url")
+        log.info("score gate skipped: no oracle_url")
+        return {"session": session, "record": {"skipped": "no_oracle"}}
+    try:
+        score_probe.oracle_urls(req.oracle_url)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    wizard = bool(req.gate_text or req.step2 or req.completion_markers)
+    if req.score_gate is None and not score_probe.gate_fits(req.timeout_ms, wizard):
+        # Default-on gate, deadline too short to probe AND keep the form's
+        # budget: run ungated (as before) and say why.
+        log.info("score gate skipped: timeout_ms=%s too short", req.timeout_ms)
+        return {"session": session, "record": {"skipped": "timeout_too_short"}}
+    sticky = bool(req.profile and _sticky(req.sticky_exit))
+    # A caller-pinned exit is only ever judged, never replaced; a sticky
+    # profile's own exit is tried first, then fresh ones.
+    sessions = [req.exit_session] if req.exit_session else ([session] if sticky else [])
+    tries = 1 if req.exit_session else req.score_gate_tries
+    outcome = await score_probe.run_gate(
+        oracle_url=req.oracle_url, profile=req.profile, headed=req.headed,
+        threshold=req.score_threshold, tries=tries, deadline=deadline,
+        reserve_s=score_probe.form_reserve_s(req.timeout_ms, wizard), sessions=sessions)
+    record = score_probe.gate_record(outcome)
+    live.note(score_gate=record)
+    if not outcome["passed"]:
+        live.emit(not_started(req.url, "no_scoring_exit"))
+        raise HTTPException(status_code=503, detail={
+            "message": "No exit scored >= %.2f on the oracle; form never started, safe to retry"
+                       % req.score_threshold,
+            "retryable": True, "error": "no_scoring_exit", "form_submissions": 0,
+            "score_gate": record,
+        })
+    if sticky and outcome["session"] != session:
+        profile_store.remember_exit(req.profile, outcome["session"],
+                                    ip=(outcome["egress"] or {}).get("ip"), score=outcome["score"])
+    return {"session": outcome["session"], "record": record}
 
 
 def _form_rotator(exit_session, profile, sticky_exit, main_world_eval, headed):

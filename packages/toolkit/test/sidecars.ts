@@ -1,6 +1,6 @@
 // A fake for the two sidecars and SearXNG behind the global fetch.
 import { vi } from 'vitest';
-import { camoufox } from '../src/camoufox.js';
+import { camoufox, camoufoxForms } from '../src/camoufox.js';
 import { scrapling } from '../src/scrapling.js';
 import { resetStats } from '../src/stats.js';
 
@@ -14,19 +14,22 @@ export function refused(): Error {
 }
 
 /** Route fetches by host (scrapling.test / camoufox.test / searxng.test). */
-export function fakeSidecars(handlers: Partial<Record<'scrapling' | 'camoufox' | 'searxng', Handler>>) {
+export function fakeSidecars(
+  handlers: Partial<Record<'scrapling' | 'camoufox' | 'camoufoxForms' | 'searxng', Handler>>,
+) {
   const calls: Call[] = [];
   scrapling.reset();
   camoufox.reset();
+  camoufoxForms.reset();
   resetStats();
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: URL | string, init?: RequestInit) => {
       const url = new URL(String(input));
-      const host = url.hostname.split('.')[0] as 'scrapling' | 'camoufox' | 'searxng';
+      const host = url.hostname.split('.')[0] as 'scrapling' | 'camoufox' | 'camoufox-forms' | 'searxng';
       const body = init?.body ? JSON.parse(String(init.body)) : undefined;
       calls.push({ host, path: url.pathname, body });
-      const handler = handlers[host];
+      const handler = handlers[host === 'camoufox-forms' ? 'camoufoxForms' : host];
       const reply = handler ? handler(url.pathname, body) : 'refused';
       if (reply === 'refused') throw refused();
       if (reply === 'timeout') throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
