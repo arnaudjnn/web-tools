@@ -1,0 +1,24 @@
+# The web_agent venv (/opt/agent-venv) — NOT installed next to requirements.txt.
+#
+# browser-use cannot share the sidecar's venv. Resolved 2026-10-02 with
+# `uv pip compile` for linux x86_64 / CPython 3.13:
+#
+#   Because scrapling[fetchers]==0.4.14 depends on anyio>=4.14.0 and
+#   browser-use==0.13.10 depends on anyio==4.12.1, ... unsatisfiable.
+#   Because browser-use==0.13.10 depends on markdownify==1.2.2 and you
+#   require markdownify==1.2.3, ... unsatisfiable.
+#
+# Every browser-use release from 0.12.6 to 0.13.10 carries the same two `==`
+# pins, so no version choice fixes it, and moving markdownify would move the
+# web_fetch output contract. Hence a second venv in the same image, driven as
+# a subprocess by agent.py (see agent_runner.py for why a process is better
+# anyway: it can be killed at the deadline, a thread cannot).
+#
+# Pinned for the same reason as requirements.txt: browser-use drives a real
+# browser and changes its action space between minors. Bump deliberately and
+# re-run test_agent.py.
+browser-use==0.13.10
+# patchright is NOT pinned here: the Dockerfile installs the exact version the
+# main venv resolved, so both venvs share ONE downloaded Chromium build. A
+# mismatch would mean a second browser download or a runtime
+# "Executable doesn't exist" — the Dockerfile fails the build instead.

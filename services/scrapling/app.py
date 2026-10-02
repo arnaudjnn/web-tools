@@ -305,6 +305,12 @@ def _do_fetch(mode: Mode, req_url: str, network_idle: bool, timeout_ms: int,
 
 app = FastAPI(title="scrapling-svc", version="1.0.0")
 
+# POST /agent (web_agent) lives in agent.py; it runs browser-use in its own venv
+# and process, so nothing above this line is shared with it.
+from agent import router as agent_router  # noqa: E402
+
+app.include_router(agent_router)
+
 
 class FetchRequest(BaseModel):
     url: str = Field(..., description="Absolute URL to fetch")

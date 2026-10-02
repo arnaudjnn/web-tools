@@ -24,7 +24,8 @@ export type ToolName =
   | 'web_eval'
   | 'web_form_submit'
   | 'web_form_inspect'
-  | 'web_spa_fetch';
+  | 'web_spa_fetch'
+  | 'web_agent';
 
 const startedAt = new Date().toISOString();
 
@@ -43,6 +44,7 @@ const counts: Record<ToolName, number> = {
   web_form_submit: 0,
   web_form_inspect: 0,
   web_spa_fetch: 0,
+  web_agent: 0,
 };
 
 // Per-tool bytes of returned payload. Used as a proxy-bandwidth proxy.
@@ -61,6 +63,7 @@ const bytes: Record<ToolName, number> = {
   web_form_submit: 0,
   web_form_inspect: 0,
   web_spa_fetch: 0,
+  web_agent: 0,
 };
 
 const errors: Record<ToolName, number> = {
@@ -78,6 +81,7 @@ const errors: Record<ToolName, number> = {
   web_form_submit: 0,
   web_form_inspect: 0,
   web_spa_fetch: 0,
+  web_agent: 0,
 };
 
 // Tools whose upstream fetch MAY egress through a metered residential proxy
@@ -104,6 +108,7 @@ const PROXY_BACKED: ToolName[] = [
   'web_spa_fetch',
   'web_archive',
   'web_snapshots',
+  'web_agent', // upper bound: only stealth=true runs egress on the residential proxy
 ];
 
 export function recordCall(tool: ToolName, payloadBytes: number, isError = false): void {

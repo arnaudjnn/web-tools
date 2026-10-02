@@ -15,6 +15,7 @@ import {
   WebUsageStatsInput,
   WebFormSubmitInput,
   WebFormInspectInput,
+  WebAgentInput,
 } from './schemas.js';
 import type { ToolDefinition } from './types.js';
 
@@ -169,6 +170,25 @@ export const tools: ToolDefinition[] = [
       'never on outcome:"unknown" (a POST may have left) and never on an answered result. ' +
       'Persist your own reservation before calling.',
     parameters: WebFormSubmitInput,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'web_agent',
+    description:
+      'Give a browser agent a plain-language task (e.g. "find the pricing page and list the plan ' +
+      'names") and get back {final_result, success, steps[{n, action, url}], urls}. It drives a ' +
+      'real Chromium, capped by max_steps and timeout_ms, and only visits allowed_domains (default: ' +
+      "start_url's host). Pass output_schema for a structured final_result. The agent's browser " +
+      'cannot submit forms: POSTs are blocked unless allow_mutations. With allow_form_submit it gets ' +
+      'one submit through the web_form_submit path, never retried. Slower and costlier than ' +
+      'web_fetch, so use it only when a page needs clicking through. "disabled" means no LLM key is ' +
+      'set on the server.',
+    parameters: WebAgentInput,
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,

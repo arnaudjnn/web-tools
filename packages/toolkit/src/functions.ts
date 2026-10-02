@@ -18,6 +18,7 @@ import {
   scraplingScreenshot,
 } from './scrapling.js';
 import { searchSearXNG } from './searxng.js';
+import { web_agent } from './agent.js';
 import { getStats, recordCall, type ToolName } from './stats.js';
 import { getArchivedPage, getSnapshots } from './wayback.js';
 import type { ToolResult } from './types.js';
@@ -806,4 +807,5 @@ export const functionMap: Record<string, (params: any) => Promise<any>> = {
   web_form_inspect,
   web_spa_fetch,
   web_recycle,
+  web_agent,
 };

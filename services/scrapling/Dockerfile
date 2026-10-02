@@ -28,10 +28,27 @@ RUN scrapling install \
  && patchright install chromium \
  && patchright install-deps chromium
 
-COPY app.py .
+# web_agent (POST /agent): browser-use in its OWN venv, because it cannot be
+# resolved next to scrapling[fetchers]==0.4.14 (hard anyio + markdownify pins;
+# evidence in requirements-agent.txt). Same image, no new service. patchright is
+# installed at exactly the main venv's version so both share the Chromium
+# downloaded above — no second browser in the image; the build fails if they
+# drift. After the browser layer so editing this does not re-download Chromium.
+COPY requirements-agent.txt .
+RUN python -m venv /opt/agent-venv \
+ && PR="$(python -c 'import importlib.metadata as m; print(m.version("patchright"))')" \
+ && /opt/agent-venv/bin/pip install --no-cache-dir -r requirements-agent.txt "patchright==${PR}" \
+ && test "$(/opt/agent-venv/bin/python -c 'import importlib.metadata as m; print(m.version("patchright"))')" = "${PR}" \
+ && /opt/agent-venv/bin/python -c "import browser_use, patchright"
+ENV AGENT_PYTHON=/opt/agent-venv/bin/python \
+    AGENT_PROFILE_DIR=/tmp/web-agent-profile
+
+COPY app.py agent.py agent_runner.py ./
 
 # WORKERS=1. Each worker lazily builds up to one browser PER MODE (fast /
 # stealth / solve), so the worst case is WORKERS * 3 live Chromium instances.
+# A web_agent run adds ONE more, short-lived (a per-container flock allows one
+# run at a time, whatever WORKERS is), so the ceiling at WORKERS=1 is four.
 #
 # 2 was not survivable. Six browsers exhausted the container's THREAD budget, not
 # its memory — Chromium died on `pthread_create: Resource temporarily unavailable
