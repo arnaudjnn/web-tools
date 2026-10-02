@@ -148,15 +148,21 @@ button{margin-top:20px;padding:10px 18px;font-size:15px}p{line-height:1.5;color:
 <label for="company">Ragione sociale *</label><input id="company" name="company" type="text" autocomplete="organization" required>
 <label for="email">Email aziendale</label><input id="email" name="email" type="text" autocomplete="email">
 <label for="phone">Telefono</label><input id="phone" name="phone" type="text" autocomplete="tel">
-<input type="hidden" name="g-recaptcha-response" class="g-recaptcha" data-widget-uuid="oracle" value="">
+<input type="hidden" name="g-recaptcha-response" id="oracle-token" data-widget-uuid="oracle" value="">
 <button id="submit" type="submit">Registrati</button>
 </form>
 <p style="font-size:12px">Questo sito è protetto da reCAPTCHA.</p>
 <script>document.getElementById('t_load').value = String(Date.now());</script>
 <script src="https://www.google.com/recaptcha/api.js?render=${encodeURIComponent(sitekey)}"></script>
 <script>
+// The submit control keeps id="submit" (the probe's selector), and a form
+// control with id/name "submit" SHADOWS HTMLFormElement.submit: form.submit
+// is then the button, and form.submit() throws inside the mint promise — no
+// POST ever leaves (measured live 2026-10-02: submit_clicked, scripts 4/4,
+// posts=[]). So call the prototype's submit, which nothing can shadow.
+var nativeSubmit = HTMLFormElement.prototype.submit;
 grecaptcha.ready(function () {
-  var element = document.querySelector('.g-recaptcha[data-widget-uuid="oracle"]');
+  var element = document.getElementById('oracle-token');
   element.form.addEventListener('submit', function (event) {
     event.preventDefault();
     var t0 = Date.now();
@@ -164,7 +170,10 @@ grecaptcha.ready(function () {
     grecaptcha.execute(${key}, {action: ${act}}).then(function (token) {
       document.getElementById('t_mint').value = String(Date.now() - t0);
       element.value = token;
-      element.form.submit();
+      nativeSubmit.call(element.form);
+    }, function () {
+      document.getElementById('t_mint').value = '-1';  // execute() rejected
+      nativeSubmit.call(element.form);  // let the verify report the missing token
     });
   });
 });

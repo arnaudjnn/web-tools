@@ -97,6 +97,16 @@ test('the page mints inside the submit handler (django-recaptcha v3 shape)', () 
   assert.match(html, /name="g-recaptcha-response"/);
 });
 
+test('the handler submits through the prototype: id="submit" shadows form.submit', () => {
+  const html = renderOraclePage('K', 'a');
+  // The probe clicks #submit, so the control keeps that id...
+  assert.match(html, /<button id="submit" type="submit">/);
+  // ...which makes form.submit the BUTTON; a bare form.submit() throws.
+  assert.doesNotMatch(html, /\.form\.submit\(\)/);
+  assert.match(html, /HTMLFormElement\.prototype\.submit/);
+  assert.match(html, /nativeSubmit\.call\(element\.form\)/);
+});
+
 test('the verdict node is parseable and cannot break out of its script tag', () => {
   const html = renderVerdict({ success: true, score: 0.9, hostname: '</script><b>' });
   const m = html.match(/<script type="application\/json" id="oracle-verdict">([\s\S]*?)<\/script>/);
