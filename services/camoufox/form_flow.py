@@ -26,9 +26,11 @@ interaction, not a spoof. The ~one minute this costs per form is the price of
 the score, not waste.
 """
 import contextlib
+import json
 import logging
 import random
 import re
+import threading
 import time
 from urllib.parse import urlsplit, parse_qs
 
@@ -36,49 +38,162 @@ from urllib.parse import urlsplit, parse_qs
 # wedge handler sees a stackless greenlet and can only say "somewhere".
 log = logging.getLogger("camoufox.forms")
 
-# Live-step marker, polled by the admission worker from the event loop. A
-# pre-POST driver roundtrip has no timeout we can trust: playwright's own
-# `timeout=` is enforced by the driver's loop, and a wedged transport (the
-# greenlet parked on a socket read) never reaches it — measured 2026-09-29:
-# the fields phase sat in the driver's `select` for minutes past every
-# timeout. So EVERY driver call before the submit click is marked around
-# with a threshold ABOVE its own legitimate worst case (its timeout, or the
-# keystroke duration for `type`): a mark older than its threshold means the
-# call never returned, so no field was touched and no POST left the machine
-# — retryable, unlike every other stall. Marks are strictly pre-POST; the
-# submit click onwards is never marked (a click may already have POSTed).
-_LIVE = {"name": "", "at": 0.0, "stuck": 8.0}
 PRE_SUBMIT_STUCK_S = 8.0
 PRE_SUBMIT_STEP = "arrival scroll"
+# One humanized pointer trajectory: camoufox animates it browser-side and
+# caps it at humanize's maxTime (1.5s default). 10s is the legitimate worst
+# case with a wide margin; a call older than that never returned.
+POINTER_MOVE_STUCK_S = 10.0
+# Navigation: a transient refusal is retried in-run (pre-POST, a GET only).
+NAV_ATTEMPTS = 3
+NAV_BACKOFF_S = (2.0, 4.0)
+NAV_TIMEOUT_MS = 60000
+# The readiness gate's own bound. Every passing run met it within
+# milliseconds of the fields finishing; every failing one (7 on 2026-10-01)
+# polled until the whole deadline expired (~2 min) — a condition still
+# false after this long will not turn true, and the run is retryable anyway.
+READY_WAIT_S = 30.0
 
 
-def _mark(name, stuck_s=PRE_SUBMIT_STUCK_S):
-    _LIVE["name"] = name
-    _LIVE["at"] = time.monotonic()
-    _LIVE["stuck"] = float(stuck_s)
+# The live object's own clock: tests drive the form DEADLINE through a fake
+# `time.monotonic`, and a summary/mark must never consume or follow it.
+_clock = time.monotonic
 
 
-def reset_live_step():
-    _LIVE["name"] = ""
-    _LIVE["at"] = 0.0
-    _LIVE["stuck"] = PRE_SUBMIT_STUCK_S
+class FormLive:
+    """Per-job live state: the pre-POST step mark and the run summary.
 
+    The job thread writes it; the admission worker polls it from the event
+    loop. One object per job — a previous job's mark can never age into
+    the next one's poll, and nothing is module-global.
 
-def pre_submit_hang_step():
-    """The mark name if the flow parked on a pre-POST driver call."""
-    if _LIVE["name"] and time.monotonic() - _LIVE["at"] > _LIVE["stuck"]:
-        return _LIVE["name"]
-    return None
+    The MARK. A pre-POST driver roundtrip has no timeout we can trust:
+    playwright's own `timeout=` is enforced by the driver's loop, and a
+    wedged transport (the greenlet parked on a socket read) never reaches it
+    — measured 2026-09-29: the fields phase sat in the driver's `select` for
+    minutes past every timeout. So EVERY driver call before the submit click
+    is marked around with a threshold ABOVE its own legitimate worst case
+    (its timeout, or the keystroke duration for `type`): a mark older than
+    its threshold means the call never returned, so no field was touched
+    and no POST left the machine — retryable, unlike every other stall.
+    Marks are strictly pre-POST; the submit click onwards is never marked
+    (a click may already have POSTed).
 
+    The SUMMARY. One `form-run {json}` line per job, whatever happened —
+    returned, parked, wedged, never admitted. Counts, booleans, class
+    names, phase names, durations, selectors: NEVER a field value, a token,
+    a body or an exception message. It is the measurement source.
+    """
 
-@contextlib.contextmanager
-def _at(name, stuck_s=PRE_SUBMIT_STUCK_S):
-    """Mark one driver call; always clear it, even when the call raises."""
-    _mark(name, stuck_s)
-    try:
-        yield
-    finally:
-        reset_live_step()
+    def __init__(self, profile=None, headed=None, camoufox=None):
+        # (name, at, stuck) swapped as one tuple: the poller never reads a
+        # half-written mark.
+        self._step = ("", 0.0, PRE_SUBMIT_STUCK_S)
+        self._lock = threading.Lock()
+        self._emitted = False
+        self.started = _clock()
+        self.meta = {"profile": profile, "headed": headed, "camoufox": camoufox}
+        self.phase = None
+        self.reached = None  # furthest flow phase (teardown is not one)
+        self._phase_at = None
+        self.durations = {}
+        self.extra = {}
+        self.result = None
+
+    # -- the mark --------------------------------------------------------
+    def mark(self, name, stuck_s=PRE_SUBMIT_STUCK_S):
+        self._step = (name, _clock(), float(stuck_s))
+
+    def clear(self):
+        self._step = ("", 0.0, PRE_SUBMIT_STUCK_S)
+
+    @property
+    def step(self):
+        return self._step[0]
+
+    def hang_step(self):
+        """The mark name if the flow parked on a pre-POST driver call."""
+        name, at, stuck = self._step
+        if name and _clock() - at > stuck:
+            return name
+        return None
+
+    @contextlib.contextmanager
+    def at(self, name, stuck_s=PRE_SUBMIT_STUCK_S):
+        """Mark one driver call; always clear it, even when the call raises."""
+        self.mark(name, stuck_s)
+        try:
+            yield
+        finally:
+            self.clear()
+
+    # -- the summary -----------------------------------------------------
+    def enter(self, phase):
+        """Close the running phase's duration and open `phase`."""
+        now = _clock()
+        if self.phase is not None and self._phase_at is not None:
+            self.durations[self.phase] = round(
+                self.durations.get(self.phase, 0.0) + now - self._phase_at, 1)
+        self.phase, self._phase_at = phase, now
+        if phase != "teardown":
+            self.reached = phase
+
+    def note(self, **values):
+        self.extra.update(values)
+
+    def summary(self, result=None, **override):
+        result = result if result is not None else (self.result or {})
+        diagnostics = result.get("diagnostics") or {}
+        durations = dict(self.durations)
+        if self.phase is not None and self._phase_at is not None:
+            durations[self.phase] = round(
+                durations.get(self.phase, 0.0) + _clock() - self._phase_at, 1)
+        egress = diagnostics.get("egress") or None
+        posts = [{"n": p.get("n"), "token": p.get("token"), "mint_age_s": p.get("mint_age_s")}
+                 for p in list(diagnostics.get("submission_tokens") or [])]
+        out = {
+            "error": result.get("error"),
+            "ok": bool(result.get("ok")),
+            "form_submissions": result.get("form_submissions", 0),
+            "status": result.get("status", 0),
+            "phase": self.reached,
+            "failed_phase": diagnostics.get("phase"),
+            "failure_class": diagnostics.get("failure_class"),
+            "parked_step": None,
+            "field": diagnostics.get("field_attempt"),
+            "durations_s": durations,
+            "total_s": round(_clock() - self.started, 1),
+            "posts": posts,
+            "token_present": diagnostics.get("token_present"),
+            "egress": ({"country": egress.get("country"), "asn": egress.get("asn")}
+                       if isinstance(egress, dict) else None),
+            "nav_attempts": diagnostics.get("nav_attempts"),
+            "nav_error": diagnostics.get("nav_error"),
+            "ready_met": diagnostics.get("ready_condition_met"),
+            "captcha_scripts": [diagnostics.get("captcha_script_requests"),
+                                diagnostics.get("captcha_script_responses"),
+                                diagnostics.get("captcha_network_failures")],
+            "submit_clicked": diagnostics.get("submit_click_attempted"),
+            "inspect_only": diagnostics.get("inspection_only"),
+            **self.meta,
+            **self.extra,
+        }
+        out.update(override)
+        return out
+
+    def emit(self, result=None, **override):
+        """Log the summary ONCE per job; later calls are no-ops."""
+        with self._lock:
+            if self._emitted:
+                return False
+            self._emitted = True
+        try:
+            line = json.dumps(self.summary(result, **override), separators=(",", ":"),
+                              default=str)
+        except Exception as error:  # a dict mutated mid-dump by a live thread
+            line = json.dumps({"error": override.get("error"), "summary_failed": type(error).__name__})
+        log.info("form-run %s", line)
+        return True
 
 
 def _unmarked(name, stuck_s=PRE_SUBMIT_STUCK_S):
@@ -110,11 +225,99 @@ def validate_form(url, submission_urls, success_url, gate_text=None, completion_
     return {urlsplit(value)._replace(query="", fragment="").geturl() for value in urls}
 
 
-def human_click(page, control, remaining, pre_submit=True) -> None:
+_NO_TOKEN = ("", "null", "undefined", "false")
+
+
+def _token_shape(request, captcha_field):
+    """A POST body's captcha SHAPE — presence and lengths, never a value.
+
+    keep_blank_values: an absent key means "not in the form", [''] means
+    "carried but empty" — the distinction between a server reading the
+    custom field (minted) and the standard one (which the page may leave
+    blank). `present` is the configured field alone (the guard's input);
+    `any` is either watched field (the per-POST record). None when the body
+    cannot be read at all.
+    """
+    try:
+        values = parse_qs(request.post_data or "", keep_blank_values=True)
+    except Exception:  # an unreadable body (or none to read): unknown, not absent
+        return None
+    watch = sorted({n for n in (captcha_field, "g-recaptcha-response") if n})
+
+    def carried(name):
+        found = values.get(name, [])
+        return len(found) == 1 and found[0].strip().lower() not in _NO_TOKEN
+
+    return {"present": carried(captcha_field or "g-recaptcha-response"),
+            "any": any(carried(name) for name in watch),
+            "lengths": {name: [len(v) for v in values.get(name, [])] for name in watch}}
+
+
+# Navigation failures by CODE — the engine's error token, never its message
+# (which carries the URL). Measured 2026-10-01: 18 navigation_failed with
+# class Error, each ~60-120ms after the page opened (the refusal is
+# immediate) and the next attempt of the same identity seconds later
+# navigated fine; 7 with TargetClosedError the same way. Both are retried
+# in-run: navigation is a GET, nothing has been touched, no POST can leave.
+_NAV_CODE = re.compile(r"\b(NS_ERROR_[A-Z_]+|NS_BINDING_[A-Z_]+|net::ERR_[A-Z_]+)")
+_NAV_RETRY = ("NS_ERROR_CONNECTION_REFUSED", "NS_ERROR_PROXY_CONNECTION_REFUSED",
+              "NS_ERROR_NET_RESET", "NS_ERROR_NET_INTERRUPT", "NS_ERROR_NET_TIMEOUT",
+              "NS_ERROR_PROXY_BAD_GATEWAY", "NS_ERROR_PROXY_GATEWAY_TIMEOUT",
+              "NS_ERROR_UNKNOWN_HOST", "NS_ERROR_UNKNOWN_PROXY_HOST", "NS_ERROR_ABORT",
+              "NS_BINDING_ABORTED", "net::ERR_CONNECTION_REFUSED",
+              "net::ERR_PROXY_CONNECTION_FAILED", "net::ERR_CONNECTION_RESET",
+              "net::ERR_TUNNEL_CONNECTION_FAILED", "net::ERR_ABORTED",
+              "interrupted", "target_closed")
+
+
+def _nav_code(error):
+    """A loggable token for a navigation failure (no URL, no message)."""
+    text = str(error)
+    found = _NAV_CODE.search(text)
+    if found:
+        return found.group(1)
+    if "interrupted by another navigation" in text:
+        return "interrupted"
+    if type(error).__name__ == "TargetClosedError" or "has been closed" in text:
+        return "target_closed"
+    if "Timeout" in type(error).__name__ or "Timeout" in text:
+        return "timeout"
+    return type(error).__name__
+
+
+def _click_target(box):
+    """An off-centre point inside `box`, never on a viewport axis.
+
+    Off-centre: an identical dead-centre click on every control is its own
+    pattern. Never x<=1 or y<=1: a trajectory point on x==0/y==0 never gets
+    a renderer ack in camoufox and deadlocks the whole input chain
+    (daijro/camoufox#751, unfixed in our pinned 152.0.4-beta.30) — the old
+    approach START (target minus 100-400px / 60-200px) went off-screen for
+    any field near the left or top edge and was clamped onto exactly that
+    axis.
+    """
+    w, h = box["width"], box["height"]
+    tx = box["x"] + w / 2 + random.uniform(-w / 4, w / 4)
+    ty = box["y"] + h / 2 + random.uniform(-min(4.0, h / 4), min(4.0, h / 4))
+    return max(2.0, tx), max(2.0, ty)
+
+
+def human_click(page, control, remaining, pre_submit=True, live=None) -> None:
     """Click a control the way a pointer does: bring it into view instantly,
-    approach in steps, land off-centre, press and release. An identical
-    dead-centre click on every control is its own pattern; a synthetic .click()
-    with no pointer ever moving is a bigger one.
+    move to it, land off-centre, press and release. A synthetic .click()
+    with no pointer ever moving is an automation signature.
+
+    ONE mouse.move, not a hand-stepped approach. The form browser launches
+    with humanize=True (app.py `_form_browser`), so camoufox already draws
+    a human trajectory for every dispatched move — browser-side, each step
+    re-animated (~0.75s each, measured 2026-09-29: steps=11 took 8.7s). The
+    6-18 manual steps were double humanization: a jagged path of
+    trajectories rather than one, 6-18x the dispatches, and every dispatch
+    a chance at the input-chain deadlock (2026-10-01: 32 parks at 'pointer
+    move', plus 12 at 'field scroll' — plausibly the next driver call
+    queued behind a chain the previous click left stuck). The arrival teleport (e0b814a) and the arrival move's steps
+    (10d7a1d) were retired for the same reason; nothing in the history
+    shows humanize's own single trajectory being scored as automation.
 
     The scroll is instant and settled before geometry is read: with smooth
     scrolling a rect read mid-animation points where the element was, the
@@ -126,7 +329,7 @@ def human_click(page, control, remaining, pre_submit=True) -> None:
     `pre_submit=False` (wizard steps after the first POST) drops the marks:
     see `_unmarked`.
     """
-    at = _at if pre_submit else _unmarked
+    at = live.at if (pre_submit and live is not None) else _unmarked
     with at("field scroll"):
         control.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
     # Instant scrolls do not animate, but layout may need a beat before the
@@ -143,20 +346,16 @@ def human_click(page, control, remaining, pre_submit=True) -> None:
         with at("field click", 13.0):
             control.click(timeout=min(remaining(), 5000))
         return
-    tx = box["x"] + box["width"] / 2 + random.uniform(-box["width"] / 4, box["width"] / 4)
-    ty = box["y"] + box["height"] / 2 + random.uniform(-4, 4)
-    steps = random.randint(6, 18)
-    sx, sy = tx - random.randint(100, 400), ty - random.randint(60, 200)
+    tx, ty = _click_target(box)
     # Input dispatch is the class that wedges (playwright gives it no
-    # timeout of its own) — but camoufox ANIMATES trajectories: measured
-    # 2026-09-29, every run parked here at the old 8s threshold with the
-    # job alive, so the approach legitimately takes up to ~15s. 25s covers
-    # 18 animated steps with margin; a true park still surfaces far before
-    # deadline + grace.
-    with at("pointer move", 25.0):
-        for i in range(1, steps + 1):
-            page.mouse.move(sx + (tx - sx) * i / steps, sy + (ty - sy) * i / steps)
-            page.wait_for_timeout(random.randint(8, 30))
+    # timeout of its own); one animated trajectory is bounded by humanize's
+    # maxTime, so its mark sits at POINTER_MOVE_STUCK_S. Move, a short
+    # human beat, then press — each its own mark, so a park names which.
+    with at("pointer move", POINTER_MOVE_STUCK_S):
+        page.mouse.move(tx, ty)
+    with at("pointer dwell"):
+        page.wait_for_timeout(min(random.randint(60, 180), remaining()))
+    with at("pointer click"):
         page.mouse.click(tx, ty)
 
 
@@ -188,8 +387,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
              require_captcha_token=False, ready_expression=None,
              gate_text=None, step2=None, step2_submit=None, completion_markers=None,
-             stop_after_posts=None):
+             stop_after_posts=None, live=None):
     targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
+    # The caller (run_isolated_form, via the worker) owns the live object and
+    # its summary line; a direct call (tests, fixtures) owns its own.
+    owns_live = live is None
+    live = live if live is not None else FormLive()
     deadline = time.monotonic() + timeout_ms / 1000
     result = {"contract_version": 2, "status": 0, "url": url, "html": "",
               "ok": False, "form_submissions": 0, "error": None}
@@ -202,8 +405,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                    "ready_condition_met": None, "field_attempt": None,
                     "phase": None, "failure_class": None, "dismiss_clicked": [],
                     "banner_visible": None, "field_state": None, "egress": None,
-                    "wizard_gate_clicked": False, "wizard_step2": False}
+                    "wizard_gate_clicked": False, "wizard_step2": False,
+                    "nav_attempts": 0, "nav_error": None}
     result["diagnostics"] = diagnostics
+    live.result = result
+    live.note(wizard=bool(gate_text or step2 or completion_markers),
+              stop_after_posts=stop_after_posts)
     page = None
     control = None
     phase = "navigation"
@@ -239,49 +446,29 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     diagnostics["captcha_guard_blocked"]):
                 route.abort("blockedbyclient")
                 return
-            # Per-POST token forensics: what did THIS post carry, and from
-            # which URL? The gate rejections read "Error verifying reCAPTCHA"
-            # while the comment below claimed gate/step2 carry no field —
-            # an assumption no measurement had tested. Record every POST.
-            try:
-                values = parse_qs(route.request.post_data or "", keep_blank_values=True)
-                watch = sorted({n for n in (captcha_field, "g-recaptcha-response") if n})
-                token_ok = any(
-                    len(values.get(name, [])) == 1 and
-                    values[name][0].strip().lower() not in ("", "null", "undefined", "false")
-                    for name in watch)
+            # Per-POST token forensics, parsed ONCE: what did THIS post carry,
+            # and from which URL? The gate rejections read "Error verifying
+            # reCAPTCHA" while gate/step2 were assumed to carry no field — an
+            # assumption no measurement had tested. Record every POST; the
+            # FIRST one's shape is also the run's token_present (the guard's
+            # input) and must survive a later POST that carries nothing.
+            shape = _token_shape(route.request, captcha_field)
+            if shape is not None:
                 minted = diagnostics.get("last_captcha_mint")
                 diagnostics.setdefault("submission_tokens", []).append({
                     "n": result["form_submissions"],
                     "path": urlsplit(route.request.url).path,
-                    "token": token_ok,
+                    "token": shape["any"],
                     "mint_age_s": (round(now - minted, 1)
                                    if minted is not None else None),
-                    "lengths": {name: [len(v) for v in values.get(name, [])]
-                                for name in watch},
+                    "lengths": shape["lengths"],
                 })
-            except Exception:
-                pass
             if result["form_submissions"] == 0:
-                # Token forensics belong to the FIRST (only tokened) POST;
-                # the gate and step2 POSTs carry no captcha field and must
-                # not overwrite or fail the record.
-                try:
-                    # keep_blank_values: an absent key then means "not in the
-                    # form", [''] means "carried but empty" — the distinction
-                    # between a server reading the custom field (minted) and
-                    # the standard one (which the page may leave blank).
-                    values = parse_qs(route.request.post_data or "", keep_blank_values=True)
-                    names = [captcha_field] if captcha_field else ["g-recaptcha-response"]
-                    diagnostics["token_present"] = any(
-                        len(values.get(name, [])) == 1 and
-                        values[name][0].strip().lower() not in ("", "null", "undefined", "false")
-                        for name in names)
-                    watch = sorted({n for n in (captcha_field, "g-recaptcha-response") if n})
-                    diagnostics["captcha_field_lengths"] = {
-                        name: [len(v) for v in values.get(name, [])] for name in watch}
-                except Exception:
+                if shape is None:
                     diagnostics["token_present"] = None
+                else:
+                    diagnostics["token_present"] = shape["present"]
+                    diagnostics["captcha_field_lengths"] = shape["lengths"]
                 if require_captcha_token and diagnostics["token_present"] is not True:
                     diagnostics["captcha_guard_blocked"] = True
                     result["error"] = "captcha_token_missing"
@@ -325,17 +512,47 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         if is_submission(response.request):
             result["status"] = response.status
 
-    try:
-        context.route("**/*", guard)
+    def open_page():
         log.info("form flow: new_page")
-        with _at("new page"):
-            page = context.new_page()
+        with live.at("new page"):
+            opened = context.new_page()
         log.info("form flow: page ready")
-        page.on("request", request_started)
-        page.on("requestfailed", request_failed)
-        page.on("pageerror", page_error)
-        page.on("response", response_received)
-        navigation = page.goto(url, wait_until=wait_until, timeout=remaining())
+        opened.on("request", request_started)
+        opened.on("requestfailed", request_failed)
+        opened.on("pageerror", page_error)
+        opened.on("response", response_received)
+        return opened
+
+    try:
+        live.enter("navigation")
+        context.route("**/*", guard)
+        # Bounded retry, strictly pre-input: a transient refusal or a page
+        # that died on arrival (see _NAV_RETRY) costs seconds here instead
+        # of a whole caller attempt. A closed page is replaced by a fresh
+        # one in the same context; anything else re-raises as before.
+        for attempt in range(1, NAV_ATTEMPTS + 1):
+            diagnostics["nav_attempts"] = attempt
+            try:
+                if page is None:
+                    page = open_page()
+                navigation = page.goto(url, wait_until=wait_until,
+                                       timeout=remaining(NAV_TIMEOUT_MS))
+                break
+            except TimeoutError:
+                raise  # remaining(): the form deadline itself, nothing to retry with
+            except Exception as error:
+                code = _nav_code(error)
+                diagnostics["nav_error"] = code
+                if attempt >= NAV_ATTEMPTS or code not in _NAV_RETRY:
+                    raise
+                log.info("form flow: navigation attempt %d failed (%s); retrying",
+                         attempt, code)
+                if code == "target_closed":
+                    with contextlib.suppress(Exception):
+                        page.close()
+                    page = None
+                pause = NAV_BACKOFF_S[min(attempt - 1, len(NAV_BACKOFF_S) - 1)]
+                time.sleep(min(pause, max(0.0, deadline - time.monotonic())))
         log.info("form flow: navigated (status=%s)",
                  navigation.status if navigation is not None else None)
         if navigation is not None and isinstance(navigation.status, int):
@@ -355,7 +572,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # possible IP and reads exactly like the 2026-09-29 collapse. Fetched
         # from inside the page, so it traverses the same proxy the form will.
         try:
-            with _at("egress check", 12.0):
+            with live.at("egress check", 12.0):
                 egress = page.evaluate(
                     "fetch('https://ipwho.is/?fields=success,country,connection',"
                     "{signal:AbortSignal.timeout(8000)}).then(r=>r.json()).catch(()=>null)")
@@ -384,8 +601,9 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # now the wheel — an input dispatch that has never wedged across
         # every logged arrival — still marked, so a park on it keeps the
         # same 503-retryable contract: nothing touched, nothing POSTed.
+        live.enter("arrival")
         page.wait_for_timeout(min(random.randint(700, 2200), remaining()))
-        with _at(PRE_SUBMIT_STEP):
+        with live.at(PRE_SUBMIT_STEP):
             page.mouse.wheel(0, random.randint(200, 600))
         log.info("form flow: scrolled")
         page.wait_for_timeout(min(random.randint(400, 1200), remaining()))
@@ -408,7 +626,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 except Exception:
                     continue  # not here (yet) — a late arrival is next round
                 try:
-                    with _at("dismiss click"):
+                    with live.at("dismiss click"):
                         target.click(timeout=remaining(2000))
                     diagnostics["dismiss_clicked"].append(selector)
                     clicked = True
@@ -417,7 +635,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             if clicked:
                 page.wait_for_timeout(min(random.randint(400, 900), remaining()))
             try:
-                with _at("banner check"):
+                with live.at("banner check"):
                     diagnostics["banner_visible"] = bool(page.locator(dismiss[0]).first.is_visible())
             except Exception:
                 diagnostics["banner_visible"] = None
@@ -427,7 +645,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
 
         def fill_fields(field_list, pre_submit=True):
             nonlocal control, phase
-            at = _at if pre_submit else _unmarked
+            at = live.at if pre_submit else _unmarked
             for field in field_list:
                 # Selector only — never the value. On an exception this is the
                 # field that was in flight, which is otherwise invisible (the
@@ -439,7 +657,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     # A human click toggles: ensure the checked state rather than
                     # assuming it, but keep the pointer real throughout.
                     for _ in range(3):
-                        human_click(page, control, remaining, pre_submit=pre_submit)
+                        human_click(page, control, remaining, pre_submit=pre_submit, live=live)
                         try:
                             with at("field check"):
                                 if control.is_checked(timeout=remaining(1000)):
@@ -453,7 +671,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     with at("field select", 18.0):
                         control.select_option(field.get("value"), timeout=min(remaining(), 10000))
                 elif action == "type":
-                    human_click(page, control, remaining, pre_submit=pre_submit)
+                    human_click(page, control, remaining, pre_submit=pre_submit, live=live)
                     value = field.get("value") or ""
                     # The human click aims by geometry. When focus never landed
                     # (an overlay swallowed the click, the rect was stale), the
@@ -492,24 +710,33 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             diagnostics["field_attempt"] = None
 
         phase = "fields"
+        live.enter("fields")
         fill_fields(fields)
         if ready_expression:
             phase = "readiness"
+            live.enter("readiness")
             log.info("form flow: readiness")
             diagnostics["ready_condition_met"] = False
             # Camoufox isolates ordinary evaluation from the page's globals.
             # The prefix opts into its main world (a JS label in other engines).
-            # Each iteration re-marks, so the loop may legitimately run for
-            # minutes without ever looking parked — only one stuck call does.
+            # Each iteration re-marks, so the loop never looks parked — only
+            # one stuck call does. The loop itself is bounded by READY_WAIT_S:
+            # a condition still false then is a page whose integration never
+            # loaded, and the run fails fast as readiness_failed (zero POSTs,
+            # retryable) instead of polling the whole remaining deadline away.
+            ready_until = time.monotonic() + READY_WAIT_S
             while True:
-                with _at("ready check"):
+                with live.at("ready check"):
                     met = page.evaluate("mw:(" + ready_expression + ")") is True
                 if met:
                     break
-                with _at("ready pause"):
+                if time.monotonic() >= ready_until:
+                    raise TimeoutError("ready condition not met")
+                with live.at("ready pause"):
                     page.wait_for_timeout(remaining(100))
             diagnostics["ready_condition_met"] = True
         phase = "submit"
+        live.enter("submit")
         log.info("form flow: submit click")
         # Exactly one click — the page's own handler mints any CAPTCHA token
         # it needs (observation only above; this service never mints). Dwell
@@ -519,6 +746,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         diagnostics["submit_click_attempted"] = True
         page.locator(submit).click(timeout=remaining())
         phase = "outcome"
+        live.enter("outcome")
         if not wizard:
             log.info("form flow: waiting for outcome (success_url=%s)", bool(success_url))
             try:
@@ -726,16 +954,21 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             except Exception:
                 diagnostics["field_state"] = None
         result["error"] = result["error"] or ("outcome_unknown" if result["form_submissions"] else f"{phase}_failed")
-    # One line per form, whatever happened: field_attempt names the SELECTOR
-    # in flight when a phase raised (fields_failed alone says where nothing),
-    # failure_class the kind of exception behind it, banner the cookie-banner
-    # state before the fields phase, and the path shows what the submit
-    # actually landed on. Selector + class + booleans + path only — never a
-    # value or an exception message.
-    log.info("form flow: done ok=%s error=%s field=%s cls=%s subs=%s status=%s path=%s banner=%s fstate=%s",
-             result.get("ok"), result.get("error"), diagnostics.get("field_attempt"),
-             diagnostics.get("failure_class"),
-             result.get("form_submissions"), result.get("status"),
-             urlsplit(result.get("url") or "").path,
-             diagnostics.get("banner_visible"), diagnostics.get("field_state"))
+    finally:
+        # One line per form, on EVERY return path — inspect_only and
+        # stopped_after_posts return from inside the try and used to skip
+        # it (2026-10-01: inspect runs ended at "wait done" with no verdict
+        # in the log). field_attempt names the SELECTOR in flight when a
+        # phase raised, failure_class the kind of exception behind it,
+        # banner the cookie-banner state before the fields phase, and the
+        # path shows what the submit actually landed on. Selector + class +
+        # booleans + path only — never a value or an exception message.
+        log.info("form flow: done ok=%s error=%s field=%s cls=%s subs=%s status=%s path=%s banner=%s fstate=%s",
+                 result.get("ok"), result.get("error"), diagnostics.get("field_attempt"),
+                 diagnostics.get("failure_class"),
+                 result.get("form_submissions"), result.get("status"),
+                 urlsplit(result.get("url") or "").path,
+                 diagnostics.get("banner_visible"), diagnostics.get("field_state"))
+        if owns_live:
+            live.emit(result)
     return result

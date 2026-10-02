@@ -83,7 +83,7 @@ from pydantic import BaseModel, Field
 
 from camoufox.sync_api import Camoufox
 from camoufox.utils import launch_options
-from form_flow import validate_form
+from form_flow import FormLive, validate_form
 from form_worker import FormRetryable, FormWorker, run_isolated_form
 import form_inspect
 import launch_health
@@ -620,6 +620,23 @@ _form_worker = FormWorker()
 _form_proxy_session = secrets.token_hex(6)
 
 
+def _camoufox_version() -> str:
+    """Wrapper package + pinned browser build, for the form-run summary.
+
+    CAMOUFOX_BUILD is the Dockerfile's CAMOUFOX_BROWSER pin re-exported as
+    an ENV (a build ARG is gone at runtime). Never raises: a summary field.
+    """
+    try:
+        from importlib.metadata import version
+        package = version("camoufox")
+    except Exception:
+        package = "?"
+    return "%s/%s" % (package, os.environ.get("CAMOUFOX_BUILD") or "?")
+
+
+_CAMOUFOX_VERSION = _camoufox_version()
+
+
 def _profile_dir(profile: str) -> str:
     root = os.environ.get("FORM_PROFILE_DIR") or os.path.join(
         tempfile.gettempdir(), "form-profiles")
@@ -987,6 +1004,9 @@ async def form_submit(req: FormSubmitRequest):
     except (ValueError, re.error) as e:
         raise HTTPException(status_code=400, detail=str(e))
     session = req.exit_session or (secrets.token_hex(6) if req.fresh_ip else _form_proxy_session)
+    # One per job: the pre-POST mark the worker polls and the job's single
+    # `form-run {json}` summary line (no values, tokens or bodies).
+    live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
         data = await _form_worker.run(partial(run_isolated_form,
@@ -999,7 +1019,8 @@ async def form_submit(req: FormSubmitRequest):
             inspect_only=req.inspect_only, require_captcha_token=req.require_captcha_token,
             ready_expression=req.ready_expression, gate_text=req.gate_text,
             step2=[f.model_dump() for f in req.step2], step2_submit=req.step2_submit,
-            completion_markers=req.completion_markers, stop_after_posts=req.stop_after_posts), url=req.url, deadline=deadline)
+            completion_markers=req.completion_markers, stop_after_posts=req.stop_after_posts,
+            live=live), url=req.url, deadline=deadline, live=live)
     except FormRetryable as parked:
         # Parked on the one unbounded pre-POST call (the marker says where):
         # no field touched, no POST left this machine — the identity is
@@ -1051,7 +1072,7 @@ def _retryable_zero_post(data: dict) -> bool:
 
 # Read-only sibling of /form-submit: same browser path and admission.
 form_inspect.register(app, worker=_form_worker, form_browser=_form_browser,
-                      shared_session=_form_proxy_session)
+                      shared_session=_form_proxy_session, camoufox=_CAMOUFOX_VERSION)
 
 
 class BytesRequest(BaseModel):

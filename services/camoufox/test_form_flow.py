@@ -1,4 +1,5 @@
 import ast
+import json
 import pathlib
 import re
 import unittest
@@ -288,6 +289,138 @@ class FormTests(unittest.TestCase):
         self.assertEqual(d["dismiss_clicked"], ["button.accept-cookies"])
         self.assertFalse(d["banner_visible"])
 
+    # -- one humanized move per click ------------------------------------
+
+    def test_each_click_is_one_pointer_move_not_a_stepped_approach(self):
+        # humanize=True already draws the trajectory; the manual 6-18 step
+        # approach was double humanization and 6-18x the wedge surface.
+        result = run_form(self.context, **self.params)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.page.mouse.move.call_count, 1)  # one field, one move
+        self.assertEqual(self.page.mouse.click.call_count, 1)
+        x, y = self.page.mouse.move.call_args.args
+        self.assertEqual((x, y), self.page.mouse.click.call_args.args)
+        # inside the control's box (10..110 x 10..30), off-centre allowed
+        self.assertTrue(10 <= x <= 110 and 10 <= y <= 30)
+
+    def test_click_target_never_lands_on_a_viewport_axis(self):
+        # daijro/camoufox#751: a trajectory point on x==0/y==0 deadlocks
+        # the input chain. A control flush with the corner must still be
+        # aimed strictly inside the viewport.
+        for _ in range(200):
+            x, y = form_flow._click_target({"x": 0, "y": 0, "width": 4, "height": 2})
+            self.assertGreaterEqual(x, 2.0)
+            self.assertGreaterEqual(y, 2.0)
+
+    def test_pointer_marks_are_split_so_a_park_names_its_call(self):
+        live = form_flow.FormLive()
+        seen = []
+        original = live.mark
+
+        def recording(name, stuck_s=form_flow.PRE_SUBMIT_STUCK_S):
+            seen.append((name, stuck_s))
+            original(name, stuck_s)
+
+        live.mark = recording
+        run_form(self.context, **self.params, live=live)
+        names = [name for name, _ in seen]
+        self.assertIn("pointer move", names)
+        self.assertIn("pointer click", names)
+        self.assertEqual(dict(seen)["pointer move"], form_flow.POINTER_MOVE_STUCK_S)
+
+    # -- navigation retry --------------------------------------------------
+
+    @patch("form_flow.time.sleep")
+    def test_transient_navigation_refusal_is_retried_in_run(self, sleep):
+        # 2026-10-01: 18 navigation_failed (class Error) failed ~70ms after
+        # the page opened and the same identity navigated fine seconds
+        # later. Navigation is a GET before any input: retry it here.
+        self.page.goto.side_effect = [RuntimeError("Page.goto: NS_ERROR_CONNECTION_REFUSED"), Mock()]
+        result = run_form(self.context, **self.params)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.page.goto.call_count, 2)
+        self.assertEqual(result["diagnostics"]["nav_attempts"], 2)
+        self.assertEqual(result["diagnostics"]["nav_error"], "NS_ERROR_CONNECTION_REFUSED")
+        sleep.assert_called_once()
+
+    @patch("form_flow.time.sleep")
+    def test_a_page_closed_on_arrival_is_replaced(self, _sleep):
+        class TargetClosedError(Exception):
+            pass
+        self.page.goto.side_effect = [
+            TargetClosedError("Target page, context or browser has been closed"), Mock()]
+        result = run_form(self.context, **self.params)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.context.new_page.call_count, 2)
+        self.assertEqual(result["diagnostics"]["nav_error"], "target_closed")
+
+    @patch("form_flow.time.sleep")
+    def test_navigation_retries_are_bounded_and_stay_zero_post(self, _sleep):
+        self.page.goto.side_effect = RuntimeError(
+            "Page.goto: NS_ERROR_PROXY_CONNECTION_REFUSED at https://example.test/private")
+        result = run_form(self.context, **self.params)
+        self.assertEqual(result["error"], "navigation_failed")
+        self.assertEqual(result["form_submissions"], 0)
+        self.assertEqual(self.page.goto.call_count, form_flow.NAV_ATTEMPTS)
+        self.assertFalse(result["diagnostics"]["submit_click_attempted"])
+        self.assertNotIn("private", str(result))
+
+    @patch("form_flow.time.sleep")
+    def test_unknown_navigation_errors_are_not_retried(self, sleep):
+        self.page.goto.side_effect = RuntimeError("Page.goto: Invalid url")
+        result = run_form(self.context, **self.params)
+        self.assertEqual(result["error"], "navigation_failed")
+        self.assertEqual(self.page.goto.call_count, 1)
+        sleep.assert_not_called()
+
+    # -- readiness bound ---------------------------------------------------
+
+    def test_readiness_is_bounded_and_never_clicks(self):
+        # 2026-10-01: every readiness_failed polled until the whole deadline
+        # (~2 min). A condition false for READY_WAIT_S fails fast instead.
+        self.page.evaluate.return_value = False
+        with patch.object(form_flow, "READY_WAIT_S", 0.05):
+            result = run_form(self.context, **self.params,
+                              ready_expression="window.formReady === true", timeout_ms=60000)
+        self.assertEqual(result["error"], "readiness_failed")
+        self.assertEqual(result["form_submissions"], 0)
+        self.assertEqual(result["diagnostics"]["failure_class"], "TimeoutError")
+        self.page.locator.return_value.click.assert_not_called()
+
+    # -- the done line and the summary on every path ---------------------
+
+    def run_logged(self, **overrides):
+        with self.assertLogs("camoufox.forms", level="INFO") as logs:
+            result = run_form(self.context, **{**self.params, **overrides})
+        return result, [r.getMessage() for r in logs.records]
+
+    def test_inspect_only_logs_the_done_line_and_one_summary(self):
+        _result, messages = self.run_logged(inspect_only=True)
+        self.assertEqual(sum(m.startswith("form flow: done") for m in messages), 1)
+        self.assertEqual(sum(m.startswith("form-run ") for m in messages), 1)
+
+    def test_summary_never_carries_values_tokens_or_bodies(self):
+        self.request.post_data = "0-captcha=private-token&email=private-email"
+        result, messages = self.run_logged(captcha_field="0-captcha")
+        self.assertTrue(result["ok"])
+        line = next(m for m in messages if m.startswith("form-run "))
+        summary = json.loads(line[len("form-run "):])
+        self.assertEqual(summary["posts"], [{"n": 0, "token": True, "mint_age_s": None}])
+        self.assertTrue(summary["token_present"])
+        joined = "\n".join(messages)
+        for secret in ("private-value", "private-token", "private-email"):
+            self.assertNotIn(secret, joined)
+
+    def test_first_post_forensics_agree_with_the_per_post_record(self):
+        # Parsed once: token_present / captcha_field_lengths (first POST)
+        # and submission_tokens[0] come from the same shape.
+        self.request.post_data = "0-captcha=private-token&g-recaptcha-response="
+        result = run_form(self.context, **self.params, captcha_field="0-captcha")
+        d = result["diagnostics"]
+        self.assertEqual(d["captcha_field_lengths"], d["submission_tokens"][0]["lengths"])
+        self.assertTrue(d["token_present"])
+        self.assertTrue(d["submission_tokens"][0]["token"])
+
 
 class WizardTests(unittest.TestCase):
     """atoka's wizard: step0 -> business-email gate -> step2 -> completion.
@@ -522,6 +655,17 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(self.locs["button, a"].click.call_count, 0)
         self.assertEqual(self.route.continue_.call_count, 1)  # step0 only
         self.assertEqual(self.route.abort.call_count, 1)      # its double-fire
+
+    def test_stopped_after_posts_logs_the_done_line(self):
+        self.locator("button, a").is_visible.return_value = False
+        self.locator("#id_1-company_name").is_visible.return_value = False
+        with self.assertLogs("camoufox.forms", level="INFO") as logs:
+            result = run_form(self.context, **{**self.params, "stop_after_posts": 1})
+        self.assertEqual(result["error"], "stopped_after_posts")
+        messages = [r.getMessage() for r in logs.records]
+        self.assertEqual(sum(m.startswith("form flow: done") for m in messages), 1)
+        self.assertEqual(sum(m.startswith("form-run ") and "stopped_after_posts" in m
+                             for m in messages), 1)
 
     def test_gate_and_marker_patterns_must_compile(self):
         with self.assertRaises(re.error):

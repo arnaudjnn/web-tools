@@ -22,6 +22,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download the Camoufox Firefox build + the GeoIP database into the image
 # so the runtime container starts fast and offline.
 ARG CAMOUFOX_BROWSER=official/stable/152.0.4-beta.30
+# Re-exported for the form-run summary line (an ARG is gone at runtime).
+ENV CAMOUFOX_BUILD=$CAMOUFOX_BROWSER
 # Order is the fix: FETCH THE PIN EXPLICITLY first, then pin, then assert.
 # `fetch` starts by wiping a non-empty INSTALL_DIR when its compat flag is
 # absent — on a fresh image that deletes config.json, so a pin written before

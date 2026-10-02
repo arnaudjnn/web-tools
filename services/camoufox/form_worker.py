@@ -17,9 +17,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import form_flow
 import launch_health
-from form_flow import run_form, validate_form
+from form_flow import FormLive, run_form, validate_form
 
 log = logging.getLogger("camoufox.forms")
 
@@ -67,15 +66,39 @@ def not_started(url, error):
             "diagnostics": {"submit_click_attempted": False, "token_present": None}}
 
 
-def run_isolated_form(browser_factory, *, deadline, runner=None, **params):
+def run_isolated_form(browser_factory, *, deadline, runner=None, live=None, **params):
     """No request can reach the target until browser and context are ready.
 
     `runner` replaces run_form for a read-only job (form_inspect) that shares
-    the same launch, retry and teardown."""
+    the same launch, retry and teardown.
+
+    Emits the job's one `form-run` summary line on every way out (a
+    structured failure, a runner result, or an exception escaping), after
+    teardown so its duration is in the line.
+    """
+    live = live if live is not None else FormLive()
+    if runner is not None:
+        live.note(runner=getattr(runner, "__name__", "runner"))
+    result = failure = None
+    try:
+        result = _run_isolated(browser_factory, deadline, live, runner, params)
+        return result
+    except BaseException as error:
+        failure = type(error).__name__
+        raise
+    finally:
+        if result is not None:
+            live.emit(result)
+        else:
+            live.emit(None, error="exception", failure_class=failure)
+
+
+def _run_isolated(browser_factory, deadline, live, runner, params):
     validate_form(params["url"], params.get("submission_urls"), params.get("success_url"),
                   params.get("gate_text"), params.get("completion_markers"))
     manager = context = None
     context_owned = True
+    live.enter("launch")
     try:
         # One launch retry: the first launch of a fresh process (tunnel still
         # coming up, proxy exit cycling) fails transiently, and today that
@@ -84,6 +107,7 @@ def run_isolated_form(browser_factory, *, deadline, runner=None, **params):
         for attempt in (1, 2):
             if time.monotonic() >= deadline:
                 return not_started(params["url"], "deadline_before_browser")
+            live.note(launch_attempts=attempt)
             try:
                 # `headed` lives in the browser_factory closure, never in params
                 # (run_form would reject it as an unknown keyword) — log what is
@@ -92,6 +116,9 @@ def run_isolated_form(browser_factory, *, deadline, runner=None, **params):
                 manager = browser_factory()
                 browser = manager.__enter__()
                 launch_health.note(True)
+                version = getattr(browser, "version", None)
+                if isinstance(version, str) and version:
+                    live.note(browser_version=version)
                 log.info("form phase: browser entered")
                 break
             except Exception as error:
@@ -131,8 +158,13 @@ def run_isolated_form(browser_factory, *, deadline, runner=None, **params):
         # Do not catch unexpected exceptions here as "zero submissions": once
         # page execution starts, missing evidence means an unknown outcome.
         log.info("form phase: entering run_form (budget=%sms)", budget)
-        return (runner or run_form)(context, timeout_ms=budget, **params)
+        if runner is not None:
+            # A read-only runner (no input, so no pre-POST marks to poll).
+            live.enter("runner")
+            return runner(context, timeout_ms=budget, **params)
+        return run_form(context, timeout_ms=budget, live=live, **params)
     finally:
+        live.enter("teardown")
         closes = []
         if context is not None and context_owned:
             closes.append(context.close)
@@ -149,14 +181,27 @@ class FormWorker:
     def __init__(self):
         self._admission = asyncio.Lock()
 
-    async def run(self, job, *, url, deadline):
+    async def run(self, job, *, url, deadline, live=None):
+        """Run `job` on a fresh thread; `live` is the job's FormLive.
+
+        The poll reads ITS mark (never a module global), and every way out
+        that the job itself cannot report — never admitted, parked, wedged —
+        emits the job's summary line from here. Once per job: the orphan of
+        a park finishing later cannot log a second verdict.
+        """
+        live = live if live is not None else FormLive()
+        live.enter("queue")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return not_started(url, "queue_deadline_exceeded")
+            result = not_started(url, "queue_deadline_exceeded")
+            live.emit(result)
+            return result
         try:
             await asyncio.wait_for(self._admission.acquire(), remaining)
         except asyncio.TimeoutError:
-            return not_started(url, "queue_deadline_exceeded")
+            result = not_started(url, "queue_deadline_exceeded")
+            live.emit(result)
+            return result
         executor = None
         state = {"released": False}
 
@@ -169,8 +214,6 @@ class FormWorker:
             # A failed Playwright launch can leave its sync thread tainted.
             # Never reuse that thread, even if closing the manager failed.
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="camoufox-form")
-            # A previous job's marker must never age into this one's poll.
-            form_flow.reset_live_step()
             future = asyncio.get_running_loop().run_in_executor(executor, job)
         except BaseException:
             if executor is not None:
@@ -202,7 +245,7 @@ class FormWorker:
                     # The job itself finished with TimeoutError (form deadline)
                     # — a normal outcome, not a wedge. Preserve its exception.
                     return future.result()
-                stuck = form_flow.pre_submit_hang_step()
+                stuck = live.hang_step()
                 if stuck is not None:
                     # Parked before the submit click: no field touched, no POST
                     # left this machine, so the caller may replay the same
@@ -210,6 +253,7 @@ class FormWorker:
                     release_once()
                     log.warning("form job parked pre-submit at '%s' — zero POSTs,"
                                 " retryable | future done=%s", stuck, future.done())
+                    live.emit(None, error="parked", parked_step=stuck)
                     _schedule_shed("parked thread's browser cannot be closed")
                     raise FormRetryable(stuck) from None
                 if time.monotonic() < hard_end:
@@ -235,5 +279,6 @@ class FormWorker:
                 log.warning("form job wedged past deadline + grace; admission released, outcome unknown"
                             " | future done=%s threads=%s\n%s",
                             future.done(), threads, stacks.strip())
+                live.emit(None, error="wedged", parked_step=live.step or None)
                 _schedule_shed("leaked browser cannot be closed")
                 raise TimeoutError("form outcome unavailable") from None

@@ -129,6 +129,17 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   observation fields `captcha_field` / `require_captcha_token`. Text is typed
   keystroke-by-keystroke — reCAPTCHA v3 scores behaviour — so never
   reintroduce `.fill(`: `test_form_flow.py` greps for it.
+- **One `mouse.move` per click; never a hand-stepped approach.** Forms launch
+  with `humanize=True`, which already animates every move; stepping it was
+  double humanization and 6–18× the dispatches into Camoufox's input-chain
+  deadlock (daijro/camoufox#751: any trajectory point on x==0/y==0) — 32
+  `pointer move` parks on 2026-10-01. Click targets are clamped to ≥2 px.
+- **Forms measure themselves**: every job logs one `form-run {json}` line (no
+  values/tokens/bodies) — phases with durations, per-POST `{n, token,
+  mint_age_s}`, egress country/asn, profile, headed, Camoufox version,
+  `parked_step`, `nav_error`. Count G1 (`posts` non-empty / all runs) from it
+  rather than from caller-side bookkeeping. The live mark is per job
+  (`FormLive`), not a module global.
 
 ## Deploy lore (Railway, project `3375ebc9…`)
 
