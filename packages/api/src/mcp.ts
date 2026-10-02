@@ -1,48 +1,21 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { tools, functionMap } from '@web-tools/toolkit';
-import type { ToolDefinition, ToolResult } from '@web-tools/toolkit';
+import { functionMap, tools } from '@web-tools/toolkit';
 
 export function createServer(): McpServer {
-  const server = new McpServer(
-    { name: 'web_tools', version: '1.0.0' },
-    { capabilities: { logging: {} } },
-  );
+  const server = new McpServer({ name: 'web_tools', version: '1.0.0' }, { capabilities: { logging: {} } });
 
   for (const tool of tools) {
-    registerTool(server, tool);
+    const handler = functionMap[tool.name];
+    server.registerTool(
+      tool.name,
+      { description: tool.description, inputSchema: tool.parameters.shape, annotations: tool.annotations },
+      // The SDK has validated params against the same schema REST uses. The
+      // handler never throws; `data` is REST-only (its JSON is already in content).
+      async (params: Record<string, unknown>) => {
+        const { content, isError } = await handler(params);
+        return { content, isError: isError ?? false };
+      },
+    );
   }
-
   return server;
-}
-
-function registerTool(server: McpServer, tool: ToolDefinition): void {
-  const handler = functionMap[tool.name];
-  if (!handler) return;
-
-  server.tool(
-    tool.name,
-    tool.description,
-    tool.parameters.shape ?? {},
-    async (params: Record<string, unknown>) => {
-      try {
-        const result = await handler(params);
-
-        // If the function already returns a ToolResult, pass through
-        if (result?.content && Array.isArray(result.content)) {
-          return result as ToolResult;
-        }
-
-        // Otherwise wrap the result as JSON text
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
-        };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: 'text' as const, text: JSON.stringify({ error: message }) }],
-          isError: true,
-        };
-      }
-    },
-  );
 }

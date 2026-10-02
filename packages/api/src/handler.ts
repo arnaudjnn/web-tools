@@ -1,19 +1,35 @@
 import type { Request, Response } from 'express';
-import { functionMap } from '@web-tools/toolkit';
+import { functionMap, validateParams, type ContentBlock, type ToolResult } from '@web-tools/toolkit';
 
-export function toolHandler(toolName: string) {
+/**
+ * The REST v0 body for a tool result. Backward compatible with what REST
+ * callers already parse:
+ *   - JSON-native tools (output:'data') answer with the bare payload, and
+ *     HTTP 500 {error} on failure;
+ *   - everything else answers with {content, isError}, where image and PDF
+ *     blocks come back as the base64 text they always were.
+ */
+function restText(c: ContentBlock): { type: 'text'; text: string } {
+  if (c.type === 'image') return { type: 'text', text: c.data };
+  if (c.type === 'resource') return { type: 'text', text: c.resource.blob };
+  return c;
+}
+
+export async function runRest(name: string, body: unknown): Promise<{ status: number; body: unknown }> {
+  const v = validateParams(name, body);
+  if (!v.ok) return { status: v.status, body: { error: v.error, ...(v.issues ? { issues: v.issues } : {}) } };
+
+  const result: ToolResult = await functionMap[v.tool.name](v.params);
+  if (v.tool.output === 'data') {
+    if (result.isError) return { status: 500, body: { error: result.content.map(restText).map((c) => c.text).join('\n') } };
+    return { status: 200, body: result.data };
+  }
+  return { status: 200, body: { content: result.content.map(restText), isError: result.isError ?? false } };
+}
+
+export function toolHandler(name: string) {
   return async (req: Request, res: Response) => {
-    const handler = functionMap[toolName];
-    if (!handler) {
-      res.status(404).json({ error: `Unknown tool: ${toolName}` });
-      return;
-    }
-    try {
-      const result = await handler(req.body);
-      res.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      res.status(500).json({ error: message });
-    }
+    const { status, body } = await runRest(name, req.body);
+    res.status(status).json(body);
   };
 }

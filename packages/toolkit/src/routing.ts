@@ -18,18 +18,11 @@ export type Backend = 'scrapling' | 'camoufox';
 /**
  * Hosts that must go to Camoufox whatever the default routing says.
  *
- * trustpilot.com, measured 2026-09-27 (the benchmark that removed Crawl4AI):
- * Scrapling's fast mode answers in ~0.7s but with the 970-byte challenge
- * interstitial, and auto-escalating into the managed-Turnstile solve loop
- * WEDGED the whole worker for minutes — no request on any mode completed until
- * the service was redeployed (hence also NEVER_ESCALATE_HOSTS in app.py).
- * Camoufox renders the full page from the Italian exit (890KB, real review
- * bodies) — but only with a forced wait: the review list hydrates well after
- * load, and capturing earlier returns a challenge-looking shell.
- *
- * A residential exit is not a strictly stronger option; for some origins it is
- * the suspicious one. What made Crawl4AI's datacenter IP serve this host was
- * removed with Crawl4AI; Camoufox + forced wait is the measured survivor.
+ * trustpilot.com (measured 2026-09-27): Scrapling fast answers with the 970-byte
+ * challenge interstitial, and escalating into the managed-Turnstile solve loop
+ * wedged the whole worker for minutes (hence NEVER_ESCALATE_HOSTS in app.py).
+ * Camoufox renders the full page from the Italian exit — but only with a
+ * forced wait: the review list hydrates well after load.
  */
 const CAMOUFOX_HOSTS = ['trustpilot.com'];
 
@@ -99,10 +92,4 @@ export function pickBackend(url: string): Backend {
   const host = hostOf(url);
   if (host && matchesHost(host, CAMOUFOX_HOSTS)) return 'camoufox';
   return 'scrapling';
-}
-
-/** True when this host must be served by the Italian residential Firefox. */
-export function prefersCamoufox(url: string): boolean {
-  const host = hostOf(url);
-  return !!host && matchesHost(host, CAMOUFOX_HOSTS);
 }

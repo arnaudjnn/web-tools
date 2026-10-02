@@ -1,65 +1,27 @@
-// Client for the Camoufox sidecar (services/camoufox).
+// Client for the Camoufox sidecar (services/camoufox): stealth Firefox on an
+// ITALIAN residential exit, geoip-coherent (locale and timezone follow the
+// exit IP). Stealth-patched Chromium was flagged by Akamai even through an
+// Italian residential IP; Camoufox was not — hence Italian sources route here.
 //
-// Camoufox is a stealth *Firefox* on an Italian residential exit, and it is not
-// interchangeable with the other backend (after the Crawl4AI removal,
-// benchmarked 2026-09-27 — see AGENTS.md):
-//
-//   Scrapling  Patchright Chromium, US residential exit or challenge-solving
-//   Camoufox   Firefox, IT residential exit, geoip-coherent, sticky sessions
-//
-// The distinction is load-bearing rather than cosmetic: stealth-patched headless
-// Chrome was flagged by Akamai *even through an Italian residential IP*, while
-// Camoufox's fingerprint is internally coherent (its locale and timezone are
-// derived from the exit IP via geoip). That is why Italian authority sources go
-// here and not through Scrapling.
-//
-// It also owns two capabilities nothing else here has: a binary fetch through
-// the residential exit (PDFs), and a warmed-session in-page fetch for
-// Akamai-sensor-gated POSTs.
+// It also owns what Scrapling cannot do: a binary fetch through that exit
+// (PDFs), a warmed-session in-page fetch for Akamai-gated POSTs, and forms.
 
 import { Config } from './config.js';
+import { log } from './log.js';
+import { createSidecar, SidecarError } from './sidecar.js';
 
-export class CamoufoxError extends Error {
-  /** HTTP status of a non-2xx sidecar answer; undefined when none arrived. */
-  status?: number;
-  /** The sidecar's parsed `detail` (FastAPI), e.g. `{message, retryable}`. */
-  detail?: unknown;
-}
+export class CamoufoxError extends SidecarError {}
 
-async function call<T>(path: string, body: Record<string, unknown>, timeoutMs: number): Promise<T> {
-  if (!Config.camoufox.url) {
-    throw new CamoufoxError('CAMOUFOX_URL is not configured');
-  }
+export const camoufox = createSidecar({
+  name: 'camoufox',
+  url: () => Config.camoufox.url,
+  error: (m, s, d) => new CamoufoxError(m, s, d),
+  onTrip: (reason) =>
+    log(`[camoufox] unreachable (${reason}); skipping it for 60s. Fetches fall back to Scrapling.`),
+});
 
-  let response: Response;
-  try {
-    response = await fetch(new URL(path, Config.camoufox.url), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (err) {
-    throw new CamoufoxError(
-      `camoufox ${path} unreachable: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    const error = new CamoufoxError(`camoufox ${path} HTTP ${response.status}: ${text.slice(0, 300)}`);
-    error.status = response.status;
-    try {
-      const parsed = JSON.parse(text) as { detail?: unknown };
-      error.detail = parsed && typeof parsed === 'object' && 'detail' in parsed ? parsed.detail : parsed;
-    } catch {
-      error.detail = undefined;
-    }
-    throw error;
-  }
-
-  return (await response.json()) as T;
-}
+const call = <T>(path: string, body: Record<string, unknown>, clientTimeoutMs: number) =>
+  camoufox.post<T>(path, body, clientTimeoutMs);
 
 export type CamoufoxRender = { status: number; url: string; html: string };
 export type CamoufoxScreenshot = { status: number; url: string; b64: string };
@@ -67,6 +29,7 @@ export type CamoufoxEval = { status: number; url: string; result: unknown };
 export type CamoufoxBytes = { status: number; b64: string };
 export type CamoufoxFormSubmit = { contract_version: number; form_submissions: number; error: string | null; status: number; url: string; html: string; ok: boolean; exit_session: string; diagnostics: Record<string, unknown> };
 export type CamoufoxSpaFetch = { status: number; text: string };
+
 export type CamoufoxFormInspect = {
   ok: boolean;
   error: string | null;

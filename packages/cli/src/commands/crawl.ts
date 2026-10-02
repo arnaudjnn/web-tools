@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { web_crawl } from '@web-tools/toolkit';
+import { printResult, runTool } from '../run.js';
 
 export function registerCrawlCommand(program: Command) {
   program
@@ -13,15 +13,6 @@ export function registerCrawlCommand(program: Command) {
       if (opts.selector) params.css_selector = opts.selector;
       if (opts.timeout) params.timeout_ms = parseInt(opts.timeout, 10);
 
-      const result = await web_crawl(params);
-
-      if (result.isError) {
-        console.error(result.content[0]?.text ?? 'Unknown error');
-        process.exit(1);
-      }
-
-      for (const c of result.content) {
-        if (c.text) console.log(c.text);
-      }
+      printResult(await runTool('web_crawl', params));
     });
 }

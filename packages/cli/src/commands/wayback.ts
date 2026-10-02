@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
-import { web_snapshots, web_archive } from '@web-tools/toolkit';
+import type { SnapshotInfo } from '@web-tools/toolkit';
+import { runTool } from '../run.js';
 
 export function registerWaybackCommand(program: Command) {
   program
@@ -15,13 +16,15 @@ export function registerWaybackCommand(program: Command) {
         url: string,
         opts: { from?: string; to?: string; limit: string; match: string },
       ) => {
-        const snapshots = await web_snapshots({
-          url,
-          from: opts.from,
-          to: opts.to,
-          limit: parseInt(opts.limit, 10),
-          match_type: opts.match as 'exact' | 'prefix' | 'host' | 'domain',
-        });
+        const snapshots = (
+          await runTool('web_snapshots', {
+            url,
+            ...(opts.from ? { from: opts.from } : {}),
+            ...(opts.to ? { to: opts.to } : {}),
+            limit: parseInt(opts.limit, 10),
+            match_type: opts.match,
+          })
+        ).data as SnapshotInfo[];
 
         if (program.opts().json) {
           console.log(JSON.stringify(snapshots, null, 2));
@@ -53,11 +56,13 @@ export function registerWaybackCommand(program: Command) {
         process.exit(1);
       }
 
-      const result = await web_archive({
-        url,
-        timestamp: opts.timestamp,
-        original: opts.original,
-      });
+      const result = (
+        await runTool('web_archive', {
+          url,
+          timestamp: opts.timestamp,
+          ...(opts.original ? { original: true } : {}),
+        })
+      ).data as { waybackUrl: string; contentLength: number; content: string };
 
       if (program.opts().json) {
         console.log(JSON.stringify(result, null, 2));

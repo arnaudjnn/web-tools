@@ -13,7 +13,6 @@
 // always wins the race.
 
 import { Config } from './config.js';
-import { recordCall } from './stats.js';
 import type { ToolResult } from './types.js';
 
 export type AgentStep = { n: number; action: string; url: string; error?: string };
@@ -105,11 +104,6 @@ export async function scraplingAgent(params: {
 
 // ── Tool handler ──────────────────────────────────────────────────────
 
-function done(result: ToolResult): ToolResult {
-  recordCall('web_agent', result.content?.[0]?.text?.length ?? 0, !!result.isError);
-  return result;
-}
-
 /**
  * Run a browser-use agent. `disabled` and `busy` come back as errors with a
  * stable prefix (the caller cannot proceed either way), never as a crash. An
@@ -131,31 +125,26 @@ export async function web_agent(params: Record<string, unknown>): Promise<ToolRe
       isError: true,
     };
   }
-  try {
-    const r = await scraplingAgent({
-      task,
-      startUrl,
-      allowedDomains,
-      maxSteps: typeof params.max_steps === 'number' ? params.max_steps : undefined,
-      outputSchema:
-        params.output_schema && typeof params.output_schema === 'object'
-          ? (params.output_schema as Record<string, unknown>)
-          : undefined,
-      timeoutMs: typeof params.timeout_ms === 'number' ? params.timeout_ms : undefined,
-      stealth: params.stealth === true,
-      allowMutations: params.allow_mutations === true,
-      allowFormSubmit: params.allow_form_submit === true,
-    });
-    if (r.kind === 'disabled') {
-      return done({ content: [{ type: 'text', text: `web_agent disabled: ${r.reason}` }], isError: true });
-    }
-    if (r.kind === 'busy') {
-      return done({ content: [{ type: 'text', text: `web_agent busy (retryable): ${r.reason}` }], isError: true });
-    }
-    return done({ content: [{ type: 'text', text: JSON.stringify(r.result) }], isError: false });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`web_agent failed: ${msg}\n`);
-    return done({ content: [{ type: 'text', text: `web_agent error: ${msg}` }], isError: true });
+  // A transport/HTTP failure throws; instrument() (functions.ts) counts and reports it.
+  const r = await scraplingAgent({
+    task,
+    startUrl,
+    allowedDomains,
+    maxSteps: typeof params.max_steps === 'number' ? params.max_steps : undefined,
+    outputSchema:
+      params.output_schema && typeof params.output_schema === 'object'
+        ? (params.output_schema as Record<string, unknown>)
+        : undefined,
+    timeoutMs: typeof params.timeout_ms === 'number' ? params.timeout_ms : undefined,
+    stealth: params.stealth === true,
+    allowMutations: params.allow_mutations === true,
+    allowFormSubmit: params.allow_form_submit === true,
+  });
+  if (r.kind === 'disabled') {
+    return { content: [{ type: 'text', text: `web_agent disabled: ${r.reason}` }], isError: true };
   }
+  if (r.kind === 'busy') {
+    return { content: [{ type: 'text', text: `web_agent busy (retryable): ${r.reason}` }], isError: true };
+  }
+  return { content: [{ type: 'text', text: JSON.stringify(r.result) }], isError: false };
 }

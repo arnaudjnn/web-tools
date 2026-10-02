@@ -1,100 +1,28 @@
-// Per-process running counters for cost monitoring. In-memory only —
-// resets on container restart, and `startedAt` lets callers detect
-// that. Persistence (Redis / file) is intentionally out of scope until
-// we have a real need.
+// Per-process running counters for cost monitoring. In-memory only — resets
+// on container restart, and `started_at` lets callers detect that.
 //
-// `approxProxyBytes` tracks the size of the payload we return to the
-// caller (markdown / html / json).
-//
-// The metered egress lives in the sidecars (Scrapling's stealth mode, all of
-// Camoufox); this process only estimates their bandwidth from what it hands
-// back. See PROXY_BACKED below.
+// Bytes are the size of the payload handed back (markdown / html / json /
+// base64). The metered egress lives in the sidecars (Scrapling stealth, all of
+// Camoufox), so their bandwidth is estimated from what this process returns.
 
-export type ToolName =
-  | 'web_search'
-  | 'web_fetch'
-  | 'web_html'
-  | 'web_crawl'
-  | 'web_screenshot'
-  | 'web_pdf'
-  | 'web_execute_js'
-  | 'web_snapshots'
-  | 'web_archive'
-  | 'web_bytes'
-  | 'web_eval'
-  | 'web_form_submit'
-  | 'web_form_inspect'
-  | 'web_spa_fetch'
-  | 'web_agent';
+import { TOOL_NAMES, type ToolName } from './types.js';
+
+export type { ToolName };
+
+type Counter = { calls: number; bytes: number; errors: number };
 
 const startedAt = new Date().toISOString();
 
-const counts: Record<ToolName, number> = {
-  web_search: 0,
-  web_fetch: 0,
-  web_html: 0,
-  web_crawl: 0,
-  web_screenshot: 0,
-  web_pdf: 0,
-  web_execute_js: 0,
-  web_snapshots: 0,
-  web_archive: 0,
-  web_bytes: 0,
-  web_eval: 0,
-  web_form_submit: 0,
-  web_form_inspect: 0,
-  web_spa_fetch: 0,
-  web_agent: 0,
-};
+const byTool = Object.fromEntries(
+  TOOL_NAMES.map((t) => [t, { calls: 0, bytes: 0, errors: 0 }]),
+) as Record<ToolName, Counter>;
 
-// Per-tool bytes of returned payload. Used as a proxy-bandwidth proxy.
-const bytes: Record<ToolName, number> = {
-  web_search: 0,
-  web_fetch: 0,
-  web_html: 0,
-  web_crawl: 0,
-  web_screenshot: 0,
-  web_pdf: 0,
-  web_execute_js: 0,
-  web_snapshots: 0,
-  web_archive: 0,
-  web_bytes: 0,
-  web_eval: 0,
-  web_form_submit: 0,
-  web_form_inspect: 0,
-  web_spa_fetch: 0,
-  web_agent: 0,
-};
-
-const errors: Record<ToolName, number> = {
-  web_search: 0,
-  web_fetch: 0,
-  web_html: 0,
-  web_crawl: 0,
-  web_screenshot: 0,
-  web_pdf: 0,
-  web_execute_js: 0,
-  web_snapshots: 0,
-  web_archive: 0,
-  web_bytes: 0,
-  web_eval: 0,
-  web_form_submit: 0,
-  web_form_inspect: 0,
-  web_spa_fetch: 0,
-  web_agent: 0,
-};
-
-// Tools whose upstream fetch MAY egress through a metered residential proxy
-// (Scrapling stealth mode, Camoufox always), so their payload bytes are an
-// upper bound: fast-mode Scrapling egresses on the platform's own IP and costs
-// nothing per byte, and web_search is direct — SearXNG does its own egress.
-// web_archive / web_snapshots moved INTO this list on 2026-09-27: web.archive.org
-// silently drops this project's datacenter IPs, so both now ride the sidecar's
-// residential exit through /raw (bodies are KB–MB; the cost is real but small).
-// Counted as upper bound rather than measured — this process cannot see
-// which sidecar mode actually served a call, and over-counting a cost estimate
-// is the safe direction.
-const PROXY_BACKED: ToolName[] = [
+// Tools whose upstream MAY egress through a metered residential proxy, so
+// their bytes are an upper bound (fast-mode Scrapling is free; this process
+// cannot see which mode served a call, and over-counting is the safe side).
+// web_archive / web_snapshots ride the residential exit through /raw because
+// web.archive.org drops this project's datacenter IPs.
+const PROXY_BACKED = new Set<ToolName>([
   'web_fetch',
   'web_html',
   'web_crawl',
@@ -109,45 +37,44 @@ const PROXY_BACKED: ToolName[] = [
   'web_archive',
   'web_snapshots',
   'web_agent', // upper bound: only stealth=true runs egress on the residential proxy
-];
+]);
 
 export function recordCall(tool: ToolName, payloadBytes: number, isError = false): void {
-  counts[tool]++;
-  bytes[tool] += payloadBytes;
-  if (isError) errors[tool]++;
+  const c = byTool[tool];
+  c.calls++;
+  c.bytes += payloadBytes;
+  if (isError) c.errors++;
+}
+
+/** Test hook: zero every counter. */
+export function resetStats(): void {
+  for (const c of Object.values(byTool)) Object.assign(c, { calls: 0, bytes: 0, errors: 0 });
 }
 
 export function getStats() {
   const ratePerGB = Number(process.env.PROXY_USD_PER_GB ?? '10');
-  // We measure the size of the response payload we hand back (markdown
-  // for web_fetch, html/json for web_html, etc.). The upstream proxy
-  // traffic is the full rendered HTML + scripts + images the sidecar
-  // pulled to produce that payload — typically ~5–10× larger. Tune via
-  // env to match the source's real ratio.
+  // Upstream traffic (full HTML + scripts + images) is typically ~5–10× the
+  // payload handed back. Tune via env to match the source's real ratio.
   const multiplier = Number(process.env.PROXY_BYTES_MULTIPLIER ?? '8');
-  const responseBytes = PROXY_BACKED.reduce((a, t) => a + bytes[t], 0);
-  const proxyCalls = PROXY_BACKED.reduce((a, t) => a + counts[t], 0);
+  const counters = Object.entries(byTool) as [ToolName, Counter][];
+  const proxied = counters.filter(([t]) => PROXY_BACKED.has(t)).map(([, c]) => c);
+  const sum = (cs: Counter[], k: keyof Counter) => cs.reduce((a, c) => a + c[k], 0);
+
+  const responseBytes = sum(proxied, 'bytes');
   const proxyBytes = Math.round(responseBytes * multiplier);
   const proxyGB = proxyBytes / 1024 ** 3;
-  const estUsd = proxyGB * ratePerGB;
-  const totalCalls = (Object.values(counts) as number[]).reduce((a, n) => a + n, 0);
-  const totalErrors = (Object.values(errors) as number[]).reduce((a, n) => a + n, 0);
+  const all = counters.map(([, c]) => c);
   return {
     started_at: startedAt,
     rate_per_gb_usd: ratePerGB,
     bytes_multiplier: multiplier,
-    total_calls: totalCalls,
-    total_errors: totalErrors,
-    proxy_calls: proxyCalls,
+    total_calls: sum(all, 'calls'),
+    total_errors: sum(all, 'errors'),
+    proxy_calls: sum(proxied, 'calls'),
     response_bytes: responseBytes, // raw observed
-    proxy_bytes: proxyBytes,       // estimated upstream
+    proxy_bytes: proxyBytes, // estimated upstream
     proxy_gb: proxyGB,
-    estimated_usd: estUsd,
-    by_tool: Object.fromEntries(
-      (Object.keys(counts) as ToolName[]).map((t) => [
-        t,
-        { calls: counts[t], bytes: bytes[t], errors: errors[t] },
-      ]),
-    ),
+    estimated_usd: proxyGB * ratePerGB,
+    by_tool: Object.fromEntries(counters.map(([t, c]) => [t, { ...c }])),
   };
 }

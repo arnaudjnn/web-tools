@@ -1,3 +1,4 @@
+import type { z } from 'zod';
 import {
   WebSearchInput,
   WebFetchInput,
@@ -17,13 +18,14 @@ import {
   WebFormInspectInput,
   WebAgentInput,
 } from './schemas.js';
-import type { ToolDefinition } from './types.js';
+import type { ToolDefinition, ToolName } from './types.js';
 
 export const tools: ToolDefinition[] = [
   {
     name: 'web_search',
     description: 'Search the web via SearXNG and return results.',
     parameters: WebSearchInput,
+    output: 'data',
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -61,7 +63,9 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'web_screenshot',
-    description: 'Capture a full-page PNG screenshot of a URL and return it base64-encoded',
+    description:
+      'Capture a full-page PNG screenshot of a URL, as the routed visitor sees it. Returned as ' +
+      'MCP image content (REST: base64 text).',
     parameters: WebScreenshotInput,
     annotations: {
       readOnlyHint: true,
@@ -72,7 +76,9 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'web_pdf',
-    description: 'Convert a URL to PDF (Chromium print-to-PDF) and return it base64-encoded',
+    description:
+      'Convert a URL to PDF (Chromium print-to-PDF; Italian sources are rendered by the Italian ' +
+      'residential browser first). Returned as an embedded PDF resource (REST: base64 text).',
     parameters: WebPdfInput,
     annotations: {
       readOnlyHint: true,
@@ -110,6 +116,7 @@ export const tools: ToolDefinition[] = [
     name: 'web_snapshots',
     description: 'List Wayback Machine snapshots for a URL',
     parameters: WebSnapshotsInput,
+    output: 'data',
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -121,6 +128,7 @@ export const tools: ToolDefinition[] = [
     name: 'web_archive',
     description: 'Retrieve an archived page from the Wayback Machine',
     parameters: WebArchiveInput,
+    output: 'data',
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -245,6 +253,7 @@ export const tools: ToolDefinition[] = [
     description:
       'Return process-local usage counters (per-tool call counts, approximate proxy bandwidth, estimated USD cost). In-memory only — resets on container restart; the `started_at` field lets callers detect a restart.',
     parameters: WebUsageStatsInput,
+    output: 'data',
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -254,4 +263,25 @@ export const tools: ToolDefinition[] = [
   },
 ];
 
-export const toolsByName = new Map(tools.map((t) => [t.name, t]));
+export const toolsByName = new Map<string, ToolDefinition>(tools.map((t) => [t.name, t]));
+
+export type ValidationResult =
+  | { ok: true; tool: ToolDefinition; params: Record<string, unknown> }
+  | { ok: false; status: 400 | 404; error: string; issues?: z.ZodIssue[] };
+
+/**
+ * Validate a tool call with the same zod schema MCP validates with, so REST
+ * and the CLI cannot reach a handler with input MCP would have refused.
+ * Unknown keys are stripped, as MCP strips them.
+ */
+export function validateParams(name: string, body: unknown): ValidationResult {
+  const tool = toolsByName.get(name);
+  if (!tool) return { ok: false, status: 404, error: `Unknown tool: ${name}` };
+  const parsed = tool.parameters.safeParse(body ?? {});
+  if (!parsed.success) {
+    return { ok: false, status: 400, error: 'invalid_params', issues: parsed.error.issues };
+  }
+  return { ok: true, tool, params: parsed.data };
+}
+
+export const isToolName = (name: string): name is ToolName => toolsByName.has(name);

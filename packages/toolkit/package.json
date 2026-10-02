@@ -14,12 +14,17 @@
     "build": "tsc",
     "build:watch": "tsc --watch",
     "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@mixmark-io/domino": "2.2.0",
+    "turndown": "7.2.4",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "typescript": "^5.7.3"
+    "@types/turndown": "5.0.6",
+    "typescript": "^5.7.3",
+    "vitest": "5.0.3"
   }
 }

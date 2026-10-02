@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { web_fetch, web_screenshot, web_pdf, web_execute_js } from '@web-tools/toolkit';
+import { printResult, runTool } from '../run.js';
 
 export function registerFetchCommand(program: Command) {
   program
@@ -8,16 +8,7 @@ export function registerFetchCommand(program: Command) {
     .argument('<url>', 'URL to fetch')
     .option('-f, --filter <strategy>', 'Content filter: raw, fit (default: fit)')
     .action(async (url: string, opts: { filter?: string }) => {
-      const result = await web_fetch({ url, f: opts.filter });
-
-      if (result.isError) {
-        console.error(result.content[0]?.text ?? 'Unknown error');
-        process.exit(1);
-      }
-
-      for (const c of result.content) {
-        if (c.text) console.log(c.text);
-      }
+      printResult(await runTool('web_fetch', { url, ...(opts.filter ? { f: opts.filter } : {}) }));
     });
 
   program
@@ -26,19 +17,10 @@ export function registerFetchCommand(program: Command) {
     .argument('<url>', 'URL to screenshot')
     .option('-w, --wait <seconds>', 'Seconds to wait before capture', '2')
     .action(async (url: string, opts: { wait: string }) => {
-      const result = await web_screenshot({
+      printResult(await runTool('web_screenshot', {
         url,
         screenshot_wait_for: parseFloat(opts.wait),
-      });
-
-      if (result.isError) {
-        console.error(result.content[0]?.text ?? 'Unknown error');
-        process.exit(1);
-      }
-
-      for (const c of result.content) {
-        if (c.text) console.log(c.text);
-      }
+      }));
     });
 
   program
@@ -46,16 +28,7 @@ export function registerFetchCommand(program: Command) {
     .description('Generate a PDF of a URL')
     .argument('<url>', 'URL to convert to PDF')
     .action(async (url: string) => {
-      const result = await web_pdf({ url });
-
-      if (result.isError) {
-        console.error(result.content[0]?.text ?? 'Unknown error');
-        process.exit(1);
-      }
-
-      for (const c of result.content) {
-        if (c.text) console.log(c.text);
-      }
+      printResult(await runTool('web_pdf', { url }));
     });
 
   program
@@ -69,16 +42,7 @@ export function registerFetchCommand(program: Command) {
         process.exit(1);
       }
 
-      const result = await web_execute_js({ url, scripts: opts.script });
-
-      if (result.isError) {
-        console.error(result.content[0]?.text ?? 'Unknown error');
-        process.exit(1);
-      }
-
-      for (const c of result.content) {
-        if (c.text) console.log(c.text);
-      }
+      printResult(await runTool('web_execute_js', { url, scripts: opts.script }));
     });
 }
 

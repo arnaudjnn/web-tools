@@ -1,21 +1,30 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import express, { Request, Response } from 'express';
-import { Config, getStats, tools } from '@web-tools/toolkit';
+import { Config, getStats, log, tools } from '@web-tools/toolkit';
 import { createServer } from './mcp.js';
 import { toolHandler } from './handler.js';
-
-const log = (...args: unknown[]) => {
-  process.stderr.write(
-    args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ') + '\n',
-  );
-};
 
 log('Environment check:', { searxngUrl: Config.searxng.url });
 
 const app = express();
 app.use(express.json());
 
+// Set on SIGTERM. Keep-alive clients are told to reconnect elsewhere.
+let draining = false;
+app.use((_req: Request, res: Response, next) => {
+  if (draining) res.set('Connection', 'close');
+  next();
+});
+
 // ── Auth middleware (skips /health) ──────────────────────────────────
+
+// Constant-time: compare fixed-length digests, so neither the content nor the
+// length of the key leaks through response timing.
+const digest = (s: string) => createHash('sha256').update(s).digest();
+const expectedKey = digest(Config.apiKey);
+const keyMatches = (provided: unknown) =>
+  typeof provided === 'string' && provided.length > 0 && timingSafeEqual(digest(provided), expectedKey);
 
 app.use((req: Request, res: Response, next) => {
   if (req.path === '/health') return next();
@@ -24,7 +33,7 @@ app.use((req: Request, res: Response, next) => {
     req.headers.authorization?.replace(/^Bearer\s+/i, '') ||
     (req.query.api_key as string);
 
-  if (provided !== Config.apiKey) {
+  if (!keyMatches(provided)) {
     res.status(403).json({
       error: 'forbidden',
       error_description: 'Invalid or missing API key',
@@ -101,6 +110,10 @@ for (const tool of tools) {
 // ── Health ───────────────────────────────────────────────────────────
 
 app.get('/health', (_req: Request, res: Response) => {
+  if (draining) {
+    res.status(503).json({ status: 'draining' });
+    return;
+  }
   res.json({ status: 'ok' });
 });
 
@@ -115,14 +128,33 @@ app.get('/stats', (_req: Request, res: Response) => {
 // ── Start ────────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   log(`Web Tools server listening on port ${PORT}`);
   log(`  MCP:    POST /mcp`);
   log(`  API:    POST /api/v0/{tool_name}`);
   log(`  Health: GET  /health`);
 });
 
-process.on('SIGINT', async () => {
-  log('Shutting down server...');
-  process.exit(0);
-});
+// Graceful drain: stop accepting, let in-flight calls finish (a crawl or a
+// form submission cut mid-flight is a lost or unknown result), then exit.
+// Bounded, because the platform SIGKILLs eventually anyway — set Railway's
+// RAILWAY_DEPLOYMENT_DRAINING_SECONDS at or above DRAIN_TIMEOUT_MS/1000.
+const DRAIN_TIMEOUT_MS = Number(process.env.DRAIN_TIMEOUT_MS ?? '60000');
+
+function shutdown(signal: string): void {
+  if (draining) return;
+  draining = true;
+  log(`${signal}: draining (up to ${DRAIN_TIMEOUT_MS / 1000}s)...`);
+  server.close(() => {
+    log('drained; exiting');
+    process.exit(0);
+  });
+  server.closeIdleConnections();
+  setTimeout(() => {
+    log('drain timeout; exiting with requests in flight');
+    process.exit(1);
+  }, DRAIN_TIMEOUT_MS).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

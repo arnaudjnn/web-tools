@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
-import { web_search } from '@web-tools/toolkit';
+import type { SearchResult } from '@web-tools/toolkit';
+import { runTool } from '../run.js';
 
 export function registerSearchCommand(program: Command) {
   program
@@ -9,11 +10,13 @@ export function registerSearchCommand(program: Command) {
     .option('-l, --limit <n>', 'Max results (default: 10)', '10')
     .option('-e, --engines <list>', 'Comma-separated engines (e.g. "google,brave")')
     .action(async (query: string, opts: { limit: string; engines?: string }) => {
-      const results = await web_search({
-        query,
-        limit: parseInt(opts.limit, 10),
-        engines: opts.engines,
-      });
+      const results = (
+        await runTool('web_search', {
+          query,
+          limit: parseInt(opts.limit, 10),
+          ...(opts.engines ? { engines: opts.engines } : {}),
+        })
+      ).data as SearchResult[];
 
       if (program.opts().json) {
         console.log(JSON.stringify(results, null, 2));

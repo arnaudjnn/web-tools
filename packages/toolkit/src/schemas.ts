@@ -1,5 +1,15 @@
 import { z } from 'zod';
 
+/**
+ * The longest browser run Scrapling allows (MAX_FETCH_MS in
+ * services/scrapling/app.py; a test keeps the two equal). Fetch-shaped tools
+ * reject anything above it instead of letting the sidecar cap it silently.
+ */
+export const MAX_FETCH_TIMEOUT_MS = 90_000;
+/** web_crawl: URLs per call, and the whole call's wall-clock budget. */
+export const MAX_CRAWL_URLS = 20;
+export const CRAWL_DEADLINE_MS = 300_000;
+
 export const WebSearchInput = z.object({
   query: z.string().min(1).describe('The search query'),
   limit: z
@@ -32,6 +42,8 @@ export const WebFetchInput = z.object({
   // service's job, not theirs.
   delay: z
     .number()
+    .min(0)
+    .max(60)
     .optional()
     .describe(
       'Seconds to settle after the page is stable, before returning (default: 0 — ' +
@@ -83,15 +95,17 @@ export const WebHtmlInput = z.object({
   timeout_ms: z
     .number()
     .min(1000)
-    .max(180000)
+    .max(MAX_FETCH_TIMEOUT_MS)
     .optional()
-    .describe('Upstream fetch timeout in milliseconds (default: 60000)'),
+    .describe(`Upstream fetch timeout in milliseconds (default: 60000, max: ${MAX_FETCH_TIMEOUT_MS})`),
 });
 
 export const WebScreenshotInput = z.object({
   url: z.string().url().describe('URL to screenshot'),
   screenshot_wait_for: z
     .number()
+    .min(0)
+    .max(60)
     .optional()
     .describe('Seconds to wait before capture (default: 2)'),
 });
@@ -112,7 +126,12 @@ export const WebCrawlInput = z.object({
   urls: z
     .array(z.string().url())
     .min(1)
-    .describe('URLs to crawl sequentially; each is fetched and rendered to markdown'),
+    .max(MAX_CRAWL_URLS)
+    .describe(
+      `URLs to crawl sequentially (max ${MAX_CRAWL_URLS}); each is fetched and rendered to markdown. ` +
+        `The whole crawl stops after ${CRAWL_DEADLINE_MS / 1000}s; URLs not reached by then come back ` +
+        'with success:false.',
+    ),
   css_selector: z
     .string()
     .optional()
@@ -120,9 +139,9 @@ export const WebCrawlInput = z.object({
   timeout_ms: z
     .number()
     .min(1000)
-    .max(180000)
+    .max(MAX_FETCH_TIMEOUT_MS)
     .optional()
-    .describe('Per-URL fetch timeout in milliseconds (default: 60000)'),
+    .describe(`Per-URL fetch timeout in milliseconds (default: 60000, max: ${MAX_FETCH_TIMEOUT_MS})`),
 });
 
 export const WebSnapshotsInput = z.object({

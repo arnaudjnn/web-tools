@@ -1,68 +1,29 @@
-export {
-  WebSearchInput,
-  WebFetchInput,
-  WebHtmlInput,
-  WebScreenshotInput,
-  WebPdfInput,
-  WebExecuteJsInput,
-  WebCrawlInput,
-  WebSnapshotsInput,
-  WebArchiveInput,
-  WebBytesInput,
-  WebEvalInput,
-  WebSpaFetchInput,
-  WebRecycleInput,
-  WebUsageStatsInput,
-  WebFormSubmitInput,
-  WebFormInspectInput,
-  WebAgentInput,
-} from './schemas.js';
+export * from './schemas.js';
 
-export { tools, toolsByName } from './tools.js';
+export { tools, toolsByName, validateParams, isToolName } from './tools.js';
+export type { ValidationResult } from './tools.js';
 
-export {
-  web_search,
-  web_fetch,
-  web_html,
-  web_screenshot,
-  web_pdf,
-  web_execute_js,
-  web_crawl,
-  web_snapshots,
-  web_archive,
-  web_usage_stats,
-  web_bytes,
-  web_eval,
-  web_form_submit,
-  web_form_inspect,
-  web_spa_fetch,
-  web_recycle,
-  functionMap,
-} from './functions.js';
-
-export { web_agent, scraplingAgent, AgentError } from './agent.js';
+export { functionMap } from './functions.js';
+export { AgentError } from './agent.js';
 export type { AgentResult, AgentStep, AgentOutcome } from './agent.js';
-export { Config } from './config.js';
-export { getStats, recordCall } from './stats.js';
-export { scraplingFetch, ScraplingError } from './scrapling.js';
-export {
-  camoufoxRender,
-  camoufoxScreenshot,
-  camoufoxEval,
-  camoufoxBytes,
-  camoufoxSpaFetch,
-  camoufoxRecycle,
-  camoufoxFormInspect,
-  CamoufoxError,
-} from './camoufox.js';
-export { pickBackend, isItalianSource } from './routing.js';
-export type { Backend } from './routing.js';
-export type { ScraplingMode, ScraplingResult } from './scrapling.js';
 
+export { Config } from './config.js';
+export { log, errMsg } from './log.js';
+export { getStats } from './stats.js';
+export { pickBackend, isItalianSource, forcedWaitMs } from './routing.js';
+export type { Backend } from './routing.js';
+export { renderMarkdown, renderMarkdownLocal } from './markdown.js';
+export { ScraplingError } from './scrapling.js';
+export { CamoufoxError } from './camoufox.js';
+export { SidecarError } from './sidecar.js';
+
+export { TOOL_NAMES } from './types.js';
 export type {
+  ToolName,
+  ToolResult,
+  ContentBlock,
   SearchResult,
   SnapshotInfo,
-  ToolResult,
   ToolDefinition,
   ToolAnnotations,
 } from './types.js';
