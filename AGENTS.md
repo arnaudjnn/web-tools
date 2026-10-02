@@ -110,10 +110,23 @@ form_submissions, error}`. Traps:
   only with `allow_form_submit` and calls Camoufox `/form-submit` once per run. The
   budget is spent before the call, and only a 503 `retryable` (zero POSTs) refunds it.
   The sidecar needs `CAMOUFOX_URL` for this.
-- **Claude 5.x refuses browser-use's forced `tool_choice`** (HTTP 400 on every step,
-  measured on `claude-sonnet-5-5`), so the runner subclasses `ChatAnthropic` to use
-  `auto`. Then about 1 step in 4–5 comes back with flattened arguments and is
-  retried. That is why `max_steps` defaults to 15.
+- **The LLM step contract is structured outputs.** Four traps, all measured on
+  `claude-sonnet-5-5` on 2026-10-02:
+  - Forced `tool_choice` returns a 400 on Sonnet/Opus 5.5.
+  - `auto` lets the model flatten the action list or answer in prose. That broke prod.
+  - The full AgentOutput schema in `output_config.format` is refused with "compiled
+    grammar is too large". It compiles at 15 actions and fails at 16.
+  - A `thinking` output field trips the `reasoning_extraction` classifier
+    (`stop_reason: refusal`), which looked like "Unterminated string" parse errors.
+
+  The runner sends a compact envelope: `{name: enum, params: [{key, value}]}` plus the
+  fully typed `done` branch, with per-action parameters in the system prompt. It also
+  sets `use_thinking=False` and checks refusals before parsing, and server-side
+  fallbacks default to on (`AGENT_LLM_FALLBACKS=off`). Result: 10/10 real runs, no
+  step errors. After you change actions or the bridge, run `LiveGrammar` in
+  `test_agent.py`.
+- **example.com has no `<h1>` any more** (title, one `<p>`, one link). An empty `h1`
+  is the correct answer, not a failure.
 - Not stealth-equivalent to Scrapling: Patchright's driver patches do not cover
   browser-use's own CDP session. Only the launch flags, the profile and the egress
   carry over. There is no CAPTCHA solving.
