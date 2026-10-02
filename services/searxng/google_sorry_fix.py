@@ -9,6 +9,10 @@ Patch 3: Fallback parser for degraded Google HTML format.
          that the default XPath selectors miss. This adds a fallback that
          extracts results from the degraded format.
 
+Every patch must either apply or be verifiably upstream already; otherwise the
+script exits 1 and the image build fails. A patch that silently stops matching
+after an image bump is a search regression nobody sees until results degrade.
+
 Usage: python3 google_sorry_fix.py /path/to/google.py
 """
 import sys
@@ -18,7 +22,7 @@ google_py = sys.argv[1]
 with open(google_py, "r") as f:
     code = f.read()
 
-patched = False
+failed = []
 
 # Patch 1: detect 302 sorry redirects
 old1 = "    detect_google_sorry(resp)\n    data_image_map"
@@ -31,7 +35,12 @@ new1 = """    detect_google_sorry(resp)
 if old1 in code:
     code = code.replace(old1, new1)
     print("PATCH 1: 302/sorry detection added")
-    patched = True
+elif "status_code == 302" in code and '"/sorry/" in resp.text' in code:
+    # Upstream detect_google_sorry() covers both cases since 2026.9 (verified on
+    # searxng/searxng:2026.9.30-a9d990033).
+    print("PATCH 1: already upstream (detect_google_sorry handles 302 + /sorry/)")
+else:
+    failed.append("1 (302/sorry detection)")
 
 # Patch 2: enrich LinkedIn results with location from HTML context
 old2 = '    return results'
@@ -149,11 +158,13 @@ rindex = code.rfind(old2)
 if rindex >= 0 and rindex > len(code) // 2:
     code = code[:rindex] + new2 + code[rindex + len(old2):]
     print("PATCH 2 + 3: LinkedIn location enrichment + fallback parser added")
-    patched = True
-
-if patched:
-    with open(google_py, "w") as f:
-        f.write(code)
-    print("SUCCESS: patches applied")
 else:
-    print("WARNING: no patches could be applied")
+    failed.append("2+3 (LinkedIn location + fallback parser)")
+
+if failed:
+    print("FAILED: patch(es) did not apply: " + ", ".join(failed), file=sys.stderr)
+    sys.exit(1)
+
+with open(google_py, "w") as f:
+    f.write(code)
+print("SUCCESS: all patches applied or upstream")

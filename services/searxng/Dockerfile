@@ -1,4 +1,8 @@
-FROM searxng/searxng:latest
+# Pinned, not floating (was :latest). google_sorry_fix.py patches this image's
+# google.py and exits 1 when a patch stops matching, so a bump is a deliberate
+# build that either passes the patcher or fails loudly. 2026.9.30-a9d990033 was
+# :latest on 2026-10-02 (digest sha256:a07a5cd2…); patch 1 is upstream there.
+FROM searxng/searxng:2026.9.30-a9d990033
 
 COPY settings.yml /etc/searxng/settings.yml.tpl
 
