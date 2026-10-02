@@ -135,6 +135,7 @@ def run(configs, n, tag, label, out_path, key, threshold):
                    "waited_restarts": waited,
                    "dwell_s": (result.get("verdict") or {}).get("page_dwell_s"),
                    "mint_s": (result.get("verdict") or {}).get("mint_s"),
+                   "mint_error": (result.get("verdict") or {}).get("mint_error"),
                    "token_age_s": (result.get("verdict") or {}).get("token_age_s"),
                    "subs": (result.get("form") or {}).get("form_submissions"),
                    # POSTed but no verdict read back: Google may still have
