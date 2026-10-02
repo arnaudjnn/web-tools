@@ -15,7 +15,8 @@
     "build:watch": "tsc --watch",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@mixmark-io/domino": "2.2.0",
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "@types/turndown": "5.0.6",
+    "@vitest/coverage-v8": "5.0.3",
     "typescript": "^5.7.3",
     "vitest": "5.0.3"
   }

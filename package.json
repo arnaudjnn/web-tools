@@ -10,7 +10,11 @@
     "clean": "pnpm -r run clean",
     "typecheck": "pnpm --filter @web-tools/toolkit run build && pnpm -r run typecheck",
     "test": "pnpm -r --if-present run test",
-    "test:py": "python3 -m unittest discover -s services/scrapling -p 'test_*.py'"
+    "test:coverage": "pnpm -r --if-present run test:coverage",
+    "test:py": "python3 -m unittest discover -s services/scrapling -p 'test_*.py'",
+    "test:py:coverage": "pnpm run test:py:coverage:scrapling && pnpm run test:py:coverage:camoufox",
+    "test:py:coverage:scrapling": "python3 -m coverage run --data-file=.coverage-scrapling --source=services/scrapling --omit='*/test_*' -m unittest discover -s services/scrapling -p 'test_*.py' && python3 -m coverage report --data-file=.coverage-scrapling",
+    "test:py:coverage:camoufox": "python3 -m coverage run --data-file=.coverage-camoufox --source=services/camoufox --omit='*/test_*' -m unittest discover -s services/camoufox -p 'test_form*.py' && python3 -m coverage report --data-file=.coverage-camoufox"
   },
   "engines": {
     "node": "22.x"
