@@ -15,6 +15,11 @@ third-party form: every token is minted on our own key's page
     #   ...deploy the upgrade commit, then:
     python3 score_bench.py --n 20 --label cf156 --out cf156.jsonl
     python3 score_bench.py --report cf152.jsonl cf156.jsonl
+    # Static reCAPTCHA library direct vs via the exit (captcha_lib.py) is a
+    # REQUEST-level A/B (captcha_lib_direct overrides FORM_CAPTCHA_LIB_DIRECT),
+    # so one deployment runs both arms, interleaved run by run:
+    python3 score_bench.py --n 20 --configs lib-direct,lib-proxy --interleave \
+        --label libab --out libab.jsonl
 
 Key: WEB_TOOLS_API_KEY, else `railway variables -s Tools` (same as health.py).
 G2 target: the shipped configuration scores >= 0.7 on >= 95% of runs.
@@ -64,6 +69,14 @@ CONFIGS: dict[str, tuple] = {
                   lambda tag, i: {"wait_ms": 60000, "timeout_ms": 180000}),
     "typing-1": ("as baseline, 1 field typed", None, lambda tag, i: {"field_count": 1}),
     "typing-3": ("as baseline, 3 fields typed", None, lambda tag, i: {"field_count": 3}),
+    # The A/B pair for captcha_lib.py: identical but for where the static
+    # recaptcha__*.js / styles__*.css come from. Compare mean score, the
+    # >=threshold rate and the 'cu' column (captcha_unavailable +
+    # captcha_token_missing: runs whose client never initialised).
+    "lib-direct": ("as baseline, static reCAPTCHA library fetched direct (captcha_lib_direct=true)",
+                   None, lambda tag, i: {"captcha_lib_direct": True}),
+    "lib-proxy": ("as baseline, static reCAPTCHA library via the exit (captcha_lib_direct=false)",
+                  None, lambda tag, i: {"captcha_lib_direct": False}),
 }
 DEFAULT_CONFIGS = ["baseline", "headless", "fresh-profile", "warm-sticky", "warm-fresh-ip",
                    "sticky-isolated", "dwell-0", "dwell-40s"]
@@ -171,52 +184,69 @@ def setup(kind: str, body: dict, tag: str, key: str) -> dict:
     return out
 
 
-def run(configs, n, tag, label, out_path, key, threshold):
+def schedule(configs, n, interleave=False):
+    """(config, i) in run order. Interleaved, the arms alternate run by run,
+    so exit-pool drift over the bench hits both arms alike (an A/B)."""
+    if interleave:
+        return [(name, i) for i in range(n) for name in configs]
+    return [(name, i) for name in configs for i in range(n)]
+
+
+def run(configs, n, tag, label, out_path, key, threshold, interleave=False):
     sink = open(out_path, "a") if out_path else None
     rows = []
-    for name in configs:
+    prepared = set()
+    for name, i in schedule(configs, n, interleave):
         desc, prep, factory = CONFIGS[name]
-        print(f"[{name}] {desc} — {n} runs")
-        if prep:
-            setup(prep[0], dict(prep[1]), tag, key)
-        for i in range(n):
-            body = {"threshold": threshold, **factory(tag, i)}
-            result, secs, waited = call_when_up("web_form_score_probe", body, key)
-            row = {"label": label, "config": name, "i": i, "secs": secs, "at": int(time.time()),
-                   "score": result.get("score"), "passed": result.get("passed"),
-                   "error": result.get("error") or (result.get("form") or {}).get("error"),
-                   "codes": result.get("error-codes"), "egress": result.get("egress"),
-                   "blocked": result.get("blocked"), "exit_ip_changed": result.get("exit_ip_changed"),
-                   "waited_restarts": waited,
-                   "dwell_s": (result.get("verdict") or {}).get("page_dwell_s"),
-                   "mint_s": (result.get("verdict") or {}).get("mint_s"),
-                   "mint_error": (result.get("verdict") or {}).get("mint_error"),
-                   "token_age_s": (result.get("verdict") or {}).get("token_age_s"),
-                   "subs": (result.get("form") or {}).get("form_submissions"),
-                   # The pre-input reCAPTCHA gate (form_flow): usable?, by
-                   # which signal, reloaded once?, which pieces failed.
-                   "captcha_ready": (result.get("form") or {}).get("captcha_ready"),
-                   "captcha_signal": (result.get("form") or {}).get("captcha_signal"),
-                   "captcha_reload": (result.get("form") or {}).get("captcha_reload"),
-                   "captcha_failed": (result.get("form") or {}).get("captcha_failed"),
-                   "token": (result.get("form") or {}).get("token_present"),
-                   # POSTed but no verdict read back: Google may still have
-                   # scored it (Tools logs `oracle verdict`) — a probe miss,
-                   # not a score.
-                   "capture_miss": bool((result.get("form") or {}).get("form_submissions")
-                                        and result.get("verdict") is None)}
-            rows.append(row)
-            if sink:
-                sink.write(json.dumps(row) + "\n")
-                sink.flush()
-            if row["error"] == "probe_unavailable":
-                time.sleep(AWAY_PAUSE_S)  # the park shed the replica; let it come back
-            eg = row["egress"] or {}
-            print(f"  {i + 1:>3}/{n} score={row['score']} {secs:>5}s ip={eg.get('ip')} "
-                  f"asn={eg.get('asn')} err={row['error']}")
+        if name not in prepared:
+            prepared.add(name)
+            print(f"[{name}] {desc} — {n} runs")
+            if prep:
+                setup(prep[0], dict(prep[1]), tag, key)
+        body = {"threshold": threshold, **factory(tag, i)}
+        result, secs, waited = call_when_up("web_form_score_probe", body, key)
+        row = {"label": label, "config": name, "i": i, "secs": secs, "at": int(time.time()),
+               "score": result.get("score"), "passed": result.get("passed"),
+               "error": result.get("error") or (result.get("form") or {}).get("error"),
+               "codes": result.get("error-codes"), "egress": result.get("egress"),
+               "blocked": result.get("blocked"), "exit_ip_changed": result.get("exit_ip_changed"),
+               "waited_restarts": waited,
+               "dwell_s": (result.get("verdict") or {}).get("page_dwell_s"),
+               "mint_s": (result.get("verdict") or {}).get("mint_s"),
+               "mint_error": (result.get("verdict") or {}).get("mint_error"),
+               "token_age_s": (result.get("verdict") or {}).get("token_age_s"),
+               "subs": (result.get("form") or {}).get("form_submissions"),
+               # The pre-input reCAPTCHA gate (form_flow): usable?, by
+               # which signal, reloaded once?, which pieces failed.
+               "captcha_ready": (result.get("form") or {}).get("captcha_ready"),
+               "captcha_signal": (result.get("form") or {}).get("captcha_signal"),
+               "captcha_reload": (result.get("form") or {}).get("captcha_reload"),
+               "captcha_failed": (result.get("form") or {}).get("captcha_failed"),
+               "token": (result.get("form") or {}).get("token_present"),
+               # captcha_lib.py: {hits, cache_hits, bytes, failures} when
+               # the static library went direct, null via the exit.
+               "lib_direct": (result.get("form") or {}).get("captcha_lib_direct"),
+               "exit_rotated": (result.get("form") or {}).get("exit_rotated"),
+               # POSTed but no verdict read back: Google may still have
+               # scored it (Tools logs `oracle verdict`) — a probe miss,
+               # not a score.
+               "capture_miss": bool((result.get("form") or {}).get("form_submissions")
+                                    and result.get("verdict") is None)}
+        rows.append(row)
+        if sink:
+            sink.write(json.dumps(row) + "\n")
+            sink.flush()
+        if row["error"] == "probe_unavailable":
+            time.sleep(AWAY_PAUSE_S)  # the park shed the replica; let it come back
+        eg = row["egress"] or {}
+        print(f"  {name} {i + 1:>3}/{n} score={row['score']} {secs:>5}s ip={eg.get('ip')} "
+              f"asn={eg.get('asn')} err={row['error']}")
     if sink:
         sink.close()
     report(rows, threshold)
+
+
+CLIENT_UNAVAILABLE = ("captcha_unavailable", "captcha_token_missing")
 
 
 def pct(values, q):
@@ -231,7 +261,7 @@ def report(rows, threshold=0.7):
     for row in rows:
         groups[(row.get("label") or "", row["config"])].append(row)
     head = (f"{'label':<8} {'config':<16} {'n':>3} {'scored':>6} {'mean':>5} {'p10':>4} {'med':>4} "
-            f"{'min':>4} {'>=' + str(threshold):>6} {'>=0.5':>6} {'err':>4} {'IPs':>4} {'ASNs':>4}  histogram")
+            f"{'min':>4} {'>=' + str(threshold):>6} {'>=0.5':>6} {'err':>4} {'cu':>3} {'IPs':>4} {'ASNs':>4}  histogram")
     print("\n" + head + "\n" + "-" * len(head))
     for (label, config), items in sorted(groups.items()):
         scores = [r["score"] for r in items if isinstance(r.get("score"), (int, float))]
@@ -244,12 +274,15 @@ def report(rows, threshold=0.7):
         # The rate is over ALL runs: a run with no verdict is a failed run.
         at_t = sum(1 for s in scores if s >= threshold) / n if n else 0
         at_5 = sum(1 for s in scores if s >= 0.5) / n if n else 0
+        # The client never initialised (captcha_lib.py's target failure).
+        cu = sum(1 for r in items if r.get("error") in CLIENT_UNAVAILABLE)
         fmt = lambda v: "-" if v is None else f"{v:.2f}"  # noqa: E731
         print(f"{label:<8} {config:<16} {n:>3} {len(scores):>6} "
               f"{fmt(statistics.mean(scores) if scores else None):>5} {fmt(pct(scores, 0.1)):>4} "
               f"{fmt(statistics.median(scores) if scores else None):>4} {fmt(min(scores) if scores else None):>4} "
-              f"{at_t:>6.0%} {at_5:>6.0%} {n - len(scores):>4} {len(ips):>4} {len(asns):>4}  "
+              f"{at_t:>6.0%} {at_5:>6.0%} {n - len(scores):>4} {cu:>3} {len(ips):>4} {len(asns):>4}  "
               + " ".join(f"{k:.1f}:{v}" for k, v in sorted(hist.items())))
+    print("cu = captcha_unavailable + captcha_token_missing (the page's reCAPTCHA client never initialised).")
     print(f"\nG2: ship a configuration with >={threshold} on >=95% of runs (column '>={threshold}').")
 
 
@@ -262,6 +295,8 @@ def main():
     ap.add_argument("--label", default="", help="free label, e.g. the deployed camoufox version")
     ap.add_argument("--out", help="append raw rows as JSONL")
     ap.add_argument("--threshold", type=float, default=0.7)
+    ap.add_argument("--interleave", action="store_true",
+                    help="alternate configurations run by run (A/B) instead of config by config")
     ap.add_argument("--away-budget", type=float, default=AWAY_BUDGET_S,
                     help=f"max seconds one call waits out sidecar restarts (default {AWAY_BUDGET_S})")
     ap.add_argument("--report", nargs="+", metavar="JSONL", help="only re-print the table from saved rows")
@@ -286,7 +321,7 @@ def main():
     if not key:
         sys.exit("score_bench: cannot read API_KEY (set WEB_TOOLS_API_KEY or `railway link`)")
     globals()["AWAY_BUDGET_S"] = args.away_budget  # read by call_when_up at call time
-    run(configs, args.n, args.tag, args.label, args.out, key, args.threshold)
+    run(configs, args.n, args.tag, args.label, args.out, key, args.threshold, args.interleave)
 
 
 if __name__ == "__main__":

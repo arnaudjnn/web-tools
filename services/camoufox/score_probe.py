@@ -182,6 +182,9 @@ def summarize_probe(data, *, session, profile, headed, threshold, started):
             "nav_error": diagnostics.get("nav_error"),
             "exit_rotated": diagnostics.get("exit_rotated"),
             "captcha_waited_inflight": diagnostics.get("captcha_waited_inflight"),
+            # {hits, cache_hits, bytes, failures} when the static library was
+            # routed direct (captcha_lib.py); null when it went via the exit.
+            "captcha_lib_direct": diagnostics.get("captcha_lib_direct"),
         },
         "duration_s": round(time.monotonic() - started, 1),
     }
@@ -303,10 +306,14 @@ async def _run(job, url, deadline, live):
 
 
 async def run_probe(*, oracle_url, session, profile, headed, wait_ms, field_count, action, timeout_ms,
-                    rotatable=False, rotated=None):
+                    rotatable=False, rotated=None, captcha_lib_direct=None):
     page_url, verify_url = oracle_urls(oracle_url, action)
     deadline = time.monotonic() + timeout_ms / 1000
     params = probe_params(page_url, verify_url, field_count, wait_ms)
+    if captcha_lib_direct is not None:
+        # Per-request override of FORM_CAPTCHA_LIB_DIRECT: one deployment
+        # can A/B both arms (score_bench lib-direct / lib-proxy).
+        params["captcha_lib_direct"] = bool(captcha_lib_direct)
     factory = partial(_deps["browser_factory"], session, False, headed, profile)
     live = _live(profile, headed, "score")
 
@@ -355,6 +362,7 @@ class ScoreProbeRequest(BaseModel):
     threshold: float = Field(DEFAULT_THRESHOLD, ge=0, le=1)
     record_exit: bool = Field(True)
     timeout_ms: int = Field(120_000, ge=10_000, le=240_000)
+    captcha_lib_direct: bool | None = Field(None, description="static reCAPTCHA library direct (true) or via the exit (false); None = FORM_CAPTCHA_LIB_DIRECT")
 
 
 class WarmRequest(BaseModel):
@@ -397,7 +405,7 @@ async def form_score_probe(req: ScoreProbeRequest):
                            headed=req.headed, wait_ms=req.wait_ms, field_count=req.field_count,
                            action=req.action, timeout_ms=req.timeout_ms,
                            rotatable=not req.exit_session and not (req.profile and sticky),
-                           rotated=rotated)
+                           rotated=rotated, captcha_lib_direct=req.captcha_lib_direct)
     session = rotated.get("session", session)
     summary = summarize_probe(data, session=session, profile=req.profile, headed=req.headed,
                               threshold=req.threshold, started=started)
@@ -443,7 +451,7 @@ CANDIDATE_MIN_MS = 60_000
 
 
 async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries, end,
-                           reserve_s=0.0, sessions=()):
+                           reserve_s=0.0, sessions=(), captcha_lib_direct=None):
     """Probe candidate exits on OUR oracle; stop at the first scoring >= threshold.
 
     Shared by /form-exit-select and the form score gate. Each candidate gets
@@ -474,7 +482,8 @@ async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries,
         left_ms = int((end - reserve_s - time.monotonic()) * 1000)
         data = await run_probe(oracle_url=oracle_url, session=session, profile=profile,
                                headed=headed, wait_ms=4000, field_count=2, action=None,
-                               timeout_ms=max(10_000, min(120_000, left_ms - 5_000)))
+                               timeout_ms=max(10_000, min(120_000, left_ms - 5_000)),
+                               captcha_lib_direct=captcha_lib_direct)
         summary = summarize_probe(data, session=session, profile=profile, headed=headed,
                                   threshold=threshold, started=started)
         _record(summary, threshold, True)
@@ -527,10 +536,11 @@ def gate_fits(timeout_ms, wizard):
 
 
 async def run_gate(*, oracle_url, profile, headed, threshold, tries, deadline, reserve_s,
-                   sessions=()):
+                   sessions=(), captcha_lib_direct=None):
     outcome = await probe_candidates(oracle_url=oracle_url, profile=profile, headed=headed,
                                      threshold=threshold, max_tries=tries, end=deadline,
-                                     reserve_s=reserve_s, sessions=sessions)
+                                     reserve_s=reserve_s, sessions=sessions,
+                                     captcha_lib_direct=captcha_lib_direct)
     log.info("score gate: passed=%s score=%s asn=%s after %d tries (profile=%s headed=%s)",
              outcome["passed"], outcome["score"], (outcome["egress"] or {}).get("asn"),
              len(outcome["tries"]), profile, headed)

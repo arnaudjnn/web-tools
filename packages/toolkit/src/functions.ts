@@ -461,6 +461,7 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       oracleUrl: params.score_gate === false || params.inspect_only === true ? undefined : (Config.oracleUrl ?? undefined),
       retryOnCaptchaRejection: typeof params.retry_on_captcha_rejection === 'number' ? params.retry_on_captcha_rejection : undefined,
       captchaRejectionText: typeof params.captcha_rejection_text === 'string' ? params.captcha_rejection_text : undefined,
+      captchaLibDirect: typeof params.captcha_lib_direct === 'boolean' ? params.captcha_lib_direct : undefined,
     });
     // An answered run is never auto-replayable, whatever its outcome: the
     // only sanctioned replay is the 503 below.

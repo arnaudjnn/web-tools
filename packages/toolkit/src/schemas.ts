@@ -279,6 +279,12 @@ export const WebFormSubmitInput = z.object({
     .max(300)
     .optional()
     .describe("Regex (case-insensitive) every error node of the re-rendered form must match (default: 'error verifying recaptcha|captcha (?:non |in)?valid|recaptcha')"),
+  captcha_lib_direct: z
+    .boolean()
+    .optional()
+    .describe(
+      "Fetch reCAPTCHA's static library files (www.gstatic.com/recaptcha/releases/...) direct instead of through the exit, falling back to the exit on failure; identity-bearing google.com requests always use the exit. Default: the sidecar's FORM_CAPTCHA_LIB_DIRECT (off)",
+    ),
 });
 
 export const WebFormInspectInput = z.object({

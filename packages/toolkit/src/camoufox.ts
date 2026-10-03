@@ -196,6 +196,9 @@ export function camoufoxFormSubmit(params: {
   retryOnCaptchaRejection?: number;
   /** Regex every error node must match to count as that refusal. */
   captchaRejectionText?: string;
+  /** Static reCAPTCHA library direct (true) or via the exit (false);
+   *  omit = the sidecar's FORM_CAPTCHA_LIB_DIRECT (captcha_lib.py). */
+  captchaLibDirect?: boolean;
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 120_000;
   return formsCall<CamoufoxFormSubmit>(
@@ -231,6 +234,7 @@ export function camoufoxFormSubmit(params: {
       ...(params.oracleUrl ? { oracle_url: params.oracleUrl } : {}),
       ...(params.retryOnCaptchaRejection ? { retry_on_captcha_rejection: params.retryOnCaptchaRejection } : {}),
       ...(params.captchaRejectionText ? { captcha_rejection_text: params.captchaRejectionText } : {}),
+      ...(params.captchaLibDirect !== undefined ? { captcha_lib_direct: params.captchaLibDirect } : {}),
     },
     timeoutMs + 60_000,
   );

@@ -269,7 +269,7 @@ export const tools: ToolDefinition[] = [
     name: 'web_form_score_probe',
     description:
       'One oracle-scored run of the form browser (same path as web_form_submit): {score, egress, exit_session}. ' +
-      'Fields: profile, headed, fresh_ip, exit_session, sticky_exit, wait_ms, field_count, action, threshold, timeout_ms.',
+      'Fields: profile, headed, fresh_ip, exit_session, sticky_exit, wait_ms, field_count, action, threshold, timeout_ms, captcha_lib_direct.',
     parameters: WebStealthDiagnosticInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     restOnly: true,

@@ -36,6 +36,7 @@ import threading
 import time
 from urllib.parse import urlsplit, parse_qs
 
+import captcha_lib
 import form_retry
 
 # Phase logs are the ONLY visibility into a flow that never returns: the
@@ -244,6 +245,7 @@ class FormLive:
             "captcha_failed": diagnostics.get("captcha_failed") or None,
             "captcha_rotate": diagnostics.get("captcha_rotate"),
             "captcha_waited_inflight": diagnostics.get("captcha_waited_inflight"),
+            "captcha_lib_direct": diagnostics.get("captcha_lib_direct"),
             "page_reused": diagnostics.get("page_reused"),
             "captcha_scripts": [diagnostics.get("captcha_script_requests"),
                                 diagnostics.get("captcha_script_responses"),
@@ -558,7 +560,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              gate_text=None, step2=None, step2_submit=None, completion_markers=None,
              stop_after_posts=None, live=None, exit_rotatable=False,
              capture_submission_body=False, captcha_rejection_text=None,
-             expect_ip=None):
+             expect_ip=None, captcha_lib_direct=None):
     targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
     # What a re-rendered form's error nodes must ALL say for the answer to
     # count as a CAPTCHA refusal (form_retry.py) — recorded, never acted on here.
@@ -587,7 +589,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     "captcha_failed": [], "captcha_lib_loaded": False,
                     "captcha_ready": None, "captcha_signal": None,
                     "page_reused": None, "gate_ip": expect_ip, "form_ip": None,
-                    "exit_verified": None}
+                    "exit_verified": None, "captcha_lib_direct": None}
     result["diagnostics"] = diagnostics
     live.result = result
     live.note(wizard=bool(gate_text or step2 or completion_markers),
@@ -859,6 +861,14 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 return result
         live.enter("navigation")
         context.route("**/*", guard)
+        if captcha_lib.enabled(captcha_lib_direct):
+            # Registered AFTER the guard, so it runs first (playwright runs
+            # routes last-registered-first): static gstatic release files are
+            # fulfilled from a direct GET; everything else — and a failed
+            # direct fetch — falls back to the guard, which continues it
+            # through the residential exit (captcha_lib.py).
+            diagnostics["captcha_lib_direct"] = captcha_lib.new_stats()
+            captcha_lib.install(context, diagnostics["captcha_lib_direct"])
         # Bounded retry, strictly pre-input: a transient refusal or a page
         # that died on arrival (see _NAV_RETRY) costs seconds here instead
         # of a whole caller attempt. A closed page is replaced by a fresh

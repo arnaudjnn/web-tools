@@ -1037,6 +1037,7 @@ class FormSubmitRequest(BaseModel):
     oracle_url: str | None = Field(None, max_length=500, description="the score oracle the gate probes (Tools passes its own)")
     retry_on_captcha_rejection: int = Field(0, ge=0, le=form_retry.MAX_RETRIES, description="fresh attempts (new context, new exit, re-gated) after an explicit step-0 CAPTCHA refusal only (form_retry.py)")
     captcha_rejection_text: str | None = Field(None, max_length=300, description="regex every error node of the re-rendered form must match to count as a CAPTCHA refusal; default form_retry.DEFAULT_CAPTCHA_REJECTION")
+    captcha_lib_direct: bool | None = Field(None, description="fetch reCAPTCHA's static release files (www.gstatic.com/recaptcha/releases/…) direct instead of through the exit, falling back to the exit on failure (captcha_lib.py); None = FORM_CAPTCHA_LIB_DIRECT. Also applies to the score gate's probes")
 
 
 class FormSubmitResponse(BaseModel):
@@ -1255,6 +1256,7 @@ async def _form_run(req, deadline, session, live, rotate, expect_ip):
             step2=[f.model_dump() for f in req.step2], step2_submit=req.step2_submit,
             completion_markers=req.completion_markers, stop_after_posts=req.stop_after_posts,
             captcha_rejection_text=req.captcha_rejection_text,
+            captcha_lib_direct=req.captcha_lib_direct,
             live=live), url=req.url, deadline=deadline, live=live)
     except FormRetryable as parked:
         # Parked on the one unbounded pre-POST call (the marker says where):
@@ -1307,7 +1309,9 @@ async def _score_gate(req, session, deadline, live, recheck=False):
     outcome = await score_probe.run_gate(
         oracle_url=req.oracle_url, profile=req.profile, headed=req.headed,
         threshold=req.score_threshold, tries=tries, deadline=deadline,
-        reserve_s=score_probe.form_reserve_s(req.timeout_ms, wizard), sessions=sessions)
+        reserve_s=score_probe.form_reserve_s(req.timeout_ms, wizard), sessions=sessions,
+        # The gate predicts the form's score: probe the way the form loads.
+        captcha_lib_direct=getattr(req, "captcha_lib_direct", None))
     record = score_probe.gate_record(outcome)
     live.note(score_gate=record)
     if not outcome["passed"]:

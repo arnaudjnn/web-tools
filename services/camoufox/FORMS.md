@@ -146,6 +146,36 @@ also loads it from `www.gstatic.com` (the release path 404s on
 recaptcha.net), and fetching it any other way would split the identity across
 IPs.
 
+**Static library direct (`FORM_CAPTCHA_LIB_DIRECT`, default off;
+`captcha_lib.py`).** The one deliberate exception to that, behind a flag and
+under measurement: with it on (or a request's `captcha_lib_direct: true`,
+which overrides the env either way), the form context routes ONLY versioned
+static release files — `https://www.gstatic.com/recaptcha/releases/<ver>/<file>.{js,css}`,
+GET, no query string — through a direct server-side GET (stdlib, no proxy,
+no cookie/Referer/Origin; 5 s wall clock, `FORM_CAPTCHA_LIB_TIMEOUT_S`) with
+a per-process LRU keyed by the full URL (16 entries / 8 MB), and fulfils the
+browser's request with the identical bytes (api.js loads the library with
+an SRI hash and `crossorigin`: a changed copy would not run, and the fulfilled
+copy keeps `Access-Control-Allow-Origin`). Everything identity-bearing —
+api.js, anchor, reload, bframe, clr, userverify, webworker.js, payload, every
+www.google.com / www.recaptcha.net request, every other gstatic path — goes
+through the residential exit untouched; so does a static file whose direct
+fetch fails (timeout, non-200, a body shorter than its Content-Length): the
+route falls back. Composition: the route is registered AFTER the POST guard
+(playwright runs routes last-registered-first) with a URL predicate, and
+anything it does not fulfil `fallback()`s to the guard, which continues it;
+service workers stay blocked on every form context. Fulfilled requests still
+fire `request`/`response`/`requestfinished`, so the readiness gate's `lib`
+signal and the script counts see them. `diagnostics.captcha_lib_direct` /
+`form-run.captcha_lib_direct` = `{hits, cache_hits, bytes, failures}` (null
+when off); the score probe returns it under `form.captcha_lib_direct`, and the
+score gate's probes use the form's own setting. The trade-off is the one
+above — Google's CDN sees the library fetched from the service's datacenter
+IP while anchor/reload come from the exit — so the default only changes on
+the A/B (`score_bench.py --configs lib-direct,lib-proxy --interleave`: mean
+score, the ≥0.7 rate, and `cu` = captcha_unavailable + captcha_token_missing).
+hCaptcha's assets are not on gstatic and are out of scope.
+
 Two refinements from Atoka batch 2 (2026-10-03 00:49, run 6: signal `lib`,
 `captcha_scripts [7,7,2]`, two `recaptcha__*.js` bodies cut after their
 headers, and a step-0 POST that left WITHOUT a token — the page's
@@ -182,7 +212,7 @@ as `NS_ERROR_CONNECTION_REFUSED`, never the message), `ready_met`,
 (the gate above), `page_reused`, `gate_ip` / `form_ip` / `exit_verified`
 (exit coherence, below), `exit_mismatches`,
 `submit_clicked`, `inspect_only`, `wizard`, `stop_after_posts`,
-`launch_attempts`, `launch_errors`, `profile`, `headed`, and `camoufox` (wrapper version /
+`launch_attempts`, `launch_errors`, `captcha_lib_direct`, `profile`, `headed`, and `camoufox` (wrapper version /
 `CAMOUFOX_BUILD` browser pin). Count G1 straight from it:
 `railway logs --service Camoufox --filter '"form-run"'`. The human-readable
 `form flow: done …` line also fires on every return path now (inspect_only

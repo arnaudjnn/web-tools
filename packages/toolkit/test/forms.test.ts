@@ -147,6 +147,15 @@ describe('web_form_submit outcomes', () => {
     expect(plain.calls[0]!.body).not.toHaveProperty('retry_on_captcha_rejection');
   });
 
+  it('passes captcha_lib_direct through both ways, and omits it by default', async () => {
+    for (const value of [true, false]) {
+      const { calls } = await submitWith(() => ({ json: { ok: true } }), { ...FORM, captcha_lib_direct: value });
+      expect(calls[0]!.body).toMatchObject({ captcha_lib_direct: value });
+    }
+    const plain = await submitWith(() => ({ json: { ok: true } }), FORM);
+    expect(plain.calls[0]!.body).not.toHaveProperty('captcha_lib_direct');
+  });
+
   it('a retried run carries attempts[] and the total form_submissions', async () => {
     const answer = {
       contract_version: 2, ok: true, form_submissions: 2, status: 302, url: 'https://www.example.it/done', error: null,
