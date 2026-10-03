@@ -22,7 +22,8 @@ at a third-party form. Never logs tokens or field values (the dummy values
 are random and go only to our own oracle).
 
 `/form-exit-select` probes candidate exits and pins the first passing one to
-a profile; `/form-exits` shows the blocklist (profile_store) and pins.
+a profile; `/form-exits` shows the blocklist (profile_store), pins and the
+per-host target verdicts (target_verdicts.py), which the gate ranks on.
 """
 from __future__ import annotations
 
@@ -39,6 +40,7 @@ from pydantic import BaseModel, Field
 
 import profile_store
 import proxy_session
+import target_verdicts
 from form_flow import EGRESS_URL, FormLive, first_page, human_click, normalize_egress
 
 log = logging.getLogger("camoufox.score")
@@ -376,6 +378,7 @@ class ExitSelectRequest(BaseModel):
     threshold: float = Field(DEFAULT_THRESHOLD, ge=0, le=1)
     max_tries: int = Field(4, ge=1, le=6)
     timeout_ms: int = Field(270_000, ge=30_000, le=290_000)
+    target_url: str | None = Field(None, max_length=500, description="the form this profile is for: candidates are ranked/skipped on that host's verdict record (target_verdicts.py); never contacted")
 
 
 def _check_url(url):
@@ -442,8 +445,15 @@ async def form_warm(req: WarmRequest):
 CANDIDATE_MIN_MS = 60_000
 
 
+# A look-ahead pre-check (headless egress echo) fits in this.
+PRECHECK_MS = 30_000
+# Extra candidates pre-checked beyond the one about to be probed, so the
+# target's record can rank them (only when the host HAS a record).
+LOOKAHEAD = 1
+
+
 async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries, end,
-                           reserve_s=0.0, sessions=()):
+                           reserve_s=0.0, sessions=(), target_url=None, rng=None):
     """Probe candidate exits on OUR oracle; stop at the first scoring >= threshold.
 
     Shared by /form-exit-select and the form score gate. Each candidate gets
@@ -455,21 +465,55 @@ async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries,
     no candidate starts unless it fits before `end - reserve_s`. Only our
     oracle and the egress echo are ever contacted here.
 
+    `target_url` (the form's URL) makes the choice target-aware
+    (target_verdicts.py): a FRESH candidate whose ASN the target has clearly
+    refused is skipped (`target_asn_rejected`, bar exploration), and when the
+    host has any record, up to LOOKAHEAD more fresh candidates are
+    pre-checked so the best-ranked one is probed first (a preferred ASN is
+    probed at once). The oracle stays the minimum bar: nothing runs unless
+    it scores >= threshold. `sessions` (the caller's or the profile's own
+    exit) are never skipped or reordered on the target's record.
+    `max_tries` bounds the pre-checks (look-ahead included).
+
     Returns {passed, session, score, egress, tries}.
     """
+    host = target_verdicts.registrable_host(target_url) if target_url else None
+    stats = target_verdicts.host_stats(host) if host else {}
     tries = []
     queue = list(sessions)
-    for _ in range(max_tries):
+    pending = []  # pre-checked, eligible, not yet probed
+    prechecks = 0
+    while True:
         left_ms = int((end - reserve_s - time.monotonic()) * 1000)
         if left_ms < CANDIDATE_MIN_MS:
             break
-        session = queue.pop(0) if queue else proxy_session.new_token()
-        pre = await run_egress(session, min(30_000, left_ms - 45_000))
-        egress = pre.get("egress") or {}
-        reason = profile_store.blocked_reason(egress.get("ip"), egress.get("asn"), threshold)
-        if reason:
-            tries.append({"skipped": reason, "egress": egress})
+        look_ahead = (bool(stats) and not queue and len(pending) <= LOOKAHEAD
+                      and not any(c["assessment"]["preferred"] for c in pending)
+                      and left_ms >= CANDIDATE_MIN_MS + PRECHECK_MS)
+        if prechecks < max_tries and (not pending or look_ahead):
+            given = bool(queue)
+            session = queue.pop(0) if queue else proxy_session.new_token()
+            prechecks += 1
+            pre = await run_egress(session, min(30_000, left_ms - 45_000))
+            egress = pre.get("egress") or {}
+            reason = profile_store.blocked_reason(egress.get("ip"), egress.get("asn"), threshold)
+            assessment = None
+            if not reason and host and not given:
+                assessment = target_verdicts.assess(host, egress.get("asn"), stats=stats, rng=rng)
+                reason = assessment["skip"]
+            if reason:
+                tries.append({"skipped": reason, "egress": egress})
+                continue
+            if assessment is None:
+                # A given session (caller's / profile's own exit) goes first.
+                assessment = {"rank": 2.0 if given else 0.5, "preferred": given,
+                              "explored": False, "decisive": 0, "rate": None}
+            pending.append({"session": session, "egress": egress, "assessment": assessment})
             continue
+        if not pending:
+            break
+        chosen = pending.pop(target_verdicts.pick(pending, rng=rng) if host else 0)
+        session, egress = chosen["session"], chosen["egress"]
         started = time.monotonic()
         left_ms = int((end - reserve_s - time.monotonic()) * 1000)
         data = await run_probe(oracle_url=oracle_url, session=session, profile=profile,
@@ -478,8 +522,11 @@ async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries,
         summary = summarize_probe(data, session=session, profile=profile, headed=headed,
                                   threshold=threshold, started=started)
         _record(summary, threshold, True)
-        tries.append({k: summary[k] for k in ("score", "passed", "egress", "error-codes", "blocked")}
-                     | {"error": summary["form"]["error"]})
+        entry = {k: summary[k] for k in ("score", "passed", "egress", "error-codes", "blocked")}
+        entry["error"] = summary["form"]["error"]
+        if host:
+            entry["target"] = {k: chosen["assessment"][k] for k in ("rate", "decisive", "explored")}
+        tries.append(entry)
         if summary["passed"]:
             # The IP the score is ABOUT (the oracle saw it); the form is
             # verified against it before it contacts the target.
@@ -527,10 +574,10 @@ def gate_fits(timeout_ms, wizard):
 
 
 async def run_gate(*, oracle_url, profile, headed, threshold, tries, deadline, reserve_s,
-                   sessions=()):
+                   sessions=(), target_url=None):
     outcome = await probe_candidates(oracle_url=oracle_url, profile=profile, headed=headed,
                                      threshold=threshold, max_tries=tries, end=deadline,
-                                     reserve_s=reserve_s, sessions=sessions)
+                                     reserve_s=reserve_s, sessions=sessions, target_url=target_url)
     log.info("score gate: passed=%s score=%s asn=%s after %d tries (profile=%s headed=%s)",
              outcome["passed"], outcome["score"], (outcome["egress"] or {}).get("asn"),
              len(outcome["tries"]), profile, headed)
@@ -556,11 +603,14 @@ async def form_exit_select(req: ExitSelectRequest):
         oracle_urls(req.oracle_url)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
+    if req.target_url:
+        _check_url(req.target_url)
     end = time.monotonic() + req.timeout_ms / 1000
     # Candidates are probed ISOLATED (no profile): the profile must not be
     # seen from every exit that gets rejected on the way.
     outcome = await probe_candidates(oracle_url=req.oracle_url, profile=None, headed=req.headed,
-                                     threshold=req.threshold, max_tries=req.max_tries, end=end)
+                                     threshold=req.threshold, max_tries=req.max_tries, end=end,
+                                     target_url=req.target_url)
     tries = outcome["tries"]
     if outcome["passed"]:
         session = outcome["session"]
@@ -581,7 +631,10 @@ async def form_exits():
                if profile_store.blocked_reason(ip, None, data=data)}
     return {"root": profile_store.root(), "persistent": profile_store.is_persistent_root(),
             "ips_seen": len(data["ips"]), "blocked_ips": blocked, "asns": data["asns"],
-            "pinned": profile_store.pinned_exits()}
+            "pinned": profile_store.pinned_exits(),
+            # What each form host said to each ASN (target_verdicts.py):
+            # {host: {asn: {accepted, rejected, other, rate}}}.
+            "targets": target_verdicts.all_stats()}
 
 
 def register(app, *, worker, browser_factory, run_isolated, resolve_session, camoufox=None):
