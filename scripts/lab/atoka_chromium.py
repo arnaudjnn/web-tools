@@ -70,7 +70,7 @@ def identity() -> list[str]:
 
 
 def proxy_for_attempt() -> dict:
-    url = subprocess.run("railway variables --service Camoufox --kv | sed -n 's/^PROXY_URL=//p'",
+    url = os.environ.get("PROXY_URL") or subprocess.run("railway variables --service Camoufox --kv | sed -n 's/^PROXY_URL=//p'",
                          shell=True, capture_output=True, text=True,
                          cwd=os.environ.get("RAILWAY_CWD") or None).stdout.strip()
     m = re.match(r"^(https?)://([^:]+):([^@]+)@(.+)$", url)
@@ -198,6 +198,7 @@ def ledger(row: dict) -> None:
 def attempt(pw, variant: str, n: int, warm_dir: str | None) -> dict:
     headless = os.environ.get("HEADLESS") == "1"
     cfg = {"engine": "patchright-chromium", "variant": variant, "headless": headless,
+           "container": os.environ.get("LC_CONTAINER") or "macos-host",
            "channel": "chrome" if variant == "chrome" else None,
            "profile": "warm-persistent" if variant == "warm" else "fresh", "typing": "keystroke",
            "proxy": "evomi-it-residential sticky fresh session"}
@@ -220,6 +221,25 @@ def attempt(pw, variant: str, n: int, warm_dir: str | None) -> dict:
                         "--disable-background-timer-throttling"])
         if variant == "chrome":
             kw["channel"] = "chrome"
+        elif headless:
+            # headless=True alone launches chrome-headless-shell (old headless);
+            # channel "chromium" is the full build in new headless mode
+            kw["channel"] = "chromium"
+            cfg["headless"] = "new"
+        if os.environ.get("ORACLE_BEFORE") == "1":
+            # production's gate shape: a SEPARATE launch on the same sticky exit,
+            # closed before the form browser starts (no same-tab stall)
+            t = time.time()
+            pre_dir = tempfile.mkdtemp(prefix="lc-pre-")
+            pre = pw.chromium.launch_persistent_context(**{**kw, "user_data_dir": pre_dir})
+            try:
+                pp = pre.pages[0] if pre.pages else pre.new_page()
+                cfg["oracle_before_ip"] = egress(pp).get("ip")
+                row["oracle_score_before"], cfg["oracle_before"] = oracle_score(pp)
+            finally:
+                pre.close()
+                shutil.rmtree(pre_dir, ignore_errors=True)
+            durations["oracle_before"] = round(time.time() - t, 1)
         ctx = pw.chromium.launch_persistent_context(**kw)
         if warm_dir:  # reused profile: never carry the previous attempt's Atoka session
             ctx.clear_cookies(domain=re.compile(r"atoka\.io$"))
@@ -286,10 +306,16 @@ def attempt(pw, variant: str, n: int, warm_dir: str | None) -> dict:
 
         page.on("requestfinished", on_done)
         page.on("requestfailed", on_failed)
+        navs: list = []
+        cfg["main_frame_navs"] = navs
+        page.on("framenavigated", lambda fr: fr == page.main_frame and navs.append(
+            [round(time.time() - t0, 1), urlsplit(fr.url).path[:40]]))
         page.on("request", on_request)
         page.route(re.compile(r"atoka\.io/.*try-atoka"), guard)
 
         row["egress"] = egress(page)
+        if cfg.get("oracle_before_ip"):
+            cfg["same_exit_as_oracle_before"] = cfg.pop("oracle_before_ip") == row["egress"].get("ip")
         durations["egress"] = round(time.time() - t0, 1)
         if variant == "warm":
             t = time.time()
@@ -306,23 +332,41 @@ def attempt(pw, variant: str, n: int, warm_dir: str | None) -> dict:
             human_click(page, ".iubenda-cs-accept-btn")
         except Exception:
             cfg["iubenda"] = "absent"
-        page.locator(FIELDS[0]).wait_for(state="visible", timeout=30000)
-        page.mouse.wheel(0, random.randint(150, 400))
-        pause(1, 2.5)
-        for sel, val in zip(FIELDS, identity()):
-            human_click(page, sel)
-            pause(0.2, 0.6)
-            type_human(page, val)
-            pause(0.4, 1.2)
-        for sel in ("#id_0-tos", "#id_0-tos1"):
-            loc = page.locator(sel).first
-            try:
+        values = identity()
+
+        def fill():
+            page.locator(FIELDS[0]).wait_for(state="visible", timeout=30000)
+            page.mouse.wheel(0, random.randint(150, 400))
+            pause(1, 2.5)
+            for sel, val in zip(FIELDS, values):
                 human_click(page, sel)
-            except Exception:
-                pass
-            if not loc.is_checked():
-                loc.check(force=True)
-            pause(0.4, 1.0)
+                pause(0.2, 0.6)
+                type_human(page, val)
+                pause(0.4, 1.2)
+            for sel in ("#id_0-tos", "#id_0-tos1"):
+                loc = page.locator(sel).first
+                try:
+                    human_click(page, sel)
+                except Exception:
+                    pass
+                if not loc.is_checked():
+                    loc.check(force=True)
+                pause(0.4, 1.0)
+
+        def filled() -> list[str]:
+            # which text fields are empty (names only, never values)
+            return [sel for sel in FIELDS if not page.locator(sel).first.input_value()]
+
+        fill()
+        empty = filled()
+        if empty:
+            # pre-POST, nothing sent: the page reloaded under us (see navs);
+            # fill once more, then never click on an incomplete form
+            cfg["refill_after_empty"] = empty
+            fill()
+            empty = filled()
+        if empty:
+            raise RuntimeError(f"fields empty before submit (no click): {empty}")
         assert page.locator('[name="0-email_last"]').input_value() == "", "honeypot not empty"
         durations["fill"] = round(time.time() - t, 1)
         pause(1, 2.5)
@@ -402,7 +446,8 @@ def attempt(pw, variant: str, n: int, warm_dir: str | None) -> dict:
         except Exception:
             pass
     except Exception as e:
-        row["result"] = "other" if not row.get("posts") else "unknown"
+        row["result"] = ("unknown" if row.get("posts") else
+                         "zero_post" if "no click" in str(e) else "other")
         row["detail"] = f"{type(e).__name__}: {str(e).splitlines()[0][:160]}; posts_sent={len(row.get('posts') or [])}"
     finally:
         durations["total"] = round(time.time() - t0, 1)
