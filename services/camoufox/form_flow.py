@@ -248,7 +248,7 @@ class FormLive:
             "captcha_lib_direct": diagnostics.get("captcha_lib_direct"),
             "page_reused": diagnostics.get("page_reused"),
             # What the page reports of the drawn fingerprint (locale, Intl,
-            # timezone, platform, screen) — PAGE_FP_JS.
+            # timezone, platform, screen, cores, WebGL vendor/renderer) — PAGE_FP_JS.
             "page_fp": diagnostics.get("page_fingerprint"),
             "captcha_scripts": [diagnostics.get("captcha_script_requests"),
                                 diagnostics.get("captcha_script_responses"),
@@ -556,7 +556,11 @@ PAGE_FP_JS = (
     " return {language: navigator.language, languages: Array.from(navigator.languages || []),"
     " intl_locale: o.locale, timezone: o.timeZone, platform: navigator.platform,"
     " screen: [screen.width, screen.height], window: [outerWidth, outerHeight],"
-    " dpr: devicePixelRatio}; } catch (e) { return null; } })()"
+    " dpr: devicePixelRatio, cores: navigator.hardwareConcurrency, webgl: (() => { try {"
+    " const g = document.createElement('canvas').getContext('webgl');"
+    " const x = g && g.getExtension('WEBGL_debug_renderer_info');"
+    " return x ? [g.getParameter(x.UNMASKED_VENDOR_WEBGL), g.getParameter(x.UNMASKED_RENDERER_WEBGL)] : null;"
+    " } catch (e) { return null; } })()}; } catch (e) { return null; } })()"
 )
 def egress_and_fp_js():
     """The in-page egress echo + PAGE_FP_JS in one evaluate. Built per call:
@@ -582,6 +586,8 @@ def page_fingerprint(raw):
 
     languages = raw.get("languages")
     dpr = raw.get("dpr")
+    cores = raw.get("cores")
+    webgl = raw.get("webgl")
     return {
         "language": text(raw.get("language")),
         "languages": [text(v) for v in languages[:5]] if isinstance(languages, list) else None,
@@ -591,6 +597,8 @@ def page_fingerprint(raw):
         "screen": nums(raw.get("screen")),
         "window": nums(raw.get("window")),
         "dpr": dpr if isinstance(dpr, (int, float)) and not isinstance(dpr, bool) else None,
+        "cores": cores if isinstance(cores, int) and not isinstance(cores, bool) else None,
+        "webgl": ([text(v, 120) for v in webgl] if isinstance(webgl, list) and len(webgl) == 2 else None),
     }
 
 

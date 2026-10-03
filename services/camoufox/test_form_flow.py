@@ -111,7 +111,8 @@ class FormTests(unittest.TestCase):
                         "connection": {"isp": "Vodafone Italia", "asn": 30722}},
              "fp": {"language": "en-IT", "languages": ["en-IT", "en"], "intl_locale": "en-US",
                     "timezone": "Europe/Rome", "platform": "Win32", "screen": [1440, 900],
-                    "window": [1440, 852], "dpr": 1}}
+                    "window": [1440, 852], "dpr": 1, "cores": 8,
+                    "webgl": ["Google Inc. (NVIDIA)", "ANGLE (NVIDIA)"]}}
             if "ipwho.is" in expression else True)
         result = run_form(self.context, **self.params)
         self.assertEqual(result["diagnostics"]["egress"],
@@ -121,7 +122,8 @@ class FormTests(unittest.TestCase):
         self.assertEqual(result["diagnostics"]["page_fingerprint"],
                          {"language": "en-IT", "languages": ["en-IT", "en"], "intl_locale": "en-US",
                           "timezone": "Europe/Rome", "platform": "Win32", "screen": [1440, 900],
-                          "window": [1440, 852], "dpr": 1, "world": "isolated"})
+                          "window": [1440, 852], "dpr": 1, "cores": 8,
+                          "webgl": ["Google Inc. (NVIDIA)", "ANGLE (NVIDIA)"], "world": "isolated"})
         # Ungated: nothing to verify against, but the form's IP is recorded.
         self.assertEqual((result["diagnostics"]["gate_ip"], result["diagnostics"]["form_ip"],
                           result["diagnostics"]["exit_verified"]), (None, "151.0.0.7", None))
