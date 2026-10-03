@@ -142,6 +142,9 @@ export function camoufoxEval(params: {
   );
 }
 
+/** The forms' browser engine (services/camoufox/chromium_engine.py). */
+export type FormEngine = 'camoufox' | 'chromium';
+
 export type FormFieldSpec = { selector: string; value?: string; action?: 'type' | 'check' | 'select' };
 
 /** Single-attempt form execution; the caller owns durable reservations.
@@ -199,6 +202,8 @@ export function camoufoxFormSubmit(params: {
   /** Static reCAPTCHA library direct (true) or via the exit (false);
    *  omit = the sidecar's FORM_CAPTCHA_LIB_DIRECT (captcha_lib.py). */
   captchaLibDirect?: boolean;
+  /** Form browser engine (chromium_engine.py); omit = the sidecar's FORM_ENGINE. */
+  engine?: FormEngine;
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 120_000;
   return formsCall<CamoufoxFormSubmit>(
@@ -235,6 +240,7 @@ export function camoufoxFormSubmit(params: {
       ...(params.retryOnCaptchaRejection ? { retry_on_captcha_rejection: params.retryOnCaptchaRejection } : {}),
       ...(params.captchaRejectionText ? { captcha_rejection_text: params.captchaRejectionText } : {}),
       ...(params.captchaLibDirect !== undefined ? { captcha_lib_direct: params.captchaLibDirect } : {}),
+      ...(params.engine ? { engine: params.engine } : {}),
     },
     timeoutMs + 60_000,
   );
@@ -258,6 +264,7 @@ export function camoufoxFormInspect(params: {
   exitSession?: string;
   headed?: boolean;
   profile?: string;
+  engine?: FormEngine;
 }): Promise<CamoufoxFormInspect> {
   const timeoutMs = params.timeoutMs ?? 60_000;
   return formsCall<CamoufoxFormInspect>(
@@ -271,6 +278,7 @@ export function camoufoxFormInspect(params: {
       ...(params.exitSession ? { exit_session: params.exitSession } : {}),
       ...(params.headed ? { headed: true } : {}),
       ...(params.profile ? { profile: params.profile } : {}),
+      ...(params.engine ? { engine: params.engine } : {}),
     },
     timeoutMs + 60_000,
   );

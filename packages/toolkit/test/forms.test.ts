@@ -1,6 +1,7 @@
 // web_form_submit outcome mapping (never retried) and web_form_inspect passthrough.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { functionMap } from '../src/functions.js';
+import { WebFormInspectInput, WebFormSubmitInput } from '../src/schemas.js';
 import { getStats } from '../src/stats.js';
 import { fakeSidecars, type Handler } from './sidecars.js';
 
@@ -156,6 +157,23 @@ describe('web_form_submit outcomes', () => {
     expect(plain.calls[0]!.body).not.toHaveProperty('captcha_lib_direct');
   });
 
+  it('passes engine through (both values), drops an unknown one, and omits it by default', async () => {
+    for (const engine of ['chromium', 'camoufox']) {
+      const { calls } = await submitWith(() => ({ json: { ok: true } }), { ...FORM, engine });
+      expect(calls[0]!.body).toMatchObject({ engine });
+    }
+    const odd = await submitWith(() => ({ json: { ok: true } }), { ...FORM, engine: 'netscape' });
+    expect(odd.calls[0]!.body).not.toHaveProperty('engine');
+    const plain = await submitWith(() => ({ json: { ok: true } }), FORM);
+    expect(plain.calls[0]!.body).not.toHaveProperty('engine');
+  });
+
+  it('the input schema accepts engine and refuses an unknown one', () => {
+    expect(WebFormSubmitInput.safeParse({ ...FORM, engine: 'chromium' }).success).toBe(true);
+    expect(WebFormSubmitInput.safeParse({ ...FORM, engine: 'netscape' }).success).toBe(false);
+    expect(WebFormInspectInput.safeParse({ url: FORM.url, engine: 'chromium' }).success).toBe(true);
+  });
+
   it('a retried run carries attempts[] and the total form_submissions', async () => {
     const answer = {
       contract_version: 2, ok: true, form_submissions: 2, status: 302, url: 'https://www.example.it/done', error: null,
@@ -221,9 +239,11 @@ describe('web_form_inspect', () => {
     const calls = fakeSidecars({ camoufoxForms: () => ({ json: INSPECT }) });
     await functionMap.web_form_inspect({
       url: INSPECT.url, wait_until: 'load', wait_ms: 10, timeout_ms: 5000, fresh_ip: false, exit_session: 'x', headed: true, profile: 'p',
+      engine: 'chromium',
     });
     expect(calls[0]!.body).toEqual({
       url: INSPECT.url, wait_until: 'load', wait_ms: 10, timeout_ms: 5000, fresh_ip: false, exit_session: 'x', headed: true, profile: 'p',
+      engine: 'chromium',
     });
   });
 

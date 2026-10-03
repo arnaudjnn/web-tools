@@ -87,6 +87,7 @@ from camoufox.sync_api import Camoufox
 from camoufox.utils import launch_options
 from form_flow import FormLive, validate_form
 from form_worker import FormRetryable, FormWorker, not_started, run_isolated_form
+import chromium_engine
 import form_inspect
 import form_retry
 import launch_health
@@ -670,10 +671,18 @@ def _profile_dir(profile: str) -> str:
     return profile_store.profile_dir(profile)
 
 
-def _form_browser(session, main_world_eval=False, headed=False, profile=None):
+def _form_browser(session, main_world_eval=False, headed=False, profile=None, engine=None):
     proxy = parse_proxy(PROXY_URL, session)
     if proxy is None:
         raise RuntimeError("PROXY_URL is required")
+    if chromium_engine.resolve_engine(engine) == "chromium":
+        # Patchright Chromium on the same proxy_session exit, the same Xvfb
+        # (:99) when headed, a fresh isolated context per attempt (the
+        # worker's new_context). Profiles are Camoufox launch options on
+        # disk, so engine=chromium never takes one (the endpoints refuse it).
+        if profile:
+            raise ValueError("engine=chromium does not take a profile")
+        return chromium_engine.ChromiumForm(headless=not headed, proxy=proxy, timeout=30000)
     # Headed is opt-in per request: score-gated forms (reCAPTCHA v3) refuse the
     # headless fingerprint while the isolated per-submit browser keeps it from
     # disturbing the shared headless readers. Needs a display — the image runs
@@ -1038,6 +1047,7 @@ class FormSubmitRequest(BaseModel):
     oracle_url: str | None = Field(None, max_length=500, description="the score oracle the gate probes (Tools passes its own)")
     retry_on_captcha_rejection: int = Field(0, ge=0, le=form_retry.MAX_RETRIES, description="fresh attempts (new context, new exit, re-gated) after an explicit step-0 CAPTCHA refusal only (form_retry.py)")
     captcha_rejection_text: str | None = Field(None, max_length=300, description="regex every error node of the re-rendered form must match to count as a CAPTCHA refusal; default form_retry.DEFAULT_CAPTCHA_REJECTION")
+    engine: str | None = Field(None, description="form browser: camoufox | chromium (Patchright Chromium, chromium_engine.py); None = FORM_ENGINE (default camoufox). chromium: score_gate defaults OFF, no profile")
     captcha_lib_direct: bool | None = Field(None, description="fetch reCAPTCHA's static release files (www.gstatic.com/recaptcha/releases/…) direct instead of through the exit, falling back to the exit on failure (captcha_lib.py); None = FORM_CAPTCHA_LIB_DIRECT. Also applies to the score gate's probes")
 
 
@@ -1064,6 +1074,8 @@ async def form_submit(req: FormSubmitRequest):
         # launched browser that dies as an unknown 502.
         validate_form(req.url, req.submission_urls, req.success_url, req.gate_text, req.completion_markers)
         form_retry.compile_pattern(req.captcha_rejection_text)
+        if _engine(req) == "chromium" and req.profile:
+            raise ValueError("engine=chromium does not take a profile (profiles are Camoufox identities)")
     except (ValueError, re.error) as e:
         raise HTTPException(status_code=400, detail=str(e))
     retries = req.retry_on_captcha_rejection or 0
@@ -1140,7 +1152,7 @@ async def _form_attempt(req, deadline, session, *, retry=False, retries=0, attem
     """
     # One per job: the pre-POST mark the worker polls and the job's single
     # `form-run {json}` summary line (no values, tokens or bodies).
-    live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
+    live = _form_live(req)
     if attempt_n is not None:
         live.note(attempt=attempt_n)
     try:
@@ -1157,13 +1169,33 @@ async def _form_attempt(req, deadline, session, *, retry=False, retries=0, attem
         raise
 
 
+def _engine(req) -> str:
+    return chromium_engine.resolve_engine(getattr(req, "engine", None))
+
+
+def _form_live(req):
+    """One FormLive per job; the form-run line names the engine."""
+    live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
+    live.note(engine=_engine(req))
+    return live
+
+
+def _gate_default(req):
+    """The score gate's tri-state for this request. Chromium defaults OFF:
+    on Atoka the target accepted it at oracle scores the gate would refuse
+    (6/7 at <=0.7, chromium_engine.py). An explicit score_gate still wins."""
+    if req.score_gate is None and _engine(req) == "chromium":
+        return False
+    return req.score_gate
+
+
 async def _form_attempt_run(req, deadline, session, live):
     # Exit rotation (pre-input, once) only for an exit the caller did not
     # pin — neither an explicit exit_session nor a sticky profile's own.
     rotate = _form_rotator(req.exit_session, req.profile, req.sticky_exit,
-                           bool(req.ready_expression), req.headed)
+                           bool(req.ready_expression), req.headed, engine=_engine(req))
     gate = None
-    if score_probe.gate_wanted(req.score_gate, req.headed, req.exit_session, req.inspect_only):
+    if score_probe.gate_wanted(_gate_default(req), req.headed, req.exit_session, req.inspect_only):
         gate = await _score_gate(req, session, deadline, live)
         session = gate["session"]
         # The gate chose this exit on its score: the form runs ON it, so no
@@ -1181,7 +1213,7 @@ async def _form_attempt_run(req, deadline, session, live):
         mismatches.append({"gate_ip": diagnostics.get("gate_ip"), "form_ip": diagnostics.get("form_ip")})
         if len(mismatches) > EXIT_MISMATCH_REGATES:
             raise _exit_mismatch_503(mismatches, gate)
-        live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
+        live = _form_live(req)
         live.note(exit_mismatches=list(mismatches))
         try:
             gate = await _score_gate(req, session, deadline, live, recheck=True)
@@ -1215,6 +1247,7 @@ async def _form_attempt_run(req, deadline, session, live):
         raise HTTPException(status_code=503, detail=detail)
     if gate is not None:
         data.setdefault("diagnostics", {})["score_gate"] = gate["record"]
+    data.setdefault("diagnostics", {})["engine"] = _engine(req)
     return data, gate, session
 
 
@@ -1249,7 +1282,8 @@ async def _form_run(req, deadline, session, live, rotate, expect_ip):
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
         return await _form_worker.run(partial(run_isolated_form,
-            partial(_form_browser, session, bool(req.ready_expression), req.headed, req.profile),
+            partial(_form_browser, session, bool(req.ready_expression), req.headed, req.profile,
+                    engine=_engine(req)),
             deadline=deadline, url=req.url, rotate_factory=rotate, expect_ip=expect_ip,
             fields=[f.model_dump() for f in req.fields], submit=req.submit,
             dismiss=req.dismiss, success_url=req.success_url,
@@ -1316,7 +1350,7 @@ async def _score_gate(req, session, deadline, live, recheck=False):
         reserve_s=score_probe.form_reserve_s(req.timeout_ms, wizard), sessions=sessions,
         # The gate predicts the form's score: probe the way the form loads.
         captcha_lib_direct=getattr(req, "captcha_lib_direct", None),
-        target_url=req.url)
+        target_url=req.url, **({"engine": "chromium"} if _engine(req) == "chromium" else {}))
     record = score_probe.gate_record(outcome)
     live.note(score_gate=record)
     if not outcome["passed"]:
@@ -1333,13 +1367,14 @@ async def _score_gate(req, session, deadline, live, recheck=False):
     return {"session": outcome["session"], "record": record}
 
 
-def _form_rotator(exit_session, profile, sticky_exit, main_world_eval, headed):
+def _form_rotator(exit_session, profile, sticky_exit, main_world_eval, headed, engine=None):
     """A fresh-exit browser factory for run_isolated_form, or None when the
     exit is pinned (explicit exit_session, or a sticky profile's own exit:
     rotating it would move the identity off the exit it is known on)."""
     if exit_session or (profile and _sticky(sticky_exit)):
         return None
-    return lambda: partial(_form_browser, proxy_session.new_token(), main_world_eval, headed, profile)
+    return lambda: partial(_form_browser, proxy_session.new_token(), main_world_eval, headed, profile,
+                           engine=engine)
 
 
 def _sticky(flag) -> bool:

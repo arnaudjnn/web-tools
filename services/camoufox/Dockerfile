@@ -46,7 +46,17 @@ RUN echo y | python -m camoufox fetch "$CAMOUFOX_BROWSER" && \
     grep -F "${CAMOUFOX_BROWSER##*/}" /tmp/active && \
     ! grep -F "not fetched" /tmp/active
 
-COPY app.py captcha_lib.py form_flow.py form_inspect.py form_retry.py form_worker.py launch_health.py profile_store.py proxy_session.py score_probe.py target_verdicts.py entrypoint.sh ./
+# Forms' second engine (`engine: "chromium"`, chromium_engine.py): Patchright's
+# own Chromium build ONLY. No `install-deps`, because the Firefox/Xvfb packages
+# above already cover what headed Chromium links against. The `--version`
+# launch-free check below fails the build if a library is missing. One
+# browser download, after Camoufox's layer, so editing app code never
+# re-downloads either. Its headless shell is not used: headless runs take the
+# full build's new headless mode.
+RUN python -m patchright install --no-shell chromium && \
+    "$(python -c 'import glob; print(sorted(glob.glob("/root/.cache/ms-playwright/chromium-*/chrome-linux*/chrome"))[-1])')" --version
+
+COPY app.py captcha_lib.py chromium_engine.py form_flow.py form_inspect.py form_retry.py form_worker.py launch_health.py profile_store.py proxy_session.py score_probe.py target_verdicts.py entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
 # ONE warmed Camoufox page per container (WORKERS=1) — the persistent SPA

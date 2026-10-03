@@ -190,7 +190,14 @@ def _run_isolated(browser_factory, deadline, live, runner, params):
                 time.sleep(min(pause, max(0.0, deadline - time.monotonic())))
         try:
             if hasattr(browser, "new_context"):
-                context = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
+                # An engine may bring its own context options
+                # (chromium_engine: the real window, no viewport override).
+                # Service workers stay blocked on every engine.
+                options = getattr(manager, "context_options", None)
+                if isinstance(options, dict):
+                    context = browser.new_context(**{**options, "service_workers": "block"})
+                else:
+                    context = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
             else:
                 # A persistent profile launches straight into ONE context —
                 # there is no Browser to derive a fresh one from, and the
