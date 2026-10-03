@@ -1,11 +1,13 @@
 import type { Request, Response } from 'express';
 import { functionMap, validateParams, type ContentBlock, type ToolResult } from '@web-tools/toolkit';
+import { respondWithHeartbeat } from './heartbeat.js';
 
 /**
  * The REST v0 body for a tool result. Backward compatible with what REST
  * callers already parse:
  *   - JSON-native tools (output:'data') answer with the bare payload, and
- *     HTTP 500 {error} on failure;
+ *     HTTP 500 {error} on failure (HTTP 200 once the heartbeat has committed,
+ *     see heartbeat.ts — the {error} body is the signal);
  *   - everything else answers with {content, isError}, where image and PDF
  *     blocks come back as the base64 text they always were.
  */
@@ -29,7 +31,8 @@ export async function runRest(name: string, body: unknown): Promise<{ status: nu
 
 export function toolHandler(name: string) {
   return async (req: Request, res: Response) => {
-    const { status, body } = await runRest(name, req.body);
-    res.status(status).json(body);
+    // Under HEARTBEAT_MS: today's status codes. Past it: 200 + whitespace
+    // heartbeat, and the body (unchanged shape) carries the outcome.
+    await respondWithHeartbeat(res, () => runRest(name, req.body));
   };
 }

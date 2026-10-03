@@ -4,6 +4,7 @@ import express, { Request, Response } from 'express';
 import { Config, getStats, log, tools } from '@web-tools/toolkit';
 import { createServer } from './mcp.js';
 import { toolHandler } from './handler.js';
+import { sseHeartbeat } from './heartbeat.js';
 import { mountOracle } from './oracle.js';
 
 log('Environment check:', { searxngUrl: Config.searxng.url });
@@ -54,6 +55,12 @@ app.use((req: Request, res: Response, next) => {
 
 app.post('/mcp', async (req: Request, res: Response) => {
   const server = createServer();
+  // A tools/call answers on an SSE stream that can stay silent for minutes
+  // (forms run 300–540 s); Railway's edge drops a request after 5 min with no
+  // bytes. Comment pings keep it open. Set before the SDK writes its headers
+  // so Node merges them (and getHeader sees the SDK's Content-Type).
+  res.setHeader('X-Accel-Buffering', 'no');
+  const stopPing = sseHeartbeat(res);
   try {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -63,11 +70,13 @@ app.post('/mcp', async (req: Request, res: Response) => {
 
     res.on('close', () => {
       log('Request closed');
+      stopPing();
       transport.close();
       server.close();
     });
   } catch (error) {
     log('Error handling MCP request:', error);
+    stopPing();
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: '2.0',

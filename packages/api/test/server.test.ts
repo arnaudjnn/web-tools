@@ -174,6 +174,62 @@ describe('MCP over streamable HTTP', () => {
   });
 });
 
+describe('heartbeat (Railway drops a request after 5 min with no bytes)', () => {
+  const fast = sidecar;
+  const slowHtml = async () => {
+    await new Promise((r) => setTimeout(r, 250));
+    return new Response(JSON.stringify({ status: 200, url: 'https://example.com/', html: '<p>slow</p>', size: 11, mode: 'fast', escalated: false }));
+  };
+  beforeAll(() => {
+    process.env.HEARTBEAT_MS = '50';
+    sidecar = slowHtml;
+  });
+  afterAll(() => {
+    delete process.env.HEARTBEAT_MS;
+    sidecar = fast;
+  });
+
+  it('REST: a slow tool commits 200 and pads the JSON with leading spaces', async () => {
+    const r = await post('/api/v0/web_html', { url: 'https://example.com/' }, AUTH);
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-accel-buffering')).toBe('no');
+    const text = await r.text();
+    expect(text).toMatch(/^ +\{/);
+    expect(JSON.parse(text)).toMatchObject({ isError: false, content: [{ type: 'text', text: expect.stringContaining('slow') }] });
+  });
+
+  it('REST: validation errors stay instant 400s', async () => {
+    expect((await post('/api/v0/web_html', { url: 'nope' }, AUTH)).status).toBe(400);
+  });
+
+  it('MCP: a slow tools/call streams SSE comment pings before the result', async () => {
+    const r = await post(
+      '/mcp',
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'web_html', arguments: { url: 'https://example.com/' } } },
+      { ...AUTH, Accept: 'application/json, text/event-stream' },
+    );
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toMatch(/^text\/event-stream/);
+    expect(r.headers.get('x-accel-buffering')).toBe('no');
+    const text = await r.text();
+    const ping = text.indexOf(': ping\n\n');
+    expect(ping).toBeGreaterThanOrEqual(0);
+    expect(ping).toBeLessThan(text.indexOf('data: '));
+    const data = JSON.parse(text.slice(text.indexOf('data: ') + 6).split('\n')[0]!);
+    expect(data).toMatchObject({ id: 1, result: { isError: false } });
+  });
+
+  it('MCP: the SDK client ignores the pings and gets the result', async () => {
+    const transport = new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: AUTH } });
+    const client = new Client({ name: 'test', version: '0' });
+    await client.connect(transport);
+    const r = await client.callTool({ name: 'web_html', arguments: { url: 'https://example.com/' } });
+    expect(r.isError).toBe(false);
+    expect((r.content as Array<{ text: string }>)[0]!.text).toContain('slow');
+    await client.close();
+  });
+});
+
 // Last: it closes the server.
 describe('SIGTERM drain', () => {
   it('stops accepting, finishes in-flight calls, answers /health 503, and is bounded by DRAIN_TIMEOUT_MS', async () => {

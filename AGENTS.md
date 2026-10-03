@@ -238,6 +238,18 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   `railway service list` rather than assuming.
 - `railway down -s <svc> --yes` is the off switch (status may read `Failed` after
   a graceful stop; the logs show `Stopping Container`). Never `scale=0`.
+- **Railway's edge drops a request after 5 min with no bytes** (15 min while
+  bytes flow; measured 2026-10-03). Forms with `score_gate` +
+  `retry_on_captcha_rejection` run 300–540 s, `web_agent` up to 300 s; twice the
+  client got an empty-body error at ~300 s while the sidecar was still working,
+  turning real form outcomes into unknowns. `packages/api/src/heartbeat.ts` is
+  the fix: REST calls still running after `HEARTBEAT_MS` (20 s) commit
+  `200 application/json` and write a space every 20 s before the JSON (so past
+  20 s the status is always 200 and the body's `error`/`isError` is the truth);
+  `/mcp` writes `: ping` SSE comments on the tools/call stream (SDK 1.26 answers
+  POSTs as SSE and has no ping hook, so they go on the Node response between
+  its events). Do not add compression or any buffering proxy in front of these
+  routes; never make a long call silent again.
 - Public TCP proxies (`railway tcp-proxy`) are debug-only and must be deleted
   when done; they are public hosts. Scrapling's `/healthz` is otherwise reachable
   only on the private network (set `SCRAPLING_HEALTHZ` for the health skill).

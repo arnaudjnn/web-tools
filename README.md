@@ -498,6 +498,20 @@ issues }`. `web_search`, `web_snapshots`, `web_archive` and `web_usage_stats`
 answer with their JSON payload (HTTP 500 `{ error }` on failure); the other
 tools answer with `{ content, isError }`.
 
+**Long calls (past 20 s) are always HTTP 200 — read the body.** Railway's public
+edge closes a request after 5 minutes with no bytes transferred, and
+`web_form_submit` (score gate + CAPTCHA retries) or `web_agent` can legitimately
+run longer. So a call that has not finished within `HEARTBEAT_MS` (default
+20 000) commits `200 application/json`, writes a single space every
+`HEARTBEAT_MS` while the tool works, then writes the usual JSON body. Leading
+whitespace is valid JSON, so `JSON.parse` / `response.json()` keep working —
+but the status can no longer change, so a failure past 20 s arrives as the same
+body it always had: `{ error }` for the JSON-native tools, `{ content,
+isError: true }` for the rest. Calls that finish sooner keep today's status
+codes (400, 500, …). Check `isError` / `error`, not only the HTTP status. MCP
+gets the equivalent: `: ping` SSE comments on the `tools/call` response stream,
+which MCP clients ignore.
+
 ```bash
 # Discovery: list all tools
 curl https://your-server.up.railway.app/api/v0 \
