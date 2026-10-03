@@ -103,6 +103,37 @@ GRECAPTCHA_USABLE_JS = (
     " return !!g && (typeof g.execute === 'function' ||"
     " !!(g.enterprise && typeof g.enterprise.execute === 'function')); })()")
 _ANCHOR_PATH = re.compile(r"/recaptcha/(?:api2|enterprise)/anchor\b")
+
+
+def main_world_eval(page, js):
+    """Evaluate `js` (an expression) in the page's MAIN world, on either engine.
+
+    Camoufox isolates ordinary evaluation from the page's globals. The `mw:`
+    prefix opts into its main world, and in other engines it is just a JS
+    label. Patchright (engine "chromium") also evaluates in an isolated world
+    by default, and there `mw:` would silently read the isolated world's
+    `window`: `window.formReady` would be undefined forever. Its evaluate
+    takes `isolated_context=False` instead, so ask for that when the
+    page's evaluate accepts it.
+    """
+    try:
+        import inspect
+        isolated_flag = "isolated_context" in inspect.signature(page.evaluate).parameters
+    except (TypeError, ValueError):
+        isolated_flag = False
+    if isolated_flag:
+        return page.evaluate(js, isolated_context=False)
+    return page.evaluate("mw:(" + js + ")")
+
+
+# After a cookie-banner click, a consent manager may RELOAD the page (iubenda
+# does on Atoka: on Chromium the reload landed 2-6 s after the accept click
+# when headed and ~25 s after it when headless, and every typed value was
+# gone). Wait this long for a main-frame navigation before typing. If one
+# starts, let it load and settle. If it comes later than this, the
+# pre-click check in run_form refills the fields once.
+DISMISS_RELOAD_WAIT_S = 8.0
+DISMISS_RELOAD_POLL_MS = 250
 # The readiness gate's own bound. Every passing run met it within
 # milliseconds of the fields finishing; every failing one (7 on 2026-10-01)
 # polled until the whole deadline expired (~2 min) — a condition still
@@ -255,6 +286,8 @@ class FormLive:
                                 diagnostics.get("captcha_network_failures")],
             "submit_clicked": diagnostics.get("submit_click_attempted"),
             "inspect_only": diagnostics.get("inspection_only"),
+            "dismiss_reload": diagnostics.get("dismiss_reload"),
+            "refilled": diagnostics.get("refilled_after_reload"),
             **self.meta,
             **self.extra,
         }
@@ -649,7 +682,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     "captcha_failed": [], "captcha_lib_loaded": False,
                     "captcha_ready": None, "captcha_signal": None,
                     "page_reused": None, "gate_ip": expect_ip, "form_ip": None,
-                    "exit_verified": None, "captcha_lib_direct": None}
+                    "exit_verified": None, "captcha_lib_direct": None,
+                    "dismiss_reload": None, "refilled_after_reload": None}
     result["diagnostics"] = diagnostics
     live.result = result
     live.note(wizard=bool(gate_text or step2 or completion_markers),
@@ -821,11 +855,25 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         if is_submission(response.request):
             result["status"] = response.status
 
+    navs = {"n": 0}  # main-frame navigations committed so far (any page we drive)
+
     def open_page():
         log.info("form flow: new_page")
         opened, reused = first_page(context, live)
         diagnostics["page_reused"] = reused
         log.info("form flow: page ready (reused=%s)", reused)
+
+        def navigated(frame):
+            try:
+                if frame == opened.main_frame:
+                    navs["n"] += 1
+            except Exception:
+                pass
+
+        try:
+            opened.on("framenavigated", navigated)
+        except Exception:
+            pass
         opened.on("request", request_started)
         opened.on("requestfailed", request_failed)
         opened.on("requestfinished", request_finished)
@@ -865,7 +913,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             return False, "anchor_empty"
         try:
             with live.at("captcha check"):
-                if page.evaluate("mw:(" + GRECAPTCHA_USABLE_JS + ")") is True:
+                if main_world_eval(page, GRECAPTCHA_USABLE_JS) is True:
                     return True, "execute"
         except Exception:
             pass
@@ -897,6 +945,31 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 diagnostics["captcha_waited_inflight"] = True
             with live.at("captcha pause"):
                 page.wait_for_timeout(remaining(CAPTCHA_READY_POLL_MS))
+
+    def settle_after_reload(mark):
+        """A main-frame navigation replaced the form's document: let it load."""
+        state = wait_until if wait_until in ("load", "domcontentloaded", "networkidle") else "load"
+        with live.at(mark, NAV_TIMEOUT_MS / 1000 + 5.0):
+            page.wait_for_load_state(state, timeout=remaining(NAV_TIMEOUT_MS))
+        with live.at(mark + " settle"):
+            page.wait_for_timeout(min(random.randint(700, 1500), remaining()))
+
+    def wait_dismiss_reload(before):
+        """Up to DISMISS_RELOAD_WAIT_S for the consent manager's reload.
+
+        Polled in steps, not on the wall clock, so a frozen test clock cannot
+        spin. It returns early once a navigation has started.
+        """
+        steps = int(DISMISS_RELOAD_WAIT_S * 1000 / DISMISS_RELOAD_POLL_MS)
+        for _ in range(steps):
+            if navs["n"] != before:
+                break
+            with live.at("dismiss reload wait"):
+                page.wait_for_timeout(remaining(DISMISS_RELOAD_POLL_MS))
+        if navs["n"] != before:
+            diagnostics["dismiss_reload"] = True
+            log.info("form flow: the dismiss click reloaded the page; waiting for it before typing")
+            settle_after_reload("dismiss reload")
 
     try:
         if expect_ip:
@@ -1096,6 +1169,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # a banner that had not loaded at click time yet was visible right
         # before fields (2026-09-30) — diagnostics recorded the truth and
         # the fields failed anyway.
+        navs_before_dismiss = navs["n"]
         for _ in range(3 if dismiss else 0):
             clicked = False
             for selector in dismiss or []:
@@ -1120,6 +1194,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 diagnostics["banner_visible"] = None
             if not diagnostics["banner_visible"]:
                 break
+        if diagnostics["dismiss_clicked"]:
+            wait_dismiss_reload(navs_before_dismiss)
         log.info("form flow: fields (%d)", len(fields))
 
         def fill_fields(field_list, pre_submit=True):
@@ -1188,9 +1264,58 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     raise ValueError("Unknown field action")
             diagnostics["field_attempt"] = None
 
+        def missing_fields(field_list):
+            """The fields a reload reset: typed values not there any more,
+            boxes unchecked. Selects are idempotent and always redone."""
+            out = []
+            for field in field_list:
+                control_ = page.locator(field["selector"])
+                action = field.get("action", "type")
+                try:
+                    with live.at("refill read"):
+                        if action == "type":
+                            if control_.input_value(timeout=remaining(5000)) == (field.get("value") or ""):
+                                continue
+                        elif action == "check":
+                            if control_.is_checked(timeout=remaining(5000)):
+                                continue
+                except Exception:
+                    pass  # unreadable: refill it, the read-back decides
+                out.append(field)
+            return out
+
         phase = "fields"
         live.enter("fields")
-        fill_fields(fields)
+        navs_at_fill = navs["n"]
+        refill = {"done": False}
+
+        def refill_if_reloaded(where):
+            """A late consent reload replaced the form's document after
+            typing began: every value is gone, and a click now would hit
+            HTML5 validation with no POST. Still pre-click, so refill ONCE
+            what did not survive; the read-backs judge it. True if it did."""
+            nonlocal phase
+            if navs["n"] == navs_at_fill or refill["done"]:
+                return False
+            refill["done"] = True
+            diagnostics["refilled_after_reload"] = where
+            log.info("form flow: the page navigated after typing began (%s); refilling once", where)
+            # A failure here is a fields failure (pre-click, zero POSTs,
+            # retryable), whichever phase called it.
+            before, phase = phase, "fields"
+            settle_after_reload("refill reload")
+            fill_fields(missing_fields(fields))
+            phase = before
+            return True
+
+        try:
+            fill_fields(fields)
+        except ValueError:
+            # A read-back miss because the page reloaded MID-typing is the
+            # same late reload, not a broken field.
+            if navs["n"] == navs_at_fill:
+                raise
+        refill_if_reloaded("fields")
         if ready_expression:
             phase = "readiness"
             live.enter("readiness")
@@ -1206,7 +1331,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             ready_until = time.monotonic() + READY_WAIT_S
             while True:
                 with live.at("ready check"):
-                    met = page.evaluate("mw:(" + ready_expression + ")") is True
+                    met = main_world_eval(page, ready_expression) is True
                 if met:
                     break
                 if time.monotonic() >= ready_until:
@@ -1239,6 +1364,13 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # first: a submit the instant the last field fills in is machine
         # timing, and the token must be minted after the interaction anyway.
         page.wait_for_timeout(min(random.randint(800, 2400), remaining()))
+        if refill_if_reloaded("preclick") and diagnostics["captcha_script_requests"]:
+            # The reload brought a new reCAPTCHA client: usable again first.
+            usable, signal = wait_captcha_usable()
+            diagnostics["captcha_preclick_signal"] = signal
+            if not usable:
+                result["error"] = "captcha_unavailable"
+                raise CaptchaUnavailable("reCAPTCHA client unusable after the refill")
         diagnostics["submit_click_attempted"] = True
         # The URL the form was submitted FROM: a refusal re-renders it here.
         submitted_from = page.url

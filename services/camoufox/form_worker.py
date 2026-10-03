@@ -190,12 +190,17 @@ def _run_isolated(browser_factory, deadline, live, runner, params):
                 time.sleep(min(pause, max(0.0, deadline - time.monotonic())))
         try:
             if hasattr(browser, "new_context"):
-                # The launch's own context options (fingerprint.viewport);
-                # a factory that names none keeps the fixed 1440x900 viewport.
-                options = getattr(manager, "form_context_options", None)
+                # The launch's own context options: an engine's
+                # (chromium_engine: the real window) or the fingerprint's
+                # (fingerprint.viewport). None named keeps the fixed
+                # 1440x900 viewport. Service workers stay blocked always.
+                options = getattr(manager, "context_options", None)
+                if not isinstance(options, dict):
+                    options = getattr(manager, "form_context_options", None)
                 if not isinstance(options, dict):
                     options = {"viewport": {"width": 1440, "height": 900}}
                 live.note(viewport="fixed" if "viewport" in options else "native")
+                options.pop("service_workers", None)
                 context = browser.new_context(**options, service_workers="block")
             else:
                 # A persistent profile launches straight into ONE context —

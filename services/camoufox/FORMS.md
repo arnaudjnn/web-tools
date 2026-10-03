@@ -317,6 +317,93 @@ exists (a browser upgrade on the volume) redraws its fingerprint and keeps
 its cookies. The token selects an exit; the provider may still recycle the
 IP behind it, which `exit_ip`/`exit_ip_changed` make visible.
 
+## Engines: `engine: "chromium"` (`chromium_engine.py`)
+
+`/form-submit` and `/form-inspect` take `engine`, which is `camoufox` or
+`chromium`. When it is omitted, the service's `FORM_ENGINE` applies, and that
+defaults to `camoufox`. There is ONE form path. The engine only selects the
+browser that `_form_browser` launches. `run_form`, the POST guard,
+`require_captcha_token`, the wizard, `retry_on_captcha_rejection`, the target
+verdicts and exit coherence are the same code for both engines.
+
+`chromium` is Patchright Chromium (`patchright==1.63.0`, the same pin as
+Scrapling's). It runs on the same `proxy_session` sticky exit, headed under
+the same Xvfb `:99`. Each attempt gets a persistent context on a throwaway
+profile, deleted at teardown, which is the shape the lab measured and the
+one Patchright recommends. It is still one isolated identity per attempt.
+`FORM_CHROMIUM_PERSISTENT=0` switches to `launch()` + `new_context()`.
+
+**Why it exists.** Lane-chromium ran a lab on Atoka on 2026-10-03: one
+guarded POST per attempt, random identities, Evomi IT exits, no gate, and
+the reCAPTCHA library loaded through the exit. Headed Patchright accepted
+18/20 step-0 POSTs: 9/10 on a macOS display and 9/10 in the Scrapling image
+(linux/amd64, Xvfb). Production Camoufox accepted 11/30 that day
+(p≈0.0003). The difference lies in the low scores. When our oracle scored
+the exit at ≤0.7 before the form, Atoka accepted Chromium 6/7 times (four of
+those at 0.1–0.3), against Camoufox's 2/14. Click → token took ~0.5 s and
+click → POST ~0.5 s, as on Camoufox. Headless Chromium lost: 0/4 POSTed,
+oracle 0.0–0.5.
+
+Differences, all deliberate:
+
+- **Score gate defaults OFF** (`app._gate_default`). The oracle mispredicts
+  this engine. A gate at 0.7 would have discarded six of the seven
+  low-scoring exits Atoka accepted. An explicit `score_gate: true` still
+  gates, and then probes with Chromium (`score_probe._factory`). Only the
+  IP pre-check stays on Camoufox. Retries on an explicit CAPTCHA refusal
+  are unchanged and use a fresh exit.
+- **No profile.** Profiles are Camoufox launch options on disk, so
+  `engine: "chromium"` with `profile` is a 400.
+- **No viewport override.** `context_options` sets `no_viewport` with
+  `--window-size=1440,900`, matching the Xvfb screen. The page is the real
+  window. A 1440×900 viewport inside a 1440×900 screen would make the inner
+  window as large as the screen, which no real window is. Locale `it-IT`
+  and timezone `Europe/Rome` follow the IT exit pool
+  (`FORM_CHROMIUM_LOCALE` / `_TIMEZONE`). Camoufox derives both from geoip.
+  Service workers stay blocked on every engine (`form_worker`).
+- **Isolated-world evaluation.** Patchright evaluates in an isolated world
+  by default, and that is part of its stealth. Reads of page globals
+  (`ready_expression`, the `grecaptcha.execute` probe) therefore go through
+  `form_flow.main_world_eval`, which passes `isolated_context=False`. Any
+  other engine gets the `mw:` prefix.
+- **Headless** is Chromium's new headless mode (`channel="chromium"`),
+  never chrome-headless-shell. Score-gated forms stay headed on both
+  engines.
+
+**Through this service, so far.** This branch's image was run locally with
+`/form-submit`, `engine: "chromium"`, headed, no gate. It got 4/7 accepted
+(3 `wizard_rejected` CAPTCHA refusals). All runs posted exactly once and
+had `dismiss_reload: true`. That is below the lab's 18/20, and two
+differences remain open. First, those runs used `launch()` + `new_context()`;
+the persistent context is newer. Second, run_form's fields phase takes
+~11 s, against the lab runner's ~40 s of slower keystrokes and pointer
+paths. Confirm with a production batch before flipping `FORM_ENGINE`.
+
+`engine` is recorded in the `form-run` line and in `diagnostics.engine`.
+Bench it as a deploy-level A/B: run the Atoka batch with `engine` set
+both ways in the same window.
+
+## A consent click that reloads the page
+
+Atoka's iubenda accept RELOADS the page. On Chromium the reload came 2–6 s
+after the click when headed and ~25 s after it when headless. In the
+headless case it wiped every typed value mid-fill, and the click then hit
+HTML5 validation with no POST. Two defences, both before the click (zero
+POSTs either way):
+
+- After a dismiss click, `run_form` waits up to `DISMISS_RELOAD_WAIT_S` (8 s)
+  for a main-frame navigation. When one starts, it lets the page load and
+  settle before typing (`diagnostics.dismiss_reload`).
+- If the document is replaced after typing began, the fields that did not
+  survive are refilled ONCE. That covers a read-back miss mid-typing and a
+  reload during the pre-click dwell (`diagnostics.refilled_after_reload` =
+  `fields` | `preclick`). After a pre-click refill, reCAPTCHA must be usable
+  again before the click. A second failure is `fields_failed` (503,
+  retryable).
+
+`test_form_browser.ReloadTests` drives both cases against a loopback
+fixture.
+
 ## Dedicated service and score-gated exits
 
 `CAMOUFOX_ROLE=forms` runs this image as a forms-only service: no render or
