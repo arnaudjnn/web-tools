@@ -489,7 +489,53 @@ def _click_target(box):
     return max(2.0, tx), max(2.0, ty)
 
 
-def human_click(page, control, remaining, pre_submit=True, live=None) -> None:
+# Input pacing. "camoufox" (the default) relies on humanize=True: Camoufox
+# animates every dispatched move browser-side, so one mouse.move per click
+# and keyboard.type's own per-key delay. Chromium has no humanize: a bare
+# mouse.move is a one-event teleport. "lab" reproduces the lane-chromium
+# runner (scripts/lab/atoka_chromium.py, 18/20 accepted on Atoka) on that
+# engine: stepped pointer paths (12-30 events), a keystroke per call with
+# 60-190 ms between keys plus an occasional 200-500 ms hesitation, and the
+# runner's pauses between fields (~40 s for Atoka's six fields, not ~11 s).
+PACINGS = ("camoufox", "lab")
+
+
+def _lab(pacing):
+    return pacing == "lab"
+
+
+def _key_gap_ms():
+    """The lab runner's inter-key gap: 60-190 ms, 8% of keys +200-500 ms."""
+    gap = random.uniform(60, 190)
+    if random.random() < 0.08:
+        gap += random.uniform(200, 500)
+    return int(gap)
+
+
+def type_text(page, value, remaining, pacing=None):
+    """Keystroke-by-keystroke text entry at the pacing's cadence. Never fill().
+
+    "lab": one keyboard.type per character (no hold), then the gap via
+    page.wait_for_timeout — never time.sleep, which would stall the
+    context's request routes (sync playwright dispatches route handlers only
+    while the thread is inside a driver call)."""
+    if not _lab(pacing):
+        page.keyboard.type(value, delay=random.randint(45, 120))
+        return
+    for ch in value:
+        page.keyboard.type(ch)
+        page.wait_for_timeout(min(_key_gap_ms(), remaining()))
+
+
+def _lab_click_target(box):
+    """The lab runner's aim: 30-70% across and down the box, never an axis."""
+    tx = box["x"] + box["width"] * random.uniform(0.3, 0.7)
+    ty = box["y"] + box["height"] * random.uniform(0.3, 0.7)
+    return max(2.0, tx), max(2.0, ty)
+
+
+def human_click(page, control, remaining, pre_submit=True, live=None, pacing=None,
+                mark_click=True) -> None:
     """Click a control the way a pointer does: bring it into view instantly,
     move to it, land off-centre, press and release. A synthetic .click()
     with no pointer ever moving is an automation signature.
@@ -517,13 +563,19 @@ def human_click(page, control, remaining, pre_submit=True, live=None) -> None:
     see `_unmarked`.
     """
     at = live.at if (pre_submit and live is not None) else _unmarked
+    lab = _lab(pacing)
     with at("field scroll"):
-        control.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
+        if lab:
+            # Only when out of view, as the runner does: a visible field is
+            # not scrolled, so the pointer path is the only motion.
+            control.scroll_into_view_if_needed(timeout=min(remaining(), 5000))
+        else:
+            control.evaluate("el => el.scrollIntoView({block: 'center', behavior: 'instant'})")
     # Instant scrolls do not animate, but layout may need a beat before the
     # rect is readable. Fixed margin, not a scrollY poll: polling would spend
     # page.evaluate calls that belong to the readiness gate.
     with at("field settle"):
-        page.wait_for_timeout(300)
+        page.wait_for_timeout(random.randint(200, 500) if lab else 300)
     # Bounded, then marked above that bound: a form field that takes >5s to
     # appear is a broken page (fail fast as fields_failed), and a driver
     # roundtrip that never returns must surface as a hang, not deadline+grace.
@@ -533,16 +585,23 @@ def human_click(page, control, remaining, pre_submit=True, live=None) -> None:
         with at("field click", 13.0):
             control.click(timeout=min(remaining(), 5000))
         return
-    tx, ty = _click_target(box)
+    tx, ty = (_lab_click_target if lab else _click_target)(box)
     # Input dispatch is the class that wedges (playwright gives it no
     # timeout of its own); one animated trajectory is bounded by humanize's
     # maxTime, so its mark sits at POINTER_MOVE_STUCK_S. Move, a short
     # human beat, then press — each its own mark, so a park names which.
+    # "lab" steps the path itself (Chromium has no humanize to draw one).
     with at("pointer move", POINTER_MOVE_STUCK_S):
-        page.mouse.move(tx, ty)
+        if lab:
+            page.mouse.move(tx, ty, steps=random.randint(12, 30))
+        else:
+            page.mouse.move(tx, ty)
     with at("pointer dwell"):
-        page.wait_for_timeout(min(random.randint(60, 180), remaining()))
-    with at("pointer click"):
+        page.wait_for_timeout(min(random.randint(80, 250) if lab else random.randint(60, 180),
+                                  remaining()))
+    # mark_click=False: the click is the submit itself — after it, a park
+    # is no longer pre-POST, so it must never carry a pre-submit mark.
+    with (at("pointer click") if mark_click else _unmarked("pointer click")):
         page.mouse.click(tx, ty)
 
 
