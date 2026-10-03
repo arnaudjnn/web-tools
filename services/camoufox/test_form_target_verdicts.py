@@ -157,14 +157,14 @@ class RecordingTests(_Root):
 # ── the rule ────────────────────────────────────────────────────────
 
 class RuleTests(_Root):
-    def test_skip_rule_needs_three_decisive_verdicts_at_most_20_percent(self):
-        self.seed(1, rejected=2)  # two refusals ban nothing
+    def test_skip_rule_needs_six_decisive_verdicts_at_most_10_percent(self):
+        self.seed(1, rejected=5)  # five refusals ban nothing
         self.assertIsNone(target_verdicts.assess(FORM, 1, rng=NEVER)["skip"])
         self.seed(1, rejected=1)
         self.assertEqual(target_verdicts.assess(FORM, 1, rng=NEVER)["skip"], "target_asn_rejected")
-        self.seed(2, accepted=1, rejected=4)  # 20%: still skipped
+        self.seed(2, accepted=1, rejected=9)  # 10%: still skipped
         self.assertEqual(target_verdicts.assess(FORM, 2, rng=NEVER)["skip"], "target_asn_rejected")
-        self.seed(3, accepted=1, rejected=3)  # 25%: ranked low, not skipped
+        self.seed(3, accepted=1, rejected=4)  # 20%: ranked low, never skipped
         self.assertIsNone(target_verdicts.assess(FORM, 3, rng=NEVER)["skip"])
         # "other" verdicts (field errors...) never count against an ASN.
         self.seed(4, other=10)
@@ -186,7 +186,7 @@ class RuleTests(_Root):
         self.assertEqual(target_verdicts.pick(cands, rng=NEVER), 2)
 
     def test_exploration(self):
-        self.seed(1, rejected=5)
+        self.seed(1, rejected=6)
         explored = target_verdicts.assess(FORM, 1, rng=_Rng(0.05))
         self.assertIsNone(explored["skip"])
         self.assertTrue(explored["explored"])
@@ -236,7 +236,7 @@ class GateTests(_Root):
         return outcome, prechecked, probed
 
     def test_a_clearly_rejected_asn_is_skipped(self):
-        self.seed(1267, rejected=3)
+        self.seed(1267, rejected=6)
         outcome, prechecked, probed = self.run_gate(
             [{"ip": "1.1.1.1", "asn": 1267}, {"ip": "2.2.2.2", "asn": 3269},
              {"ip": "3.3.3.3", "asn": 6762}], {})
@@ -286,7 +286,7 @@ class GateTests(_Root):
         self.assertEqual(outcome["session"], "mine")
 
     def test_exploration_lets_a_rejected_asn_through(self):
-        self.seed(1267, rejected=5)
+        self.seed(1267, rejected=6)
         outcome, _prechecked, probed = self.run_gate([{"ip": "1.1.1.1", "asn": 1267}], {},
                                                      tries=1, rng=_Rng(0.05))
         self.assertEqual(probed, [1267])

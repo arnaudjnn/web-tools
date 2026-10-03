@@ -38,6 +38,12 @@ BLOCKLIST_FILE = "exit-blocklist.json"
 IP_TTL_S = 24 * 3600
 ASN_MIN_SAMPLES = 5
 ASN_BAD_RATIO = 0.8
+# An ASN is a whole carrier: its MEAN is judged against a fixed floor, never
+# the caller's threshold — at score_threshold 0.9 every big Italian carrier
+# (means 0.72-0.77) was skipped unprobed and the gate never scored an exit
+# (2026-10-03 b6: 15/15 no_scoring_exit). The per-exit probe enforces the
+# caller's threshold.
+ASN_FLOOR = float(os.environ.get("FORM_ASN_FLOOR", "0.5"))
 MAX_IPS = 500
 
 
@@ -226,7 +232,10 @@ def record_exit_score(ip, asn, score, threshold, now=None) -> dict:
     if asn is not None:
         key = str(asn)
         entry = data["asns"].get(key) or {"n": 0, "low": 0, "sum": 0.0}
-        entry.update(n=entry["n"] + 1, low=entry["low"] + int(low),
+        # The ASN's "low" count uses the fixed floor too: a caller's 0.9
+        # threshold must not mark a whole carrier's 0.8s as bad.
+        asn_low = score is None or score < ASN_FLOOR
+        entry.update(n=entry["n"] + 1, low=entry["low"] + int(asn_low),
                      sum=round(entry["sum"] + (score or 0.0), 3), at=now)
         data["asns"][key] = entry
     _write_json(_blocklist_path(), data)
@@ -255,6 +264,6 @@ def blocked_reason(ip, asn, threshold=0.7, now=None, data=None):
         stats = data["asns"].get(str(asn))
         n = (stats or {}).get("n", 0)
         if stats and n >= ASN_MIN_SAMPLES and (
-                stats.get("sum", threshold * n) / n < threshold or stats["low"] / n >= ASN_BAD_RATIO):
+                stats.get("sum", ASN_FLOOR * n) / n < ASN_FLOOR or stats["low"] / n >= ASN_BAD_RATIO):
             return "asn_low_scores"
     return None

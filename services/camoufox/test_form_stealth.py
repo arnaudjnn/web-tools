@@ -335,11 +335,19 @@ class BlocklistTests(_Root):
         self.assertEqual(profile_store.load_blocklist()["ips"]["1.1.1.1"]["sum"], 1.8)
 
     def test_an_asn_with_a_low_mean_is_skipped(self):
-        # Not 80 % low, but a mean under the threshold on a sustained record.
-        scores = [0.9, 0.9, 0.3, 0.3, 0.5]
+        # Not 80 % low, but a mean under the fixed ASN floor (0.5) on a
+        # sustained record — never the caller's threshold.
+        scores = [0.9, 0.3, 0.3, 0.3, 0.3]
         for i, score in enumerate(scores):
             profile_store.record_exit_score(f"10.1.0.{i}", 30722, score, 0.7, now=1000)
         self.assertEqual(profile_store.blocked_reason("10.1.9.9", 30722, 0.7, now=1001), "asn_low_scores")
+
+    def test_a_high_caller_threshold_never_bans_a_carrier(self):
+        # 2026-10-03 b6: at threshold 0.9 every big carrier (means ~0.75) was
+        # skipped unprobed. The ASN mean is judged against ASN_FLOOR only.
+        for i, score in enumerate([0.8, 0.7, 0.8, 0.7, 0.8]):
+            profile_store.record_exit_score(f"10.2.0.{i}", 3269, score, 0.9, now=1000)
+        self.assertIsNone(profile_store.blocked_reason("10.2.9.9", 3269, 0.9, now=1001))
 
     def test_asn_needs_a_sustained_record(self):
         for i in range(profile_store.ASN_MIN_SAMPLES - 1):

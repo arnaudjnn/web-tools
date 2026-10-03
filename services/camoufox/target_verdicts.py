@@ -27,7 +27,7 @@ A zero-POST run is no verdict and is never recorded.
 RULE (per host, per ASN; `decisive = accepted + captcha_rejected`,
 `rate = accepted / decisive`):
 
-- SKIP  when decisive >= MIN_VERDICTS (3) and rate <= BAD_RATE (0.20) — a
+- SKIP  when decisive >= SKIP_MIN_VERDICTS (6) and rate <= BAD_RATE (0.10) — a
         sustained refusal record; one bad night (1-2 refusals) bans nothing.
 - RANK  the rest by the smoothed rate (accepted + 1) / (decisive + 2): an
         unknown ASN sits at 0.5, a good record above it, a poor one below.
@@ -62,8 +62,12 @@ import profile_store
 VERDICTS_FILE = "target-verdicts.json"
 MAX_HOSTS = 50
 MAX_EVENTS_PER_HOST = 100
+# Skip an ASN for a host only on a sustained, near-total refusal: on Atoka
+# acceptance tracked the exit's oracle score, not its carrier, and 1/5 on
+# ASN 1267 (mostly low-score exits) wrongly removed a whole carrier.
 MIN_VERDICTS = 3
-BAD_RATE = 0.20
+SKIP_MIN_VERDICTS = 6
+BAD_RATE = 0.10
 GOOD_RATE = 0.60
 EXPLORE_RATE = 0.10
 VERDICTS = ("accepted", "captcha_rejected", "other")
@@ -216,7 +220,7 @@ def assess(host, asn, *, stats=None, rng=None) -> dict:
     rate = accepted / decisive if decisive else None
     out = {"skip": None, "rank": (accepted + 1) / (decisive + 2), "preferred": False,
            "explored": False, "decisive": decisive, "rate": rate}
-    if decisive >= MIN_VERDICTS and rate <= BAD_RATE:
+    if decisive >= SKIP_MIN_VERDICTS and rate <= BAD_RATE:
         if rng.random() < EXPLORE_RATE:
             out.update(explored=True, rank=-1.0)  # let through, ranked last
         else:
