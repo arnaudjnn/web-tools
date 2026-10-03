@@ -1073,8 +1073,14 @@ async def form_submit(req: FormSubmitRequest):
     async def attempt(n):
         # Attempt 1 runs on the resolved session; a retry on a NEW exit token
         # (fresh proxy session, new isolated context), gated again.
-        data, gate, used = await _form_attempt(req, deadline, session if n == 1 else secrets.token_hex(6),
-                                               retry=n > 1, attempt_n=n if retries else None)
+        try:
+            data, gate, used = await _form_attempt(req, deadline, session if n == 1 else secrets.token_hex(6),
+                                                   retry=n > 1, retries=retries,
+                                                   attempt_n=n if retries else None)
+        except form_retry.AttemptRefused as refused:
+            # A guard block may still be retried: its floor counts too.
+            floor["s"] = _attempt_floor_s(req, {"record": refused.gate_record} if refused.gate_record else None)
+            raise
         floor["s"] = _attempt_floor_s(req, gate)
         attempt.used = used
         return data, (gate or {}).get("record")
@@ -1083,6 +1089,13 @@ async def form_submit(req: FormSubmitRequest):
     try:
         data = await form_retry.run_attempts(attempt, retries=retries, blocked=blocked,
                                              deadline=deadline, floor_s=lambda: floor["s"])
+    except form_retry.AttemptRefused as refused:
+        # Every attempt was a zero-POST token-guard block: the endpoint's own
+        # 503 (retryable, nothing sent), naming the attempts.
+        error = refused.cause
+        if isinstance(getattr(error, "detail", None), dict):
+            error.detail["attempts"] = refused.attempts
+        raise error
     except form_retry.RetryUnknown as unknown:
         log.warning("form-submit retry %d outcome unknown (%s); not retried",
                     len(unknown.attempts), unknown)
@@ -1108,13 +1121,15 @@ def _attempt_floor_s(req, gate):
     return reserve + (score_probe.CANDIDATE_MIN_MS / 1000 + 5.0 if gated else 0.0)
 
 
-async def _form_attempt(req, deadline, session, *, retry=False, attempt_n=None):
+async def _form_attempt(req, deadline, session, *, retry=False, retries=0, attempt_n=None):
     """ONE form attempt on `session`: (data, gate, session used).
 
     Raises the endpoint's HTTPExceptions on attempt 1 (503 retryable,
     502 unknown). On a retry, a provably zero-POST refusal is
     form_retry.AttemptRefused instead, so the loop can answer with the
-    previous attempt's (real) result.
+    previous attempt's (real) result. With retries enabled, a token-guard
+    block (`captcha_token_missing`, zero POSTs) is a trigger AttemptRefused
+    on ANY attempt: a fresh exit may mint where this one could not.
     """
     # One per job: the pre-POST mark the worker polls and the job's single
     # `form-run {json}` summary line (no values, tokens or bodies).
@@ -1125,10 +1140,13 @@ async def _form_attempt(req, deadline, session, *, retry=False, attempt_n=None):
         return await _form_attempt_run(req, deadline, session, live)
     except HTTPException as error:
         detail = getattr(error, "detail", None)
-        if retry and getattr(error, "status_code", None) == 503 and isinstance(detail, dict) \
-                and detail.get("retryable") is True:
+        zero_post = (getattr(error, "status_code", None) == 503 and isinstance(detail, dict)
+                     and detail.get("retryable") is True)
+        trigger = zero_post and retries > 0 and detail.get("error") == "captcha_token_missing"
+        if zero_post and (retry or trigger):
             raise form_retry.AttemptRefused(detail.get("error") or detail.get("reason") or "not_submitted",
-                                            gate_record=detail.get("score_gate")) from error
+                                            gate_record=detail.get("score_gate"), trigger=trigger,
+                                            cause=error) from error
         raise
 
 
@@ -1178,10 +1196,17 @@ async def _form_attempt_run(req, deadline, session, live):
         # click (or the browser) and the guard saw no submission. Same
         # contract as the park above — replay the identity.
         log.warning("form-submit retryable: %s with zero POSTs", data.get("error"))
-        raise HTTPException(status_code=503, detail={
+        detail = {
             "message": "Form never submitted (%s); safe to retry" % data.get("error"),
             "retryable": True, "reason": data.get("error"),
-        })
+        }
+        if data.get("error") == "captcha_token_missing":
+            # Named, like no_scoring_exit: the toolkit reports the code, and
+            # the gate's record says which exit could not mint.
+            detail.update(error="captcha_token_missing", form_submissions=0)
+            if gate is not None:
+                detail["score_gate"] = gate["record"]
+        raise HTTPException(status_code=503, detail=detail)
     if gate is not None:
         data.setdefault("diagnostics", {})["score_gate"] = gate["record"]
     return data, gate, session
@@ -1271,6 +1296,11 @@ def _retryable_zero_post(data: dict) -> bool:
     must never be replayed automatically.
     """
     diagnostics = data.get("diagnostics") or {}
+    if form_retry.guard_blocked_zero_post(data):
+        # After the click, yet provably zero-POST: the token guard ABORTED
+        # the only matching request (and blocks every later one), so the
+        # server never saw a submission. The page could not mint — replay.
+        return True
     return (
         data.get("error") in (
             # Pre-click failures: nothing left this machine (fields, context,

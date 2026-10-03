@@ -146,6 +146,27 @@ also loads it from `www.gstatic.com` (the release path 404s on
 recaptcha.net), and fetching it any other way would split the identity across
 IPs.
 
+Two refinements from Atoka batch 2 (2026-10-03 00:49, run 6: signal `lib`,
+`captcha_scripts [7,7,2]`, two `recaptcha__*.js` bodies cut after their
+headers, and a step-0 POST that left WITHOUT a token — the page's
+`grecaptcha.ready()` listener never attached, so the click fell through to a
+native submit). First, the `lib` signal (a library body finished) no longer
+counts while any library copy was cut in the same document (`lib_cut`; reset
+on every navigation and on the gate's reload): the copy the page executes may
+be the cut one. Second, the client is asked AGAIN right before the click
+(`diagnostics.captcha_preclick_signal`, `form-run.captcha_preclick`), with the
+same bounded wait: 30–140 s of input separate the click from the arrival gate,
+and a consent click can (re)load the scripts — iubenda activates blocked ones
+on accept, which is the likely source of run 6's three extra script requests.
+Unusable there → `captcha_unavailable`, zero POSTs, nothing clicked, 503
+retryable (rotating the exit when it is not pinned and a library was cut).
+Without the main world the strongest proof the listener exists is the anchor
+frame; a caller that knows its page can do better with `ready_expression`
+(which also enables the `execute` signal) — on a django-recaptcha V3 form the
+inline script assigns its global `element` inside `grecaptcha.ready()` just
+before `addEventListener('submit', …)`, so `window.element instanceof
+HTMLElement` is a hypothesis worth measuring on our oracle first.
+
 Every job logs exactly one `form-run {json}` line — on return, on a
 structured failure, on an escaping exception, and (from the worker) on a
 queue timeout, a park or a wedge. It is the measurement source and carries
@@ -229,6 +250,14 @@ The result is `captcha_token_missing`, `form_submissions: 0`, and
 `diagnostics.captcha_guard_blocked: true`. Further matching POSTs are blocked too;
 there is no delayed retry after an empty token. This guard prevents a known-bad
 submission, but cannot determine whether a populated token will be accepted.
+Once the guard has blocked, the run ENDS: the plain-form outcome wait runs in
+500 ms slices that stop on the block, and the wizard walk never starts
+(Atoka 2026-10-03 00:49: the walk sat 448 s to the 540 s deadline after the
+only POST was blocked). Although the click happened, a guard block is provably
+zero-POST — the guard aborted the only matching request — so the endpoint
+answers it as `503 {retryable: true, error: "captcha_token_missing",
+form_submissions: 0, score_gate?}`, like the pre-click failures, and
+`retry_on_captcha_rejection` treats it as a retry trigger (below).
 
 `inspect_only: true` navigates without filling or clicking and blocks same-origin
 mutating requests. It returns no HTML and never reports form success. Use this
@@ -318,6 +347,12 @@ after THAT answer and no other. A retry needs ALL of:
 
 Unknown outcomes, a 3xx, completion, a non-CAPTCHA validation error, the
 business-email gate, a later-step rejection and a reset are NEVER retried.
+The one other trigger is a token-guard block (`captcha_token_missing` with
+`captcha_guard_blocked` and zero POSTs, any attempt including the first): the
+page could not mint, the same family, and nothing was sent. Its attempts entry
+is `{status: 503, form_submissions: 0}`; when EVERY attempt was such a block
+the answer is the 503 itself with `detail.attempts`, otherwise the last real
+answer.
 The flow records the evidence as `diagnostics.rejection = {at_post, errors,
 captcha, same_url, wizard}` (counts and booleans, never the text; also in the
 `form-run` line), and the predicate reads only that.

@@ -331,7 +331,8 @@ own reservation *before* calling it, and treat a lost response, a timeout, or a
 502 as an **unknown outcome**: something may have been submitted. The only
 sanctioned replay is the sidecar's **503 with `retryable: true`**. It is sent
 only when the service can prove that nothing was posted: the run stalled before
-the click, or failed at launch, navigation or field filling with zero POSTs.
+the click, failed at launch, navigation or field filling with zero POSTs, or
+`require_captcha_token` aborted a tokenless POST (`captcha_token_missing`).
 Through the Tools API every failure is structured JSON with `isError: true`:
 
 - `{ ok: false, retryable: true, outcome: "not_submitted", form_submissions: 0 }`: replay is allowed.

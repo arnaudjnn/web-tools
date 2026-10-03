@@ -22,6 +22,10 @@ later-step rejection) is never retried:
 - exactly one POST left the browser, it was answered 2xx, and the page is
   still on the URL it was submitted from (the form re-rendered).
 
+The one other trigger is a token-guard block (`guard_blocked_zero_post`):
+the page POSTed without a token and require_captcha_token aborted it —
+nothing was sent, and the page could not mint (the same family).
+
 Each retry is a NEW attempt: a new isolated browser context on a new exit
 (fresh proxy session token), score-gated again when the first one was. A
 pinned exit (`exit_session`, a sticky profile, `fresh_ip:false`) or a named
@@ -78,6 +82,17 @@ def is_captcha_rejection(data):
     return data.get("error") is None
 
 
+def guard_blocked_zero_post(data):
+    """The token guard aborted the page's tokenless POST: after the click,
+    yet provably zero-POST (the guard aborts the only matching request and
+    every later one). The page could not mint — the same family as a
+    CAPTCHA refusal, so a retry trigger, and a 503 retryable on its own."""
+    diagnostics = data.get("diagnostics") or {}
+    return bool(data.get("error") == "captcha_token_missing"
+                and data.get("form_submissions") == 0
+                and diagnostics.get("captcha_guard_blocked"))
+
+
 def blocked_reason(*, exit_session, profile, sticky, fresh_ip):
     """Why this request's identity cannot be retried on a fresh one, or None."""
     if exit_session:
@@ -101,12 +116,22 @@ def attempt_entry(n, data, gate_record=None):
 
 
 class AttemptRefused(Exception):
-    """A retry that provably never reached the target (zero POSTs): the gate
-    found no scoring exit, or a pre-click failure. `entry` is its record."""
+    """An attempt that provably never reached the target (zero POSTs).
 
-    def __init__(self, error, status=503, gate_record=None):
+    `trigger` False (on a retry: the gate found no scoring exit, a pre-click
+    failure) ends the loop with the previous answer. `trigger` True is the
+    token guard's block (`captcha_token_missing`: the page's handler POSTed
+    without a token, the guard aborted it) — the same family as a CAPTCHA
+    refusal (the page could not mint), so it is itself a retry trigger, on
+    any attempt including the first. `cause` is the endpoint's own 503,
+    re-raised (with `attempts`) when no attempt ever produced an answer.
+    """
+
+    def __init__(self, error, status=503, gate_record=None, trigger=False, cause=None):
         super().__init__(error)
         self.error, self.status, self.gate_record = error, status, gate_record or {}
+        self.trigger, self.cause = trigger, cause
+        self.attempts = []
 
 
 class RetryUnknown(Exception):
@@ -121,36 +146,61 @@ class RetryUnknown(Exception):
 
 async def run_attempts(attempt, *, retries, blocked, deadline, floor_s, clock=time.monotonic):
     """Run `attempt(n) -> (data, gate_record)` once, then again while the
-    answer is a step-0 CAPTCHA refusal and a retry is allowed.
+    answer is a step-0 CAPTCHA refusal (or a guard-blocked, tokenless
+    POST) and a retry is allowed.
 
-    Attempt 1's exceptions propagate unchanged (the single-attempt contract).
-    On a retry, `AttemptRefused` ends the loop with the previous answer;
-    anything else becomes `RetryUnknown`. A retry needs
-    `max(floor_s, the previous attempt's duration)` of deadline left.
+    Attempt 1's exceptions propagate unchanged (the single-attempt contract),
+    except a trigger `AttemptRefused`. On a retry, a non-trigger
+    `AttemptRefused` ends the loop with the previous answer; anything else
+    becomes `RetryUnknown`. A retry needs `max(floor_s, the previous
+    attempt's duration)` of deadline left. When every attempt was a
+    zero-POST trigger, the last `AttemptRefused` is raised (with
+    `.attempts`) so the endpoint answers its own 503.
     """
     attempts = []
     total = 0
     final = None
     stopped = None
     n = 1
+
+    def why_stop(duration):
+        if n > retries:
+            return "retries_exhausted"
+        if blocked:
+            return blocked
+        floor = floor_s() if callable(floor_s) else floor_s
+        if deadline - clock() < max(floor, duration):
+            return "deadline"
+        return None
+
     while True:
         started = clock()
-        if n == 1:
-            data, gate_record = await attempt(1)
-        else:
-            try:
-                data, gate_record = await attempt(n)
-            except AttemptRefused as refused:
-                attempts.append({"n": n, "error": refused.error, "ok": False,
-                                 "status": refused.status, "form_submissions": 0,
-                                 "score_gate_score": refused.gate_record.get("chosen_score"),
-                                 "asn": refused.gate_record.get("asn")})
+        try:
+            data, gate_record = await attempt(n)
+        except AttemptRefused as refused:
+            attempts.append({"n": n, "error": refused.error, "ok": False,
+                             "status": refused.status, "form_submissions": 0,
+                             "score_gate_score": refused.gate_record.get("chosen_score"),
+                             "asn": refused.gate_record.get("asn")})
+            if not refused.trigger:
+                if n == 1:
+                    raise
                 stopped = "refused"
                 break
-            except Exception as error:
-                attempts.append({"n": n, "error": "outcome_unknown", "ok": False, "status": 0,
-                                 "form_submissions": None, "score_gate_score": None, "asn": None})
-                raise RetryUnknown(attempts, total, error) from error
+            stopped = why_stop(clock() - started)
+            if stopped is None:
+                n += 1
+                continue
+            if final is None:
+                refused.attempts = attempts
+                raise
+            break
+        except Exception as error:
+            if n == 1:
+                raise
+            attempts.append({"n": n, "error": "outcome_unknown", "ok": False, "status": 0,
+                             "form_submissions": None, "score_gate_score": None, "asn": None})
+            raise RetryUnknown(attempts, total, error) from error
         duration = clock() - started
         attempts.append(attempt_entry(n, data, gate_record))
         total += data.get("form_submissions") or 0
@@ -158,15 +208,8 @@ async def run_attempts(attempt, *, retries, blocked, deadline, floor_s, clock=ti
         if not is_captcha_rejection(data):
             stopped = None
             break
-        if n > retries:
-            stopped = "retries_exhausted"
-            break
-        if blocked:
-            stopped = blocked
-            break
-        floor = floor_s() if callable(floor_s) else floor_s
-        if deadline - clock() < max(floor, duration):
-            stopped = "deadline"
+        stopped = why_stop(duration)
+        if stopped is not None:
             break
         n += 1
     if retries <= 0:
