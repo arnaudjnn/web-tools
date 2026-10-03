@@ -558,11 +558,12 @@ PAGE_FP_JS = (
     " screen: [screen.width, screen.height], window: [outerWidth, outerHeight],"
     " dpr: devicePixelRatio}; } catch (e) { return null; } })()"
 )
-EGRESS_AND_FP_JS = (
-    "Promise.all([fetch('" + EGRESS_URL + "',{signal:AbortSignal.timeout(8000)})"
-    ".then(r=>r.json()).catch(()=>null), " + PAGE_FP_JS + "])"
-    ".then(([egress, fp]) => ({egress, fp}))"
-)
+def egress_and_fp_js():
+    """The in-page egress echo + PAGE_FP_JS in one evaluate. Built per call:
+    EGRESS_URL is read at use time (tests point it at a loopback echo)."""
+    return ("Promise.all([fetch('" + EGRESS_URL + "',{signal:AbortSignal.timeout(8000)})"
+            ".then(r=>r.json()).catch(()=>null), " + PAGE_FP_JS + "])"
+            ".then(([egress, fp]) => ({egress, fp}))")
 
 
 def page_fingerprint(raw):
@@ -978,7 +979,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # from inside the page, so it traverses the same proxy the form will.
         try:
             with live.at("egress check", 12.0):
-                seen = page.evaluate(EGRESS_AND_FP_JS)
+                seen = page.evaluate(egress_and_fp_js())
             seen = seen if isinstance(seen, dict) else {}
             # The page's own (main) world is what the target's scripts see;
             # Camoufox's isolated world can disagree (measured on cf152:
