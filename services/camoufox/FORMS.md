@@ -435,6 +435,47 @@ form_submissions: 0}`. A retry whose outcome is unknown is a 502 with
 `detail = {retryable: false, attempts, form_submissions_before}` — never
 replayed. Callers like Atoka pass `score_threshold: 0.8` (default stays 0.7).
 
+## Target verdicts (`target_verdicts.py`)
+
+The oracle score predicts a target's verdict poorly, because reCAPTCHA v3
+scores per site. On Atoka (2026-10-03), exits scoring 0.7–0.9 on the oracle
+both completed and got "Error verifying reCAPTCHA": of 14 POSTed attempts, 8
+completed and 6 were rejected. So the gate learns from the targets themselves,
+keyed by the form URL's registrable host, with no target-specific code:
+
+- **Record.** Every `/form-submit` attempt that POSTed (each retry attempt
+  too) appends `{asn, ip, verdict, ts}` under its host. The file is
+  `target-verdicts.json` next to `exit-blocklist.json` (same `FORM_PROFILE_DIR`,
+  same atomic write). The verdict is one of:
+  - `accepted`: the run's `ok` (a 2xx/3xx on `success_url`, or completion);
+  - `captcha_rejected`: `form_retry.is_captcha_rejection`;
+  - `other`: anything else that POSTed. It is kept but never counted for or
+    against an ASN.
+
+  Zero-POST runs are never recorded. The file is bounded to the last 100
+  verdicts per host and 50 hosts (the host updated longest ago is dropped).
+- **Rule** (per host and ASN, `rate = accepted / (accepted + captcha_rejected)`):
+  - An ASN with at least 3 decisive verdicts and a rate of 20% or less is
+    **skipped** (`target_asn_rejected` in `score_gate.skipped`).
+  - The other ASNs are **ranked** by `(accepted+1)/(decisive+2)`, so an
+    unknown ASN sits at 0.5.
+  - An ASN with at least 3 decisive verdicts and a rate of 60% or more is
+    **preferred**: it is probed at once.
+  - With probability 0.1 the gate **explores**: a skipped ASN is let through
+    (ranked last), or the least-tried candidate is probed instead of the
+    best. This lets a record recover and lets new ASNs get tried.
+- **Gate.** The oracle stays the minimum bar: nothing runs unless it scores
+  at least the threshold. When the host has any record, the gate pre-checks
+  one more fresh candidate (headless egress echo, within `score_gate_tries`
+  and the deadline) and probes the better-ranked one first. With no record,
+  the gate runs exactly as before. A caller's `exit_session` and a sticky
+  profile's own exit are never skipped or reordered on this record. Each
+  probed try carries `target: {rate, decisive, explored}`.
+  `/form-exit-select` takes an optional `target_url` to pin a profile the
+  same way.
+- **Read it.** `/form-exits` (Tools: `web_form_exits`) returns
+  `targets: {host: {asn: {accepted, rejected, other, rate}}}`.
+
 ## Score oracle and probe (`score_probe.py`)
 
 Our own reCAPTCHA v3 key scores the form browser: Tools serves the page and

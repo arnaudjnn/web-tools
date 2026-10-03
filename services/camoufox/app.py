@@ -93,6 +93,7 @@ import launch_health
 import profile_store
 import proxy_session
 import score_probe
+import target_verdicts
 
 
 PROXY_URL = os.environ.get("PROXY_URL", "")
@@ -1193,6 +1194,9 @@ async def _form_attempt_run(req, deadline, session, live):
         data = await _form_run(req, deadline, session, live, None, _gate_ip(gate))
     if mismatches:
         data.setdefault("diagnostics", {})["exit_mismatches"] = mismatches
+    # The target's own verdict on this exit (only when it POSTed), which
+    # the next gate for this host ranks on (target_verdicts.py).
+    target_verdicts.record_attempt(req.url, data, (gate or {}).get("record"))
     if _retryable_zero_post(data):
         # Provably nothing left this machine: the failure predates the submit
         # click (or the browser) and the guard saw no submission. Same
@@ -1311,7 +1315,8 @@ async def _score_gate(req, session, deadline, live, recheck=False):
         threshold=req.score_threshold, tries=tries, deadline=deadline,
         reserve_s=score_probe.form_reserve_s(req.timeout_ms, wizard), sessions=sessions,
         # The gate predicts the form's score: probe the way the form loads.
-        captcha_lib_direct=getattr(req, "captcha_lib_direct", None))
+        captcha_lib_direct=getattr(req, "captcha_lib_direct", None),
+        target_url=req.url)
     record = score_probe.gate_record(outcome)
     live.note(score_gate=record)
     if not outcome["passed"]:

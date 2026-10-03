@@ -283,14 +283,14 @@ export const tools: ToolDefinition[] = [
   },
   {
     name: 'web_form_exit_select',
-    description: 'Probe candidate exits with the oracle (blocklisted IPs/ASNs skipped) and pin the first passing one to `profile`.',
+    description: 'Probe candidate exits with the oracle (blocklisted IPs/ASNs skipped; with `target_url`, ranked and skipped on that host\'s verdict record) and pin the first passing one to `profile`.',
     parameters: WebStealthDiagnosticInput,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     restOnly: true,
   },
   {
     name: 'web_form_exits',
-    description: 'The exit-quality blocklist and the exits pinned per profile.',
+    description: 'The exit-quality blocklist, the exits pinned per profile, and per-host target verdicts (`targets`: {host: {asn: {accepted, rejected, other, rate}}}).',
     parameters: WebStealthDiagnosticInput,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     restOnly: true,
