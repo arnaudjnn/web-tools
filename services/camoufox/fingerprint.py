@@ -23,6 +23,13 @@ Camoufox launch kwargs (pure: no browser, unit-tested). Keys:
 - `humanize`: true/false or the max seconds of a cursor move.
 - `fingerprint_preset`: true — a real-device preset instead of a
   synthetic BrowserForge draw.
+- `viewport`: "fixed" (default: isolated form contexts are opened with a
+  1440x900 viewport) | "native" (no viewport override: Camoufox's own
+  no_viewport default, so the page sees the spoofed window — what a
+  persistent profile's context already gets). The fixed viewport overrides
+  the drawn window: measured on cf156, outerHeight 985 on a 900-high screen,
+  and innerWidth 1440 on a 1366-wide macOS screen — geometry no real
+  browser reports. Not a launch kwarg: `context_options(spec)` reads it.
 - `config`: raw CAMOU_CONFIG overrides (e.g. `window.devicePixelRatio`,
   `headers.Accept-Language`); `firefox_user_prefs`: raw Firefox prefs.
 
@@ -64,7 +71,19 @@ def _flat_dict(value, name):
 
 
 KEYS = ("os", "locale", "screen", "window", "fonts", "custom_fonts_only", "block_webgl",
-        "webgl_config", "humanize", "fingerprint_preset", "config", "firefox_user_prefs")
+        "webgl_config", "humanize", "fingerprint_preset", "config", "firefox_user_prefs", "viewport")
+VIEWPORTS = ("fixed", "native")
+FIXED_VIEWPORT = {"width": 1440, "height": 900}
+
+
+def context_options(spec) -> dict:
+    """new_context() kwargs for an isolated form context (service workers are
+    the caller's). Default (no spec / "fixed"): the 1440x900 viewport forms
+    have always used; "native": none — Camoufox applies no_viewport itself."""
+    viewport = (spec or {}).get("viewport") or "fixed"
+    if viewport not in VIEWPORTS:
+        raise ValueError("fingerprint.viewport must be one of %s" % ", ".join(VIEWPORTS))
+    return {} if viewport == "native" else {"viewport": dict(FIXED_VIEWPORT)}
 
 
 def validate(spec):
@@ -98,6 +117,7 @@ def launch_kwargs(spec, screen_factory=_screen) -> dict:
     if unknown:
         raise ValueError("unknown fingerprint keys: %s" % ", ".join(sorted(unknown)))
     out = {}
+    context_options(spec)  # validates `viewport` (a context option, not a launch kwarg)
     if spec.get("os") is not None:
         if spec["os"] not in OSES:
             raise ValueError("fingerprint.os must be one of %s" % ", ".join(OSES))

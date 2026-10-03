@@ -685,8 +685,11 @@ def _form_browser(session, main_world_eval=False, headed=False, profile=None, fi
     base = {"geoip": True, "humanize": True}
     base.update(fingerprint_mod.launch_kwargs(fingerprint))
     if not profile:
-        return Camoufox(headless=headless, proxy=proxy, timeout=30000,
-                        main_world_eval=main_world_eval, **base)
+        manager = Camoufox(headless=headless, proxy=proxy, timeout=30000,
+                           main_world_eval=main_world_eval, **base)
+        # How form_worker opens the isolated context (fingerprint.viewport).
+        manager.form_context_options = fingerprint_mod.context_options(fingerprint)
+        return manager
     # Named persistent profile: cookies + fingerprint the target has already
     # seen (the reCAPTCHA verdict is per-session, not per-IP alone). The FIRST
     # launch's options are saved verbatim (fingerprint drawn once); later

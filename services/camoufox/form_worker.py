@@ -190,7 +190,13 @@ def _run_isolated(browser_factory, deadline, live, runner, params):
                 time.sleep(min(pause, max(0.0, deadline - time.monotonic())))
         try:
             if hasattr(browser, "new_context"):
-                context = browser.new_context(viewport={"width": 1440, "height": 900}, service_workers="block")
+                # The launch's own context options (fingerprint.viewport);
+                # a factory that names none keeps the fixed 1440x900 viewport.
+                options = getattr(manager, "form_context_options", None)
+                if not isinstance(options, dict):
+                    options = {"viewport": {"width": 1440, "height": 900}}
+                live.note(viewport="fixed" if "viewport" in options else "native")
+                context = browser.new_context(**options, service_workers="block")
             else:
                 # A persistent profile launches straight into ONE context —
                 # there is no Browser to derive a fresh one from, and the
@@ -198,6 +204,7 @@ def _run_isolated(browser_factory, deadline, live, runner, params):
                 # warmth).
                 context = browser
                 context_owned = False
+                live.note(viewport="profile")
             log.info("form phase: context ready")
         except Exception as error:
             log.warning("form context failed (%s); no submission", type(error).__name__)

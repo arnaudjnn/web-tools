@@ -105,6 +105,54 @@ class FormBrowserTests(unittest.TestCase):
         self.assertEqual(plain.keywords, {})
 
 
+class ViewportTests(unittest.TestCase):
+    def setUp(self):
+        RECORDED.clear()
+
+    def test_context_options(self):
+        fixed = {"viewport": {"width": 1440, "height": 900}}
+        self.assertEqual(fingerprint.context_options(None), fixed)
+        self.assertEqual(fingerprint.context_options({"viewport": "fixed"}), fixed)
+        self.assertEqual(fingerprint.context_options({"viewport": "native"}), {})
+        with self.assertRaises(ValueError):
+            fingerprint.validate({"viewport": "huge"})
+        # Not a launch kwarg.
+        self.assertEqual(fingerprint.launch_kwargs({"viewport": "native"}), {})
+
+    def test_form_browser_carries_context_options(self):
+        default = app._form_browser("s-vp0", False, True)
+        self.assertEqual(default.form_context_options, {"viewport": {"width": 1440, "height": 900}})
+        native = app._form_browser("s-vp1", False, True, None, fingerprint={"viewport": "native"})
+        self.assertEqual(native.form_context_options, {})
+        self.assertNotIn("viewport", RECORDED[1])
+
+    def _worker_context_kwargs(self, options):
+        from unittest.mock import Mock, patch
+        import form_flow
+        import form_worker
+        browser = Mock()
+        manager = Mock()
+        manager.__enter__ = Mock(return_value=browser)
+        manager.__exit__ = Mock()
+        if options is not None:
+            manager.form_context_options = options
+        live = form_flow.FormLive()
+        with patch("form_worker.run_form", return_value={"ok": True, "form_submissions": 1}):
+            form_worker.run_isolated_form(lambda: manager, deadline=__import__("time").monotonic() + 30,
+                                          live=live, url="https://example.test/f", fields=[], submit="b")
+        return browser.new_context.call_args.kwargs, live.extra.get("viewport")
+
+    def test_worker_opens_native_context_without_viewport(self):
+        kwargs, noted = self._worker_context_kwargs({})
+        self.assertEqual(kwargs, {"service_workers": "block"})
+        self.assertEqual(noted, "native")
+
+    def test_worker_keeps_fixed_viewport_by_default(self):
+        kwargs, noted = self._worker_context_kwargs(None)  # a factory naming nothing (Mock attr)
+        self.assertEqual(kwargs, {"viewport": {"width": 1440, "height": 900}, "service_workers": "block"})
+        self.assertEqual(noted, "fixed")
+
+
 class GateProbeTests(unittest.TestCase):
     def test_probe_factory_carries_spec_only_when_set(self):
         seen = []
