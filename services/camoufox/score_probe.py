@@ -30,7 +30,6 @@ import json
 import logging
 import random
 import re
-import secrets
 import time
 from functools import partial
 from urllib.parse import urlencode, urlsplit
@@ -39,13 +38,13 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 import profile_store
-from form_flow import FormLive, first_page, human_click
+import proxy_session
+from form_flow import EGRESS_URL, FormLive, first_page, human_click, normalize_egress
 
 log = logging.getLogger("camoufox.score")
 
 DEFAULT_THRESHOLD = 0.7
 DEFAULT_VISITS = ("https://www.google.com/", "https://www.youtube.com/")
-EGRESS_URL = "https://ipwho.is/?fields=success,ip,country,connection"
 ACTION_RE = re.compile(r"^[A-Za-z0-9_/]{1,64}$")
 VERDICT_RE = re.compile(
     r'<script type="application/json" id="oracle-verdict">(.*?)</script>', re.S)
@@ -188,14 +187,6 @@ def summarize_probe(data, *, session, profile, headed, threshold, started):
     }
 
 
-def normalize_egress(data):
-    if not isinstance(data, dict) or not data.get("success"):
-        return None
-    connection = data.get("connection") or {}
-    return {"ip": data.get("ip"), "country": data.get("country"),
-            "asn": connection.get("asn"), "isp": connection.get("isp")}
-
-
 # ── runners (inside the form worker thread, on the forms' own context) ──
 
 def _browse(page, dwell_s, deadline):
@@ -322,7 +313,7 @@ async def run_probe(*, oracle_url, session, profile, headed, wait_ms, field_coun
     def rotate():
         # The forms' own exit rotation; `rotated` tells the summary which
         # exit token the verdict actually came from.
-        token = secrets.token_hex(6)
+        token = proxy_session.new_token()
         if rotated is not None:
             rotated["session"] = token
         return partial(_deps["browser_factory"], token, False, headed, profile)
@@ -472,7 +463,7 @@ async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries,
         left_ms = int((end - reserve_s - time.monotonic()) * 1000)
         if left_ms < CANDIDATE_MIN_MS:
             break
-        session = queue.pop(0) if queue else secrets.token_hex(6)
+        session = queue.pop(0) if queue else proxy_session.new_token()
         pre = await run_egress(session, min(30_000, left_ms - 45_000))
         egress = pre.get("egress") or {}
         reason = profile_store.blocked_reason(egress.get("ip"), egress.get("asn"), threshold)
@@ -490,9 +481,14 @@ async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries,
         tries.append({k: summary[k] for k in ("score", "passed", "egress", "error-codes", "blocked")}
                      | {"error": summary["form"]["error"]})
         if summary["passed"]:
+            # The IP the score is ABOUT (the oracle saw it); the form is
+            # verified against it before it contacts the target.
             return {"passed": True, "session": session, "score": summary["score"],
-                    "egress": summary["egress"], "tries": tries}
-    return {"passed": False, "session": None, "score": None, "egress": None, "tries": tries}
+                    "egress": summary["egress"], "tries": tries,
+                    "ip": summary["egress"].get("ip") or egress.get("ip"),
+                    "precheck_ip": egress.get("ip")}
+    return {"passed": False, "session": None, "score": None, "egress": None, "tries": tries,
+            "ip": None, "precheck_ip": None}
 
 
 # ── the score gate for real submits (/form-submit score_gate) ────────
@@ -549,7 +545,10 @@ def gate_record(outcome):
             "probed": sum(1 for t in tries if "skipped" not in t),
             "skipped": [t["skipped"] for t in tries if "skipped" in t],
             "scores": [t.get("score") for t in tries if "skipped" not in t],
-            "chosen_score": outcome.get("score"), "asn": egress.get("asn")}
+            "chosen_score": outcome.get("score"), "asn": egress.get("asn"),
+            # gate_ip: what the chosen score is about; precheck_ip: the same
+            # token's IP on the headless pre-check moments earlier.
+            "gate_ip": outcome.get("ip"), "precheck_ip": outcome.get("precheck_ip")}
 
 
 async def form_exit_select(req: ExitSelectRequest):

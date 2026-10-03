@@ -97,7 +97,10 @@ class HeadedFormBrowserTests(unittest.TestCase):
         self.assertTrue(kwargs["geoip"])
         self.assertTrue(kwargs["humanize"])
         self.assertTrue(browser is not None)
-        self.assertIn("_session-session-3", kwargs["proxy"]["password"])
+        # "session-3" is no valid Evomi id (6-10 alphanumerics): it maps
+        # onto a stable one instead of being spliced in raw.
+        self.assertIn(app.proxy_session.options("session-3"), kwargs["proxy"]["password"])
+        self.assertNotIn("session-3", kwargs["proxy"]["password"])
 
     def test_request_model_accepts_headed(self):
         # pydantic is stubbed out, so assert the field declaration survives on

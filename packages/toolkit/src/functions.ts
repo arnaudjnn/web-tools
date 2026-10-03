@@ -374,12 +374,14 @@ function formFailure(err: unknown): Record<string, unknown> {
     // the score gate's record; otherwise the message is the error.
     // With retry_on_captcha_rejection, every attempt was zero-POST (e.g.
     // captcha_token_missing on each exit): `attempts` names them.
-    const d = detail as { error?: unknown; score_gate?: unknown; attempts?: unknown };
+    // exit_mismatch: the token left the IP the gate scored (gate_ip vs form_ip).
+    const d = detail as { error?: unknown; score_gate?: unknown; attempts?: unknown; exit_mismatches?: unknown };
     return {
       ok: false, retryable: true, outcome: 'not_submitted', form_submissions: 0, status,
       error: typeof d.error === 'string' ? d.error : reason,
       ...(d.score_gate !== undefined ? { score_gate: d.score_gate } : {}),
       ...(Array.isArray(d.attempts) ? { attempts: d.attempts } : {}),
+      ...(Array.isArray(d.exit_mismatches) ? { exit_mismatches: d.exit_mismatches } : {}),
     };
   }
   if (status === 400 || status === 422) {

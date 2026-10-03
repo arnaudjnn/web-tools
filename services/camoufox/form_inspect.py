@@ -601,8 +601,7 @@ def inspect_form(context, *, url, wait_until="domcontentloaded", wait_ms=4000, t
 
 def register(app, *, worker, form_browser, shared_session, camoufox=None):
     """Mount POST /form-inspect on the app, sharing the form worker's admission."""
-    import secrets
-
+    import proxy_session
     from fastapi import HTTPException
     from pydantic import BaseModel, Field
 
@@ -627,7 +626,7 @@ def register(app, *, worker, form_browser, shared_session, camoufox=None):
             validate_form(req.url, None, None)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        session = req.exit_session or (secrets.token_hex(6) if req.fresh_ip else shared_session)
+        session = req.exit_session or (proxy_session.new_token() if req.fresh_ip else shared_session)
         # One per job, shared by the worker and the runner: one form-run line.
         live = FormLive(profile=req.profile, headed=req.headed, camoufox=camoufox)
         try:

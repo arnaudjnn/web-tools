@@ -107,12 +107,15 @@ class FormTests(unittest.TestCase):
         # The proxy contract is only checkable from inside the page: which
         # IP actually minted the token. Shape only, never a body.
         self.page.evaluate.side_effect = lambda expression, *args, **kwargs: (
-            {"success": True, "country": "Italy",
+            {"success": True, "country": "Italy", "ip": "151.0.0.7",
              "connection": {"isp": "Vodafone Italia", "asn": 30722}}
             if "ipwho.is" in expression else True)
         result = run_form(self.context, **self.params)
         self.assertEqual(result["diagnostics"]["egress"],
-                         {"country": "Italy", "isp": "Vodafone Italia", "asn": 30722})
+                         {"country": "Italy", "isp": "Vodafone Italia", "asn": 30722, "ip": "151.0.0.7"})
+        # Ungated: nothing to verify against, but the form's IP is recorded.
+        self.assertEqual((result["diagnostics"]["gate_ip"], result["diagnostics"]["form_ip"],
+                          result["diagnostics"]["exit_verified"]), (None, "151.0.0.7", None))
 
     def test_egress_failure_stays_absent_and_does_not_fail_the_run(self):
         self.page.evaluate.side_effect = RuntimeError("network down")
@@ -194,7 +197,7 @@ class FormTests(unittest.TestCase):
     def _form_handler(tree):
         # The endpoint plus the one-attempt runner it loops over
         # (retry_on_captcha_rejection): together they are the form path.
-        names = ("form_submit", "_form_attempt", "_form_attempt_run")
+        names = ("form_submit", "_form_attempt", "_form_attempt_run", "_form_run")
         return "\n".join(ast.unparse(node) for node in tree.body
                          if isinstance(node, ast.AsyncFunctionDef) and node.name in names)
 

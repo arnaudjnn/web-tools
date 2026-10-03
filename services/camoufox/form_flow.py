@@ -80,6 +80,11 @@ CAPTCHA_READY_POLL_MS = 250
 CAPTCHA_LIB_INFLIGHT_S = 15.0
 # How long the score probe waits for its submission's response body.
 SUBMISSION_BODY_WAIT_S = 30.0
+# The egress echo (ipwho.is: the gate's pre-check, the in-page egress check
+# and the pre-navigation exit verification of a gate-chosen exit, bounded by
+# EXIT_CHECK_TIMEOUT_MS).
+EGRESS_URL = "https://ipwho.is/?fields=success,ip,country,connection"
+EXIT_CHECK_TIMEOUT_MS = 15000
 # A library body cut mid-transfer on THIS exit: a reload on the same exit
 # repeats it (cf156g 18:47:52: NS_ERROR_NET_PARTIAL_TRANSFER twice). With an
 # unpinned exit the worker relaunches once on a fresh one instead
@@ -224,6 +229,11 @@ class FormLive:
             "token_present": diagnostics.get("token_present"),
             "egress": ({"country": egress.get("country"), "asn": egress.get("asn")}
                        if isinstance(egress, dict) else None),
+            # Exit coherence: the IP the score gate chose vs the IP this
+            # browser egressed from (exit_verified: checked pre-navigation).
+            "gate_ip": diagnostics.get("gate_ip"),
+            "form_ip": diagnostics.get("form_ip"),
+            "exit_verified": diagnostics.get("exit_verified"),
             "nav_attempts": diagnostics.get("nav_attempts"),
             "nav_error": diagnostics.get("nav_error"),
             "ready_met": diagnostics.get("ready_condition_met"),
@@ -521,13 +531,34 @@ def _skim(page, remaining, min_steps=6, max_steps=22) -> None:
         pass  # deadline or a closed page — proceed to the click itself
 
 
+def normalize_egress(data):
+    """ipwho.is JSON -> {ip, country, asn, isp}, or None."""
+    if not isinstance(data, dict) or not data.get("success"):
+        return None
+    connection = data.get("connection") or {}
+    return {"ip": data.get("ip"), "country": data.get("country"),
+            "asn": connection.get("asn"), "isp": connection.get("isp")}
+
+
+def echo_egress(page, timeout_ms=EXIT_CHECK_TIMEOUT_MS):
+    """Which exit does this page's browser use? One top-level GET of the echo
+    (no page JS, no CSP in the way); None when it cannot be read."""
+    try:
+        response = page.goto(EGRESS_URL, wait_until="domcontentloaded", timeout=int(timeout_ms))
+        return normalize_egress(response.json() if response is not None else None)
+    except Exception as error:
+        log.info("form flow: egress echo failed (%s)", type(error).__name__)
+        return None
+
+
 def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              submission_urls=None, wait_until="domcontentloaded", wait_ms=0,
              settle_ms=20000, timeout_ms=120000, captcha_field=None, inspect_only=False,
              require_captcha_token=False, ready_expression=None,
              gate_text=None, step2=None, step2_submit=None, completion_markers=None,
              stop_after_posts=None, live=None, exit_rotatable=False,
-             capture_submission_body=False, captcha_rejection_text=None):
+             capture_submission_body=False, captcha_rejection_text=None,
+             expect_ip=None):
     targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
     # What a re-rendered form's error nodes must ALL say for the answer to
     # count as a CAPTCHA refusal (form_retry.py) — recorded, never acted on here.
@@ -555,7 +586,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     "nav_attempts": 0, "nav_error": None,
                     "captcha_failed": [], "captcha_lib_loaded": False,
                     "captcha_ready": None, "captcha_signal": None,
-                    "page_reused": None}
+                    "page_reused": None, "gate_ip": expect_ip, "form_ip": None,
+                    "exit_verified": None}
     result["diagnostics"] = diagnostics
     live.result = result
     live.note(wizard=bool(gate_text or step2 or completion_markers),
@@ -805,6 +837,26 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 page.wait_for_timeout(remaining(CAPTCHA_READY_POLL_MS))
 
     try:
+        if expect_ip:
+            # The score gate chose THIS exit by its IP on our oracle, but the
+            # form is a NEW browser on the same proxy token, and the provider
+            # may have moved the token (2026-10-03: gate ASN 16232, form ASN
+            # 3269, one token). Verify before the target sees anything: a
+            # mismatch is zero-input AND zero-target — only the echo was
+            # contacted.
+            live.enter("exit_check")
+            page = open_page()
+            with live.at("exit check", EXIT_CHECK_TIMEOUT_MS / 1000 + 5):
+                seen = echo_egress(page, remaining(EXIT_CHECK_TIMEOUT_MS))
+            diagnostics["form_ip"] = (seen or {}).get("ip")
+            diagnostics["exit_verified"] = diagnostics["form_ip"] == expect_ip
+            if not diagnostics["exit_verified"]:
+                log.warning("form flow: exit mismatch (gate_ip=%s form_ip=%s); target not contacted",
+                            expect_ip, diagnostics["form_ip"])
+                diagnostics["egress"] = seen
+                diagnostics["phase"] = "exit_check"
+                result["error"] = "exit_mismatch"
+                return result
         live.enter("navigation")
         context.route("**/*", guard)
         # Bounded retry, strictly pre-input: a transient refusal or a page
@@ -866,13 +918,16 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         try:
             with live.at("egress check", 12.0):
                 egress = page.evaluate(
-                    "fetch('https://ipwho.is/?fields=success,country,connection',"
+                    "fetch('" + EGRESS_URL + "',"
                     "{signal:AbortSignal.timeout(8000)}).then(r=>r.json()).catch(()=>null)")
             if isinstance(egress, dict) and egress.get("success"):
                 connection = egress.get("connection") or {}
                 diagnostics["egress"] = {"country": egress.get("country"),
                                          "isp": connection.get("isp"),
-                                         "asn": connection.get("asn")}
+                                         "asn": connection.get("asn"),
+                                         "ip": egress.get("ip")}
+                if diagnostics["form_ip"] is None:
+                    diagnostics["form_ip"] = egress.get("ip")
         except Exception:
             diagnostics["egress"] = None
         if inspect_only:

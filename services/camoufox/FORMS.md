@@ -179,7 +179,8 @@ teardown), `total_s`, `posts` (`[{n, token, mint_age_s}]`), `token_present`,
 as `NS_ERROR_CONNECTION_REFUSED`, never the message), `ready_met`,
 `captcha_scripts` (`[requests, responses, network_failures]`),
 `captcha_ready` / `captcha_signal` / `captcha_reload` / `captcha_failed`
-(the gate above), `page_reused`,
+(the gate above), `page_reused`, `gate_ip` / `form_ip` / `exit_verified`
+(exit coherence, below), `exit_mismatches`,
 `submit_clicked`, `inspect_only`, `wizard`, `stop_after_posts`,
 `launch_attempts`, `launch_errors`, `profile`, `headed`, and `camoufox` (wrapper version /
 `CAMOUFOX_BUILD` browser pin). Count G1 straight from it:
@@ -309,7 +310,28 @@ exit is tried first and re-pinned to the winner. No passing exit → `503
 Probes spend the caller's `timeout_ms` (max 360000; 540000 with retries), keeping 100 s back for
 a plain form and 240 s for a wizard; no candidate starts inside that
 reserve. The answer carries `diagnostics.score_gate {passed, tries, probed,
-skipped, scores, chosen_score, asn}` and the chosen `exit_session`. The gate
+skipped, scores, chosen_score, asn, gate_ip, precheck_ip}` and the chosen
+`exit_session`.
+
+**Exit coherence.** The form is a new browser on the gate's proxy token,
+and a token is not an IP: Atoka 2026-10-03 00:48 the gate scored AS16232
+(0.9) and the form, ~20 s later on the same token, egressed from AS3269.
+Two defences. (1) The token (`proxy_session.py`): Evomi wants a 6–10
+alphanumeric id — ours were 12 hex — and documents that a `_session` "may
+change IP in favor of stability"; ids are now 10 chars (any other caller
+token maps onto a stable valid id, never spliced raw into the password),
+with an explicit `_lifetime-` (`PROXY_SESSION_LIFETIME_MIN`, default 60,
+clamped 10–1440); `PROXY_SESSION_KIND=hardsession` switches to Evomi's
+"same IP as long as possible" kind (no lifetime). (2) A gated form opens
+the egress echo FIRST and compares its IP to `gate_ip` (the IP the oracle
+scored) before the target sees a request: a mismatch (or an unreadable
+echo) ends that browser with `exit_mismatch` — zero input, zero target —
+and the attempt re-gates ONCE (the exit the token moved to first, then
+fresh ones; a caller-pinned exit is only re-judged) and runs on what
+passes. A second mismatch is `503 {retryable:true, error:"exit_mismatch",
+form_submissions:0, exit_mismatches}`. Before deploy, 3 measured probe →
+probe pairs on one token kept their IP (3/3) — the drift is intermittent,
+which is why the check is per run rather than trusted. The gate
 needs `oracle_url` (Tools passes its own); an implicit gate without one is
 skipped (`{skipped:"no_oracle"}`), an explicit one is a 400. An implicit
 gate also needs room for the reserve plus one candidate (≥165 s plain,

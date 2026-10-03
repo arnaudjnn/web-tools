@@ -74,7 +74,6 @@ import logging
 import os
 import random
 import re
-import secrets
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -92,6 +91,7 @@ import form_inspect
 import form_retry
 import launch_health
 import profile_store
+import proxy_session
 import score_probe
 
 
@@ -138,13 +138,14 @@ log = logging.getLogger("camoufox")
 # service has always shown. So: pin the warmed session to ONE sticky IP, and mint
 # a NEW token on /recycle, which is also how we escape an IP that Akamai has
 # rate-hardened (it hardens per IP, and a hardened IP does not recover quickly).
+# Token format, lifetime and the 2026-10-03 gate -> form drift: proxy_session.py.
 _proxy_session = None
 
 
 def new_proxy_session() -> str:
     """Rotate to a fresh sticky exit. Called on (re)warm and by /recycle."""
     global _proxy_session
-    _proxy_session = secrets.token_hex(6)
+    _proxy_session = proxy_session.new_token()
     log.info("proxy session token rotated -> %s", _proxy_session)
     return _proxy_session
 
@@ -152,16 +153,18 @@ def new_proxy_session() -> str:
 def parse_proxy(url: str, session: str | None = None):
     """Convert "http://user:pass@host:port" into the Playwright proxy dict
     Camoufox accepts. When `session` is given (and the provider isn't already
-    carrying a session token) it is appended to the password so the exit IP is
-    sticky for the life of that browser."""
+    carrying a session token) the Evomi sticky options are appended to the
+    password — a valid 6-10 char id and an explicit lifetime (proxy_session.py)
+    — so the exit IP is sticky for the life of that browser and across the
+    gate -> form relaunch. Never log the result: it carries the credential."""
     if not url:
         return None
     m = re.match(r"^(https?)://([^:]+):([^@]+)@(.+)$", url)
     if not m:
         return None
     password = m.group(3)
-    if session and "_session-" not in password:
-        password = f"{password}_session-{session}"
+    if session and not proxy_session.has_session(password):
+        password = password + proxy_session.options(session)
     return {
         "server": f"{m.group(1)}://{m.group(4)}",
         "username": m.group(2),
@@ -640,7 +643,7 @@ def _do_eval(url, wait_until, wait_ms, timeout_ms, js, fresh_ip=False) -> dict:
 
 
 _form_worker = FormWorker()
-_form_proxy_session = secrets.token_hex(6)
+_form_proxy_session = proxy_session.new_token()
 
 
 def _camoufox_version() -> str:
@@ -1074,7 +1077,7 @@ async def form_submit(req: FormSubmitRequest):
         # Attempt 1 runs on the resolved session; a retry on a NEW exit token
         # (fresh proxy session, new isolated context), gated again.
         try:
-            data, gate, used = await _form_attempt(req, deadline, session if n == 1 else secrets.token_hex(6),
+            data, gate, used = await _form_attempt(req, deadline, session if n == 1 else proxy_session.new_token(),
                                                    retry=n > 1, retries=retries,
                                                    attempt_n=n if retries else None)
         except form_retry.AttemptRefused as refused:
@@ -1162,11 +1165,85 @@ async def _form_attempt_run(req, deadline, session, live):
         # The gate chose this exit on its score: the form runs ON it, so no
         # rotation away from it.
         rotate = None
+    data = await _form_run(req, deadline, session, live, rotate, _gate_ip(gate))
+    mismatches = []
+    while data.get("error") == "exit_mismatch" and data.get("form_submissions", 0) == 0:
+        # The token moved off the IP the gate scored, and the form stopped
+        # before contacting the target. The score no longer describes this
+        # exit: re-judge the exit the token is ON now (then fresh ones,
+        # unless the caller pinned it), within the deadline, and run on what
+        # passes. Bounded: EXIT_MISMATCH_REGATES, then a zero-POST 503.
+        diagnostics = data.get("diagnostics") or {}
+        mismatches.append({"gate_ip": diagnostics.get("gate_ip"), "form_ip": diagnostics.get("form_ip")})
+        if len(mismatches) > EXIT_MISMATCH_REGATES:
+            raise _exit_mismatch_503(mismatches, gate)
+        live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
+        live.note(exit_mismatches=list(mismatches))
+        try:
+            gate = await _score_gate(req, session, deadline, live, recheck=True)
+        except HTTPException as error:
+            detail = getattr(error, "detail", None)
+            if isinstance(detail, dict):
+                detail["exit_mismatches"] = mismatches
+            raise
+        session = gate["session"]
+        data = await _form_run(req, deadline, session, live, None, _gate_ip(gate))
+    if mismatches:
+        data.setdefault("diagnostics", {})["exit_mismatches"] = mismatches
+    if _retryable_zero_post(data):
+        # Provably nothing left this machine: the failure predates the submit
+        # click (or the browser) and the guard saw no submission. Same
+        # contract as the park above — replay the identity.
+        log.warning("form-submit retryable: %s with zero POSTs", data.get("error"))
+        detail = {
+            "message": "Form never submitted (%s); safe to retry" % data.get("error"),
+            "retryable": True, "reason": data.get("error"),
+        }
+        if data.get("error") == "captcha_token_missing":
+            # Named, like no_scoring_exit: the toolkit reports the code, and
+            # the gate's record says which exit could not mint.
+            detail.update(error="captcha_token_missing", form_submissions=0)
+            if gate is not None:
+                detail["score_gate"] = gate["record"]
+        raise HTTPException(status_code=503, detail=detail)
+    if gate is not None:
+        data.setdefault("diagnostics", {})["score_gate"] = gate["record"]
+    return data, gate, session
+
+
+# One re-gate after a gate -> form exit mismatch; a second mismatch is a
+# 503 (the provider is moving this token under us — retrying blind would
+# only spend more of the deadline on exits that do not hold).
+EXIT_MISMATCH_REGATES = 1
+
+
+def _gate_ip(gate):
+    """The IP the gate's chosen score is about, or None (no gate, skipped)."""
+    record = (gate or {}).get("record") or {}
+    return record.get("gate_ip") if record.get("passed") else None
+
+
+def _exit_mismatch_503(mismatches, gate):
+    log.warning("form-submit retryable: exit_mismatch x%d with zero POSTs (target never contacted)",
+                len(mismatches))
+    detail = {
+        "message": "The exit moved off the IP the score gate chose; form never started, safe to retry",
+        "retryable": True, "error": "exit_mismatch", "reason": "exit_mismatch",
+        "form_submissions": 0, "exit_mismatches": mismatches,
+    }
+    if gate is not None:
+        detail["score_gate"] = gate["record"]
+    return HTTPException(status_code=503, detail=detail)
+
+
+async def _form_run(req, deadline, session, live, rotate, expect_ip):
+    """One form browser on `session` (the worker job); HTTPExceptions for a
+    park (503) and an unknown outcome (502)."""
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
-        data = await _form_worker.run(partial(run_isolated_form,
+        return await _form_worker.run(partial(run_isolated_form,
             partial(_form_browser, session, bool(req.ready_expression), req.headed, req.profile),
-            deadline=deadline, url=req.url, rotate_factory=rotate,
+            deadline=deadline, url=req.url, rotate_factory=rotate, expect_ip=expect_ip,
             fields=[f.model_dump() for f in req.fields], submit=req.submit,
             dismiss=req.dismiss, success_url=req.success_url,
             wait_until=req.wait_until, wait_ms=req.wait_ms, settle_ms=req.settle_ms,
@@ -1191,29 +1268,14 @@ async def _form_attempt_run(req, deadline, session, live):
     except Exception as e:
         log.warning("form-submit unavailable (%s); not retried", type(e).__name__)
         raise HTTPException(status_code=502, detail="Form outcome unavailable; do not automatically retry")
-    if _retryable_zero_post(data):
-        # Provably nothing left this machine: the failure predates the submit
-        # click (or the browser) and the guard saw no submission. Same
-        # contract as the park above — replay the identity.
-        log.warning("form-submit retryable: %s with zero POSTs", data.get("error"))
-        detail = {
-            "message": "Form never submitted (%s); safe to retry" % data.get("error"),
-            "retryable": True, "reason": data.get("error"),
-        }
-        if data.get("error") == "captcha_token_missing":
-            # Named, like no_scoring_exit: the toolkit reports the code, and
-            # the gate's record says which exit could not mint.
-            detail.update(error="captcha_token_missing", form_submissions=0)
-            if gate is not None:
-                detail["score_gate"] = gate["record"]
-        raise HTTPException(status_code=503, detail=detail)
-    if gate is not None:
-        data.setdefault("diagnostics", {})["score_gate"] = gate["record"]
-    return data, gate, session
 
 
-async def _score_gate(req, session, deadline, live):
+async def _score_gate(req, session, deadline, live, recheck=False):
     """Probe exits on OUR oracle before the form; returns {session, record}.
+
+    `recheck`: the form found `session` off the IP the gate had scored
+    (exit_mismatch) — judge the exit it is on NOW first, then fresh ones
+    unless the caller pinned it.
 
     Raises 400 when gating was asked for explicitly without an oracle, and
     503 retryable `no_scoring_exit` when no candidate scores >= threshold —
@@ -1238,7 +1300,7 @@ async def _score_gate(req, session, deadline, live):
     sticky = bool(req.profile and _sticky(req.sticky_exit))
     # A caller-pinned exit is only ever judged, never replaced; a sticky
     # profile's own exit is tried first, then fresh ones.
-    sessions = [req.exit_session] if req.exit_session else ([session] if sticky else [])
+    sessions = [req.exit_session] if req.exit_session else ([session] if sticky or recheck else [])
     tries = 1 if req.exit_session else req.score_gate_tries
     outcome = await score_probe.run_gate(
         oracle_url=req.oracle_url, profile=req.profile, headed=req.headed,
@@ -1266,7 +1328,7 @@ def _form_rotator(exit_session, profile, sticky_exit, main_world_eval, headed):
     rotating it would move the identity off the exit it is known on)."""
     if exit_session or (profile and _sticky(sticky_exit)):
         return None
-    return lambda: partial(_form_browser, secrets.token_hex(6), main_world_eval, headed, profile)
+    return lambda: partial(_form_browser, proxy_session.new_token(), main_world_eval, headed, profile)
 
 
 def _sticky(flag) -> bool:
@@ -1280,7 +1342,7 @@ def _resolve_form_session(profile, exit_session, fresh_ip, sticky_exit):
     session, pin = profile_store.resolve_exit_session(
         profile=profile, exit_session=exit_session, fresh_ip=fresh_ip,
         sticky=_sticky(sticky_exit), shared=_form_proxy_session,
-        new_token=lambda: secrets.token_hex(6))
+        new_token=proxy_session.new_token)
     if pin:
         profile_store.remember_exit(profile, session)
     return session, pin

@@ -19,8 +19,8 @@ STICKY EXIT. reCAPTCHA v3 scores (fingerprint, cookies, IP) together; a warm
 profile that shows up from a new IP every run throws half its warmth away.
 With sticky exits on, a profile keeps the Evomi session token it was first
 used with (`_session-<token>` = same exit IP while the provider holds it).
-Caveat measured nowhere yet: a provider may recycle a token's IP after its
-sticky lifetime — `exit_ip` records the IP last SEEN on the token so a change
+Caveat (seen 2026-10-03, see proxy_session.py): a provider may move a
+token's IP, within or after its sticky lifetime — `exit_ip` records the IP last SEEN on the token so a change
 is visible (the probe reports `exit_ip_changed`).
 """
 from __future__ import annotations

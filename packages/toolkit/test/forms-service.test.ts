@@ -87,6 +87,21 @@ describe('score gate wire', () => {
     });
   });
 
+  it('exit_mismatch is a retryable zero-POST failure carrying gate_ip vs form_ip', async () => {
+    const mismatches = [{ gate_ip: '1.1.1.1', form_ip: '2.2.2.2' }, { gate_ip: '2.2.2.2', form_ip: '3.3.3.3' }];
+    fakeSidecars({
+      camoufoxForms: () => ({
+        status: 503,
+        json: { detail: { message: 'exit moved', retryable: true, error: 'exit_mismatch', form_submissions: 0, exit_mismatches: mismatches } },
+      }),
+    });
+    const body = bodyOf(await functionMap.web_form_submit({ ...FORM, headed: true }));
+    expect(body).toEqual({
+      ok: false, retryable: true, outcome: 'not_submitted', form_submissions: 0, status: 503,
+      error: 'exit_mismatch', exit_mismatches: mismatches,
+    });
+  });
+
   it('the schema allows a gated wizard deadline (360 s) and bounds the gate', () => {
     expect(WebFormSubmitInput.safeParse({ ...FORM, timeout_ms: 360_000 }).success).toBe(true);
     // Up to 540 s for a retrying call (the sidecar 400s >360 s without
