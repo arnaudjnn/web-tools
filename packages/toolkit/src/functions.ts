@@ -372,11 +372,14 @@ function formFailure(err: unknown): Record<string, unknown> {
   if (status === 503 && detail && typeof detail === 'object' && (detail as { retryable?: unknown }).retryable === true) {
     // A named zero-POST failure (e.g. no_scoring_exit) keeps its code and
     // the score gate's record; otherwise the message is the error.
-    const d = detail as { error?: unknown; score_gate?: unknown };
+    // With retry_on_captcha_rejection, every attempt was zero-POST (e.g.
+    // captcha_token_missing on each exit): `attempts` names them.
+    const d = detail as { error?: unknown; score_gate?: unknown; attempts?: unknown };
     return {
       ok: false, retryable: true, outcome: 'not_submitted', form_submissions: 0, status,
       error: typeof d.error === 'string' ? d.error : reason,
       ...(d.score_gate !== undefined ? { score_gate: d.score_gate } : {}),
+      ...(Array.isArray(d.attempts) ? { attempts: d.attempts } : {}),
     };
   }
   if (status === 400 || status === 422) {

@@ -104,6 +104,11 @@ _ANCHOR_PATH = re.compile(r"/recaptcha/(?:api2|enterprise)/anchor\b")
 READY_WAIT_S = 30.0
 
 
+# The non-wizard outcome wait runs in slices of this, so a guard-blocked
+# POST ends it within one slice instead of after settle_ms.
+OUTCOME_SLICE_MS = 500
+
+
 # The live object's own clock: tests drive the form DEADLINE through a fake
 # `time.monotonic`, and a summary/mark must never consume or follow it.
 _clock = time.monotonic
@@ -225,6 +230,7 @@ class FormLive:
             "captcha_reload": diagnostics.get("captcha_script_reload"),
             "captcha_ready": diagnostics.get("captcha_ready"),
             "captcha_signal": diagnostics.get("captcha_signal"),
+            "captcha_preclick": diagnostics.get("captcha_preclick_signal"),
             "captcha_failed": diagnostics.get("captcha_failed") or None,
             "captcha_rotate": diagnostics.get("captcha_rotate"),
             "captcha_waited_inflight": diagnostics.get("captcha_waited_inflight"),
@@ -650,6 +656,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             lib_inflight.add(id(request))
 
     captcha_answered = set()  # id() of captcha requests whose headers arrived
+    # recaptcha__*.js bodies cut after their headers in the CURRENT document
+    # (reset on every goto). A finished copy does not prove the page runs an
+    # intact one while a cut copy exists: Atoka 2026-10-03 00:49, signal
+    # "lib" with two NS_ERROR_NET_PARTIAL_TRANSFER library cuts, and the
+    # step-0 POST left with NO token (the listener never attached).
+    lib_cuts = {"n": 0}
 
     def request_failed(request):
         lib_inflight.discard(id(request))
@@ -668,6 +680,9 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                      "type": getattr(request, "resource_type", None),
                      "code": _failure_code(failure),
                      "after_response": id(request) in captcha_answered}
+            if (entry["path"] == "recaptcha__*.js" and entry["after_response"]
+                    and entry["code"] in _TRUNCATED):
+                lib_cuts["n"] += 1
             diagnostics["captcha_failed"] = (diagnostics["captcha_failed"] + [entry])[-10:]
 
     submission_done = []  # the submission POST(s) whose response body fully arrived
@@ -761,7 +776,9 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         except Exception:
             pass
         if diagnostics.get("captcha_lib_loaded"):
-            return True, "lib"
+            # The weakest signal, and void when a copy was cut in this
+            # document: the one the page executes may be the cut one.
+            return (False, "lib_cut") if lib_cuts["n"] else (True, "lib")
         return False, None
 
     def truncated_lib():
@@ -800,6 +817,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             try:
                 if page is None:
                     page = open_page()
+                lib_cuts["n"] = 0
                 navigation = page.goto(url, wait_until=wait_until,
                                        timeout=remaining(NAV_TIMEOUT_MS))
                 break
@@ -891,6 +909,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 log.info("form flow: reCAPTCHA not usable (signal=%s failed=%s); reloading once",
                          signal, [f.get("path") for f in diagnostics["captcha_failed"]])
                 diagnostics["captcha_lib_loaded"] = False
+                lib_cuts["n"] = 0
                 failures_before = diagnostics["captcha_network_failures"]
                 with live.at("captcha reload", NAV_TIMEOUT_MS / 1000 + 10.0):
                     page.goto(url, wait_until=wait_until, timeout=remaining(NAV_TIMEOUT_MS))
@@ -1056,6 +1075,23 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 with live.at("ready pause"):
                     page.wait_for_timeout(remaining(100))
             diagnostics["ready_condition_met"] = True
+        if diagnostics["captcha_script_requests"]:
+            # Re-ask right before the click: 30-140 s of input separate it
+            # from the arrival gate, and a cookie-consent click can (re)load
+            # the reCAPTCHA scripts (iubenda activates blocked ones on
+            # accept: run 6 had 7 script requests, the arrival gate 4). The
+            # page's submit listener is attached inside grecaptcha.ready();
+            # a click before a usable client falls through to a NATIVE submit
+            # with an empty token. Still pre-click: zero POSTs, retryable.
+            phase = "captcha"
+            live.enter("captcha_preclick")
+            usable, signal = wait_captcha_usable()
+            diagnostics["captcha_preclick_signal"] = signal
+            if not usable:
+                result["error"] = "captcha_unavailable"
+                diagnostics["captcha_rotate"] = bool(exit_rotatable and truncated_lib())
+                log.info("form flow: reCAPTCHA not usable before the click (signal=%s)", signal)
+                raise CaptchaUnavailable("reCAPTCHA client unusable before the click")
         phase = "submit"
         live.enter("submit")
         log.info("form flow: submit click")
@@ -1072,13 +1108,26 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         live.enter("outcome")
         if not wizard:
             log.info("form flow: waiting for outcome (success_url=%s)", bool(success_url))
-            try:
-                if success_url:
-                    page.wait_for_url(re.compile(success_url), timeout=remaining(settle_ms))
-                else:
-                    page.wait_for_load_state("networkidle", timeout=remaining(settle_ms))
-            except Exception:
-                pass  # Rejections stay on the form. Capture them, don't resubmit.
+            # In slices, so a POST the token guard aborted ends the wait at
+            # once: nothing else can be sent (the guard blocks every later
+            # matching POST too) and nothing can be answered.
+            settle_until = time.monotonic() + settle_ms / 1000
+            while not diagnostics["captcha_guard_blocked"]:
+                left_ms = int((settle_until - time.monotonic()) * 1000)
+                if left_ms <= 0:
+                    break
+                try:
+                    if success_url:
+                        page.wait_for_url(re.compile(success_url),
+                                          timeout=remaining(min(left_ms, OUTCOME_SLICE_MS)))
+                    else:
+                        page.wait_for_load_state("networkidle",
+                                                 timeout=remaining(min(left_ms, OUTCOME_SLICE_MS)))
+                    break
+                except TimeoutError:
+                    break  # the form's own deadline
+                except Exception:
+                    continue  # this slice timed out: Rejections stay on the form.
             if result["form_submissions"] == 1 and not (
                     success_url and re.search(success_url, page.url)):
                 # One answered POST and no success: did the form come back
@@ -1128,6 +1177,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
             # deciding; a POST that never arrives falls through to the walk.
             stop_waited = 0.0
             while (stop_after_posts is not None
+                   and not diagnostics["captcha_guard_blocked"]
                    and result["form_submissions"] < stop_after_posts
                    and stop_waited < 20.0):
                 page.wait_for_timeout(min(500, remaining()))
@@ -1148,6 +1198,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 return result
             while True:
                 if time.monotonic() >= deadline:
+                    break
+                if diagnostics["captcha_guard_blocked"]:
+                    # The token guard aborted the step-0 POST: no step can
+                    # follow, so waiting is pure deadline burn (Atoka
+                    # 2026-10-03 00:49: 448 s of walk to a 540 s deadline).
+                    log.info("form flow: POST blocked by the token guard; ending the walk")
                     break
                 if stop_after_posts is not None and result["form_submissions"] >= stop_after_posts:
                     # The POST landed mid-walk (the pre-walk wait timed out

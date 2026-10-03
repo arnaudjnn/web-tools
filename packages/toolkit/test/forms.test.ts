@@ -162,6 +162,18 @@ describe('web_form_submit outcomes', () => {
     expect(single.body).not.toHaveProperty('attempts');
   });
 
+  it('a guard-blocked tokenless POST is a named 503 not_submitted, with its attempts', async () => {
+    const attempts = [{ n: 1, error: 'captcha_token_missing', status: 503, form_submissions: 0 }];
+    const { body } = await submitWith(() => ({
+      status: 503,
+      json: { detail: { message: 'Form never submitted', retryable: true, error: 'captcha_token_missing', form_submissions: 0, attempts } },
+    }));
+    expect(body).toEqual({
+      ok: false, retryable: true, outcome: 'not_submitted', form_submissions: 0, status: 503,
+      error: 'captcha_token_missing', attempts,
+    });
+  });
+
   it('an unknown retry keeps the known attempts but never a total', async () => {
     const attempts = [{ n: 1, error: 'wizard_rejected', form_submissions: 1 }, { n: 2, error: 'outcome_unknown', form_submissions: null }];
     const { body } = await submitWith(() => ({
