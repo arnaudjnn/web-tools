@@ -87,6 +87,7 @@ from camoufox.sync_api import Camoufox
 from camoufox.utils import launch_options
 from form_flow import FormLive, validate_form
 from form_worker import FormRetryable, FormWorker, not_started, run_isolated_form
+import fingerprint as fingerprint_mod
 import form_inspect
 import form_retry
 import launch_health
@@ -670,7 +671,7 @@ def _profile_dir(profile: str) -> str:
     return profile_store.profile_dir(profile)
 
 
-def _form_browser(session, main_world_eval=False, headed=False, profile=None):
+def _form_browser(session, main_world_eval=False, headed=False, profile=None, fingerprint=None):
     proxy = parse_proxy(PROXY_URL, session)
     if proxy is None:
         raise RuntimeError("PROXY_URL is required")
@@ -679,9 +680,13 @@ def _form_browser(session, main_world_eval=False, headed=False, profile=None):
     # disturbing the shared headless readers. Needs a display — the image runs
     # under xvfb-run (see Dockerfile), so :99 is always there.
     headless = not headed
+    # `fingerprint` (request-scoped, default None = unchanged): measured
+    # knobs layered over the defaults below — see fingerprint.py.
+    base = {"geoip": True, "humanize": True}
+    base.update(fingerprint_mod.launch_kwargs(fingerprint))
     if not profile:
-        return Camoufox(headless=headless, geoip=True, humanize=True, proxy=proxy, timeout=30000,
-                        main_world_eval=main_world_eval)
+        return Camoufox(headless=headless, proxy=proxy, timeout=30000,
+                        main_world_eval=main_world_eval, **base)
     # Named persistent profile: cookies + fingerprint the target has already
     # seen (the reCAPTCHA verdict is per-session, not per-IP alone). The FIRST
     # launch's options are saved verbatim (fingerprint drawn once); later
@@ -696,9 +701,9 @@ def _form_browser(session, main_world_eval=False, headed=False, profile=None):
     # upgrade on a persistent volume): redraw then, keep the cookies.
     opts = profile_store.load_launch_opts(directory)
     if opts is None:
-        opts = launch_options(headless=headless, geoip=True, humanize=True, proxy=proxy,
+        opts = launch_options(headless=headless, proxy=proxy,
                               timeout=30000, main_world_eval=main_world_eval,
-                              user_data_dir=directory)
+                              user_data_dir=directory, **base)
         profile_store.save_launch_opts(directory, opts)
     opts["proxy"] = proxy
     opts["headless"] = headless
@@ -1038,6 +1043,7 @@ class FormSubmitRequest(BaseModel):
     oracle_url: str | None = Field(None, max_length=500, description="the score oracle the gate probes (Tools passes its own)")
     retry_on_captcha_rejection: int = Field(0, ge=0, le=form_retry.MAX_RETRIES, description="fresh attempts (new context, new exit, re-gated) after an explicit step-0 CAPTCHA refusal only (form_retry.py)")
     captcha_rejection_text: str | None = Field(None, max_length=300, description="regex every error node of the re-rendered form must match to count as a CAPTCHA refusal; default form_retry.DEFAULT_CAPTCHA_REJECTION")
+    fingerprint: dict | None = Field(None, description="measured fingerprint knobs for this form browser and its score-gate probes (os, locale, screen, window, fonts, block_webgl, webgl_config, humanize, fingerprint_preset, config, firefox_user_prefs — fingerprint.py); None = unchanged. A named profile uses it on its FIRST draw only")
     captcha_lib_direct: bool | None = Field(None, description="fetch reCAPTCHA's static release files (www.gstatic.com/recaptcha/releases/…) direct instead of through the exit, falling back to the exit on failure (captcha_lib.py); None = FORM_CAPTCHA_LIB_DIRECT. Also applies to the score gate's probes")
 
 
@@ -1064,6 +1070,7 @@ async def form_submit(req: FormSubmitRequest):
         # launched browser that dies as an unknown 502.
         validate_form(req.url, req.submission_urls, req.success_url, req.gate_text, req.completion_markers)
         form_retry.compile_pattern(req.captcha_rejection_text)
+        fingerprint_mod.validate(getattr(req, "fingerprint", None))
     except (ValueError, re.error) as e:
         raise HTTPException(status_code=400, detail=str(e))
     retries = req.retry_on_captcha_rejection or 0
@@ -1143,6 +1150,8 @@ async def _form_attempt(req, deadline, session, *, retry=False, retries=0, attem
     live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
     if attempt_n is not None:
         live.note(attempt=attempt_n)
+    if getattr(req, "fingerprint", None):
+        live.note(fingerprint=fingerprint_mod.names(req.fingerprint))
     try:
         return await _form_attempt_run(req, deadline, session, live)
     except HTTPException as error:
@@ -1161,7 +1170,8 @@ async def _form_attempt_run(req, deadline, session, live):
     # Exit rotation (pre-input, once) only for an exit the caller did not
     # pin — neither an explicit exit_session nor a sticky profile's own.
     rotate = _form_rotator(req.exit_session, req.profile, req.sticky_exit,
-                           bool(req.ready_expression), req.headed)
+                           bool(req.ready_expression), req.headed,
+                           fingerprint=getattr(req, "fingerprint", None))
     gate = None
     if score_probe.gate_wanted(req.score_gate, req.headed, req.exit_session, req.inspect_only):
         gate = await _score_gate(req, session, deadline, live)
@@ -1249,7 +1259,8 @@ async def _form_run(req, deadline, session, live, rotate, expect_ip):
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
         return await _form_worker.run(partial(run_isolated_form,
-            partial(_form_browser, session, bool(req.ready_expression), req.headed, req.profile),
+            partial(_form_browser, session, bool(req.ready_expression), req.headed, req.profile,
+                    **_fingerprint_kw(getattr(req, "fingerprint", None))),
             deadline=deadline, url=req.url, rotate_factory=rotate, expect_ip=expect_ip,
             fields=[f.model_dump() for f in req.fields], submit=req.submit,
             dismiss=req.dismiss, success_url=req.success_url,
@@ -1316,7 +1327,7 @@ async def _score_gate(req, session, deadline, live, recheck=False):
         reserve_s=score_probe.form_reserve_s(req.timeout_ms, wizard), sessions=sessions,
         # The gate predicts the form's score: probe the way the form loads.
         captcha_lib_direct=getattr(req, "captcha_lib_direct", None),
-        target_url=req.url)
+        target_url=req.url, fingerprint=getattr(req, "fingerprint", None))
     record = score_probe.gate_record(outcome)
     live.note(score_gate=record)
     if not outcome["passed"]:
@@ -1333,13 +1344,20 @@ async def _score_gate(req, session, deadline, live, recheck=False):
     return {"session": outcome["session"], "record": record}
 
 
-def _form_rotator(exit_session, profile, sticky_exit, main_world_eval, headed):
+def _form_rotator(exit_session, profile, sticky_exit, main_world_eval, headed, fingerprint=None):
     """A fresh-exit browser factory for run_isolated_form, or None when the
     exit is pinned (explicit exit_session, or a sticky profile's own exit:
     rotating it would move the identity off the exit it is known on)."""
     if exit_session or (profile and _sticky(sticky_exit)):
         return None
-    return lambda: partial(_form_browser, proxy_session.new_token(), main_world_eval, headed, profile)
+    return lambda: partial(_form_browser, proxy_session.new_token(), main_world_eval, headed, profile,
+                           **_fingerprint_kw(fingerprint))
+
+
+def _fingerprint_kw(fingerprint):
+    """The factory kwarg for a request's fingerprint spec — absent when there
+    is none, so the default launch path is called exactly as before."""
+    return {"fingerprint": fingerprint} if fingerprint else {}
 
 
 def _sticky(flag) -> bool:

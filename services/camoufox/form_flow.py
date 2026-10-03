@@ -247,6 +247,9 @@ class FormLive:
             "captcha_waited_inflight": diagnostics.get("captcha_waited_inflight"),
             "captcha_lib_direct": diagnostics.get("captcha_lib_direct"),
             "page_reused": diagnostics.get("page_reused"),
+            # What the page reports of the drawn fingerprint (locale, Intl,
+            # timezone, platform, screen) — PAGE_FP_JS.
+            "page_fp": diagnostics.get("page_fingerprint"),
             "captcha_scripts": [diagnostics.get("captcha_script_requests"),
                                 diagnostics.get("captcha_script_responses"),
                                 diagnostics.get("captcha_network_failures")],
@@ -542,6 +545,54 @@ def normalize_egress(data):
             "asn": connection.get("asn"), "isp": connection.get("isp")}
 
 
+# What the page itself reports about the drawn fingerprint, read in-page in
+# the same evaluate as the egress echo (no extra round trip). Locale/OS/screen
+# are what Camoufox drew for this launch — geoip picks the language at random
+# from the exit country's CLDR stats (for IT ~38% of draws are NOT it-IT:
+# en-IT, lmo-IT, fr-IT, ...) — so production rejections can be split by them.
+# Never identity data: only browser-wide properties.
+PAGE_FP_JS = (
+    "(() => { try { const o = Intl.DateTimeFormat().resolvedOptions();"
+    " return {language: navigator.language, languages: Array.from(navigator.languages || []),"
+    " intl_locale: o.locale, timezone: o.timeZone, platform: navigator.platform,"
+    " screen: [screen.width, screen.height], window: [outerWidth, outerHeight],"
+    " dpr: devicePixelRatio}; } catch (e) { return null; } })()"
+)
+EGRESS_AND_FP_JS = (
+    "Promise.all([fetch('" + EGRESS_URL + "',{signal:AbortSignal.timeout(8000)})"
+    ".then(r=>r.json()).catch(()=>null), " + PAGE_FP_JS + "])"
+    ".then(([egress, fp]) => ({egress, fp}))"
+)
+
+
+def page_fingerprint(raw):
+    """Normalise the in-page fingerprint read (PAGE_FP_JS); None if unusable.
+    Bounded strings/lists only — it goes on the form-run line."""
+    if not isinstance(raw, dict):
+        return None
+
+    def text(value, limit=40):
+        return value[:limit] if isinstance(value, str) else None
+
+    def nums(value):
+        if isinstance(value, list) and len(value) == 2 and all(isinstance(v, (int, float)) for v in value):
+            return [int(v) for v in value]
+        return None
+
+    languages = raw.get("languages")
+    dpr = raw.get("dpr")
+    return {
+        "language": text(raw.get("language")),
+        "languages": [text(v) for v in languages[:5]] if isinstance(languages, list) else None,
+        "intl_locale": text(raw.get("intl_locale")),
+        "timezone": text(raw.get("timezone"), 60),
+        "platform": text(raw.get("platform")),
+        "screen": nums(raw.get("screen")),
+        "window": nums(raw.get("window")),
+        "dpr": dpr if isinstance(dpr, (int, float)) and not isinstance(dpr, bool) else None,
+    }
+
+
 def echo_egress(page, timeout_ms=EXIT_CHECK_TIMEOUT_MS):
     """Which exit does this page's browser use? One top-level GET of the echo
     (no page JS, no CSP in the way); None when it cannot be read."""
@@ -583,7 +634,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                    "navigation_status": None, "captcha_guard_blocked": False,
                    "ready_condition_met": None, "field_attempt": None,
                     "phase": None, "failure_class": None, "dismiss_clicked": [],
-                    "banner_visible": None, "field_state": None, "egress": None,
+                    "banner_visible": None, "field_state": None, "egress": None, "page_fingerprint": None,
                     "wizard_gate_clicked": False, "wizard_step2": False,
                     "nav_attempts": 0, "nav_error": None,
                     "captcha_failed": [], "captcha_lib_loaded": False,
@@ -927,9 +978,23 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # from inside the page, so it traverses the same proxy the form will.
         try:
             with live.at("egress check", 12.0):
-                egress = page.evaluate(
-                    "fetch('" + EGRESS_URL + "',"
-                    "{signal:AbortSignal.timeout(8000)}).then(r=>r.json()).catch(()=>null)")
+                seen = page.evaluate(EGRESS_AND_FP_JS)
+            seen = seen if isinstance(seen, dict) else {}
+            # The page's own (main) world is what the target's scripts see;
+            # Camoufox's isolated world can disagree (measured on cf152:
+            # isolated timeZone "UTC" while the main world read Europe/Rome).
+            # The main world is reachable only on a main_world_eval launch.
+            main = None
+            try:
+                with live.at("fingerprint check", 5.0):
+                    main = page_fingerprint(page.evaluate("mw:" + PAGE_FP_JS))
+            except Exception:
+                main = None
+            fp = main or page_fingerprint(seen.get("fp"))
+            if fp is not None:
+                fp["world"] = "main" if main else "isolated"
+            diagnostics["page_fingerprint"] = fp
+            egress = seen.get("egress")
             if isinstance(egress, dict) and egress.get("success"):
                 connection = egress.get("connection") or {}
                 diagnostics["egress"] = {"country": egress.get("country"),

@@ -23,11 +23,15 @@
 # changed its mind.
 : "${PORT:?PORT must be set — this image has no default, so a missing Railway variable fails here instead of silently handing callers a portless URL}"
 export DISPLAY=:99
+# The display's geometry bounds the screen Camoufox draws for headed form
+# browsers (camoufox clamps the fingerprint's screen to the largest display).
+# Override only to measure a larger-screen fingerprint; 1440x900 is production.
+: "${XVFB_SCREEN:=1440x900x24}"
 (
   while :; do
     if ! python3 -c "import socket; s = socket.socket(socket.AF_UNIX); s.connect('/tmp/.X11-unix/X99')" 2>/dev/null; then
       rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
-      Xvfb :99 -screen 0 1440x900x24 -nolisten tcp &
+      Xvfb :99 -screen 0 "${XVFB_SCREEN}" -nolisten tcp &
     fi
     sleep 5
   done

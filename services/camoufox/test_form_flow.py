@@ -107,15 +107,36 @@ class FormTests(unittest.TestCase):
         # The proxy contract is only checkable from inside the page: which
         # IP actually minted the token. Shape only, never a body.
         self.page.evaluate.side_effect = lambda expression, *args, **kwargs: (
-            {"success": True, "country": "Italy", "ip": "151.0.0.7",
-             "connection": {"isp": "Vodafone Italia", "asn": 30722}}
+            {"egress": {"success": True, "country": "Italy", "ip": "151.0.0.7",
+                        "connection": {"isp": "Vodafone Italia", "asn": 30722}},
+             "fp": {"language": "en-IT", "languages": ["en-IT", "en"], "intl_locale": "en-US",
+                    "timezone": "Europe/Rome", "platform": "Win32", "screen": [1440, 900],
+                    "window": [1440, 852], "dpr": 1}}
             if "ipwho.is" in expression else True)
         result = run_form(self.context, **self.params)
         self.assertEqual(result["diagnostics"]["egress"],
                          {"country": "Italy", "isp": "Vodafone Italia", "asn": 30722, "ip": "151.0.0.7"})
+        # The drawn fingerprint rides the same evaluate, for splitting
+        # rejections by locale/OS/screen (diagnostics and the form-run line).
+        self.assertEqual(result["diagnostics"]["page_fingerprint"],
+                         {"language": "en-IT", "languages": ["en-IT", "en"], "intl_locale": "en-US",
+                          "timezone": "Europe/Rome", "platform": "Win32", "screen": [1440, 900],
+                          "window": [1440, 852], "dpr": 1, "world": "isolated"})
         # Ungated: nothing to verify against, but the form's IP is recorded.
         self.assertEqual((result["diagnostics"]["gate_ip"], result["diagnostics"]["form_ip"],
                           result["diagnostics"]["exit_verified"]), (None, "151.0.0.7", None))
+
+    def test_page_fingerprint_is_bounded_and_tolerant(self):
+        from form_flow import page_fingerprint
+        self.assertIsNone(page_fingerprint(None))
+        self.assertIsNone(page_fingerprint("x"))
+        fp = page_fingerprint({"language": "x" * 500, "languages": ["a"] * 9, "screen": [1, "2"],
+                               "dpr": True, "platform": 7})
+        self.assertEqual(len(fp["language"]), 40)
+        self.assertEqual(len(fp["languages"]), 5)
+        self.assertIsNone(fp["screen"])
+        self.assertIsNone(fp["dpr"])
+        self.assertIsNone(fp["platform"])
 
     def test_egress_failure_stays_absent_and_does_not_fail_the_run(self):
         self.page.evaluate.side_effect = RuntimeError("network down")
@@ -529,8 +550,8 @@ class WizardTests(unittest.TestCase):
         raced = {"done": False}
 
         def evaluate(expression, *args, **kwargs):
-            if expression.startswith("fetch("):
-                return None  # egress probe: absent, as when it fails
+            if "ipwho.is" in expression or "devicePixelRatio" in expression:
+                return None  # egress/fingerprint probes: absent, as when they fail
             if expression == "document.body.innerText":
                 return final_text
             if race_once and not raced["done"]:
