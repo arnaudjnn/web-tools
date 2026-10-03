@@ -183,7 +183,10 @@ async def run_attempts(attempt, *, retries, blocked, deadline, floor_s, clock=ti
                              "score_gate_score": refused.gate_record.get("chosen_score"),
                              "asn": refused.gate_record.get("asn")})
             if not refused.trigger:
-                if n == 1:
+                if n == 1 or final is None:
+                    # No attempt produced a real answer (every one was zero
+                    # POST): this refusal IS the answer — its own 503.
+                    refused.attempts = attempts
                     raise
                 stopped = "refused"
                 break

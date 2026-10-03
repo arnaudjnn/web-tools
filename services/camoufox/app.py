@@ -1095,7 +1095,9 @@ async def form_submit(req: FormSubmitRequest):
     except form_retry.AttemptRefused as refused:
         # Every attempt was a zero-POST token-guard block: the endpoint's own
         # 503 (retryable, nothing sent), naming the attempts.
-        error = refused.cause
+        error = refused.cause or HTTPException(status_code=503, detail={
+            "message": "Form never submitted (%s); safe to retry" % refused.error,
+            "retryable": True, "error": refused.error, "form_submissions": 0})
         if isinstance(getattr(error, "detail", None), dict):
             error.detail["attempts"] = refused.attempts
         raise error

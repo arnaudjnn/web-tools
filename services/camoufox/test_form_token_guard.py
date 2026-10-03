@@ -365,3 +365,24 @@ class BrowserGuardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ZeroPostThenNonTriggerTests(unittest.TestCase):
+    """2026-10-03 batch 4: attempt 1 a guard block (trigger, zero POST),
+    attempt 2 no_scoring_exit (non-trigger, zero POST) -> `final` was None
+    and run_attempts crashed into a 500. No attempt answered, so the last
+    refusal is the answer: its own 503 with every attempt listed."""
+
+    def test_every_attempt_zero_post_raises_the_last_refusal(self):
+        refusals = [form_retry.AttemptRefused("captcha_token_missing", trigger=True),
+                    form_retry.AttemptRefused("no_scoring_exit", trigger=False)]
+
+        async def attempt(n):
+            raise refusals[n - 1]
+
+        with self.assertRaises(form_retry.AttemptRefused) as caught:
+            asyncio.run(form_retry.run_attempts(attempt, retries=3, blocked=None,
+                                                deadline=time.monotonic() + 600, floor_s=0))
+        self.assertEqual(caught.exception.error, "no_scoring_exit")
+        self.assertEqual([(a["n"], a["error"], a["form_submissions"]) for a in caught.exception.attempts],
+                         [(1, "captcha_token_missing", 0), (2, "no_scoring_exit", 0)])
