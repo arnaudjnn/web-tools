@@ -1173,7 +1173,13 @@ async def _form_attempt(req, deadline, session, *, retry=False, retries=0, attem
         detail = getattr(error, "detail", None)
         zero_post = (getattr(error, "status_code", None) == 503 and isinstance(detail, dict)
                      and detail.get("retryable") is True)
-        trigger = zero_post and retries > 0 and detail.get("error") == "captcha_token_missing"
+        # Any provably zero-POST failure (nothing reached the target: no
+        # navigation, no browser, no scoring exit, exit moved, CAPTCHA client
+        # unusable, token-guard block) is as safe to retry on a fresh exit as
+        # a CAPTCHA refusal — for any form. Ending the call there turned a
+        # transient exit fault into a failed submission (2026-10-04 A/B:
+        # the only chromium failure was navigation_failed, 0 POSTs).
+        trigger = zero_post and retries > 0
         if zero_post and (retry or trigger):
             raise form_retry.AttemptRefused(detail.get("error") or detail.get("reason") or "not_submitted",
                                             gate_record=detail.get("score_gate"), trigger=trigger,

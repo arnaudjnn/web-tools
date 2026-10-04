@@ -302,7 +302,9 @@ class EndpointTests(unittest.TestCase):
     def test_a_zero_post_retry_failure_returns_the_real_answer(self):
         refusal = _HTTPError(503, {"retryable": True, "error": "no_scoring_exit", "form_submissions": 0,
                                    "score_gate": {"chosen_score": None, "asn": None}})
-        result, _ = self.submit(self.req(), [answered(**REJECTED), refusal])
+        # A zero-POST refusal is itself retried on a fresh exit; when every
+        # retry after the real answer is zero-POST, that answer stands.
+        result, _ = self.submit(self.req(retry_on_captcha_rejection=1), [answered(**REJECTED), refusal])
         self.assertEqual(result["error"], "wizard_rejected")
         self.assertEqual(result["form_submissions"], 1)
         self.assertEqual(result["attempts"][1]["error"], "no_scoring_exit")
@@ -318,8 +320,17 @@ class EndpointTests(unittest.TestCase):
     def test_attempt_one_errors_keep_their_shape(self):
         refusal = _HTTPError(503, {"retryable": True, "error": "no_scoring_exit"})
         with self.assertRaises(_HTTPError) as caught:
-            self.submit(self.req(), [refusal])
+            self.submit(self.req(retry_on_captcha_rejection=0), [refusal])
         self.assertIs(caught.exception, refusal)
+
+    def test_a_zero_post_first_attempt_is_retried_on_a_fresh_exit(self):
+        # 2026-10-04: navigation_failed (0 POSTs) ended a call that a fresh
+        # exit would have completed. Any provably zero-POST failure retries.
+        refusal = _HTTPError(503, {"retryable": True, "error": "navigation_failed", "form_submissions": 0})
+        result, sessions = self.submit(self.req(retry_on_captcha_rejection=1), [refusal, answered(**DONE)])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["form_submissions"], 1)
+        self.assertEqual([a["error"] for a in result["attempts"]], ["navigation_failed", None])
 
     def test_a_long_deadline_needs_the_retry_option_and_a_bad_pattern_is_a_400(self):
         with self.assertRaises(_HTTPError) as caught:
