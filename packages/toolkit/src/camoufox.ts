@@ -200,7 +200,7 @@ export function camoufoxFormSubmit(params: {
    *  omit = the sidecar's FORM_CAPTCHA_LIB_DIRECT (captcha_lib.py). */
   captchaLibDirect?: boolean;
 }): Promise<CamoufoxFormSubmit> {
-  const timeoutMs = params.timeoutMs ?? 120_000;
+  const timeoutMs = params.timeoutMs ?? 300_000;
   return formsCall<CamoufoxFormSubmit>(
     '/form-submit',
     {
@@ -220,7 +220,7 @@ export function camoufoxFormSubmit(params: {
       timeout_ms: timeoutMs,
       fresh_ip: params.freshIp !== false,
       ...(params.exitSession ? { exit_session: params.exitSession } : {}),
-      ...(params.headed ? { headed: true } : {}),
+      ...(params.headed !== undefined ? { headed: params.headed } : {}),
       ...(params.gateText ? { gate_text: params.gateText } : {}),
       ...(params.step2 ? { step2: params.step2 } : {}),
       ...(params.step2Submit ? { step2_submit: params.step2Submit } : {}),
@@ -232,7 +232,7 @@ export function camoufoxFormSubmit(params: {
       ...(params.scoreThreshold !== undefined ? { score_threshold: params.scoreThreshold } : {}),
       ...(params.scoreGateTries !== undefined ? { score_gate_tries: params.scoreGateTries } : {}),
       ...(params.oracleUrl ? { oracle_url: params.oracleUrl } : {}),
-      ...(params.retryOnCaptchaRejection ? { retry_on_captcha_rejection: params.retryOnCaptchaRejection } : {}),
+      ...(params.retryOnCaptchaRejection !== undefined ? { retry_on_captcha_rejection: params.retryOnCaptchaRejection } : {}),
       ...(params.captchaRejectionText ? { captcha_rejection_text: params.captchaRejectionText } : {}),
       ...(params.captchaLibDirect !== undefined ? { captcha_lib_direct: params.captchaLibDirect } : {}),
     },

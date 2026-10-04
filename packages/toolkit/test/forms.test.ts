@@ -142,9 +142,9 @@ describe('web_form_submit outcomes', () => {
       score_threshold: 0.8,
       timeout_ms: 540_000,
     });
-    // 0 is the default: not sent.
+    // An explicit 0 (single attempt) is sent: the sidecar default is 3.
     const plain = await submitWith(() => ({ json: { ok: true } }), { ...FORM, retry_on_captcha_rejection: 0 });
-    expect(plain.calls[0]!.body).not.toHaveProperty('retry_on_captcha_rejection');
+    expect(plain.calls[0]!.body).toHaveProperty('retry_on_captcha_rejection', 0);
   });
 
   it('passes captcha_lib_direct through both ways, and omits it by default', async () => {
@@ -197,7 +197,7 @@ describe('web_form_submit outcomes', () => {
 
   it('sends the minimal body by default; fresh_ip:false is honoured', async () => {
     const { calls } = await submitWith(() => ({ json: { ok: true } }), { ...FORM, fresh_ip: false, wait_ms: 'soon' });
-    expect(calls[0]!.body).toEqual({ url: FORM.url, fields: FORM.fields, submit: 'button', timeout_ms: 120_000, fresh_ip: false });
+    expect(calls[0]!.body).toEqual({ url: FORM.url, fields: FORM.fields, submit: 'button', timeout_ms: 300_000, fresh_ip: false });
   });
 });
 

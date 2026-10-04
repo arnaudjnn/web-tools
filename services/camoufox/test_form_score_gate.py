@@ -104,8 +104,9 @@ def _summary_data(score, ip, asn):
 
 
 class GateDecisionTests(unittest.TestCase):
-    def test_default_on_when_headed_and_unpinned(self):
-        self.assertTrue(score_probe.gate_wanted(None, True, None, False))
+    def test_only_an_explicit_true_gates(self):
+        # Default off: retries on a fresh exit beat gating on speed (2026-10-04).
+        self.assertFalse(score_probe.gate_wanted(None, True, None, False))
         self.assertFalse(score_probe.gate_wanted(None, False, None, False))
         self.assertFalse(score_probe.gate_wanted(None, True, "pinned", False))
         self.assertFalse(score_probe.gate_wanted(False, True, None, False))

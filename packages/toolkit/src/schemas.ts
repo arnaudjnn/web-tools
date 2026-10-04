@@ -213,7 +213,7 @@ export const WebFormSubmitInput = z.object({
     .max(540000)
     .optional()
     .describe(
-      'Whole-run deadline incl. the score gate and any retries (default: 120000; a wizard needs ~240000, plus ~90000 when gated). Above 360000 only with retry_on_captcha_rejection',
+      'Whole-run deadline incl. any retries (default: 300000, room for a few ~55 s attempts; a gated wizard needs more). Above 360000 only with retry_on_captcha_rejection',
     ),
   fresh_ip: z.boolean().optional().describe('New context + exit IP (default: true)'),
   exit_session: z
@@ -223,7 +223,7 @@ export const WebFormSubmitInput = z.object({
   profile: ProfileName.optional().describe(
     'Named persistent browser profile: cookies + fingerprint reused across calls (default: isolated)',
   ),
-  headed: z.boolean().optional().describe('Headed browser; needed by score-gated forms (reCAPTCHA v3)'),
+  headed: z.boolean().optional().describe('Headed browser under Xvfb (default: true; reCAPTCHA v3 scores headless at 0)'),
   gate_text: z
     .string()
     .min(1)
@@ -260,7 +260,7 @@ export const WebFormSubmitInput = z.object({
     .boolean()
     .optional()
     .describe(
-      'Probe candidate exits on our reCAPTCHA oracle first (same launch config) and run the form on the first that scores >= score_threshold. Default: on when headed and no exit_session is pinned; false disables. Nothing reaches the target before it passes; no passing exit = 503 retryable no_scoring_exit',
+      'Probe candidate exits on our reCAPTCHA oracle first (same launch config) and run the form on the first that scores >= score_threshold. Default: off (retries on a fresh exit are faster at the same success); true enables. Nothing reaches the target before it passes; no passing exit = 503 retryable no_scoring_exit',
     ),
   score_threshold: z.number().min(0).max(1).optional().describe('Score gate threshold (default: 0.7)'),
   score_gate_tries: z.number().int().min(1).max(6).optional().describe('Exits the score gate probes at most (default: 3)'),
@@ -271,7 +271,7 @@ export const WebFormSubmitInput = z.object({
     .max(4)
     .optional()
     .describe(
-      'Fresh attempts (new context, new exit, re-gated) ONLY after an explicit step-0 CAPTCHA refusal: one 2xx POST, same URL, every error node matching captcha_rejection_text. Never with a pinned exit_session/profile; each must fit timeout_ms. Default 0. Result adds attempts[] and form_submissions is the total',
+      'Fresh attempts (new context, new exit) after an explicit step-0 CAPTCHA refusal (one 2xx POST, same URL, every error node matching captcha_rejection_text) or any provably zero-POST failure. Never with a pinned exit_session/profile; each must fit timeout_ms. Default 3; 0 = single attempt. Result adds attempts[] and form_submissions is the total',
     ),
   captcha_rejection_text: z
     .string()

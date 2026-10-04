@@ -562,12 +562,12 @@ GATE_RESERVE_WIZARD_S = 240.0  # a wizard needs ~240 s on its own
 
 
 def gate_wanted(score_gate, headed, exit_session, inspect_only):
-    """Explicit score_gate wins; default on when headed and no exit is pinned."""
+    """Only an explicit score_gate=true gates. Default off: on Atoka a fresh
+    exit after a refusal was faster than gating (2026-10-04: ~55 s per call
+    ungated with retries vs ~106 s gated, same end-to-end success)."""
     if inspect_only:
         return False
-    if score_gate is not None:
-        return bool(score_gate)
-    return bool(headed and not exit_session)
+    return bool(score_gate)
 
 
 def form_reserve_s(timeout_ms, wizard):

@@ -200,7 +200,11 @@ class MismatchTests(unittest.TestCase):
     # Borrowed, not inherited, so EndpointTests is not collected twice.
     setUp = _retry.EndpointTests.setUp
     tearDown = _retry.EndpointTests.tearDown
-    req = _retry.EndpointTests.req
+
+    def req(self, **kw):
+        # These tests exercise the gate; it is opt-in (score_gate=True).
+        kw.setdefault("score_gate", True)
+        return _retry.EndpointTests.req(self, **kw)
 
     def attempt(self, req, runs, gates):
         runs, gates = list(runs), list(gates)
