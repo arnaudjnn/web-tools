@@ -199,6 +199,8 @@ export function camoufoxFormSubmit(params: {
   /** Static reCAPTCHA library direct (true) or via the exit (false);
    *  omit = the sidecar's FORM_CAPTCHA_LIB_DIRECT (captcha_lib.py). */
   captchaLibDirect?: boolean;
+  /** Input cadence: lab | lab_fast | default; omit = the sidecar's FORM_PACING. */
+  pacing?: 'default' | 'lab' | 'lab_fast';
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 300_000;
   return formsCall<CamoufoxFormSubmit>(
@@ -235,6 +237,7 @@ export function camoufoxFormSubmit(params: {
       ...(params.retryOnCaptchaRejection !== undefined ? { retry_on_captcha_rejection: params.retryOnCaptchaRejection } : {}),
       ...(params.captchaRejectionText ? { captcha_rejection_text: params.captchaRejectionText } : {}),
       ...(params.captchaLibDirect !== undefined ? { captcha_lib_direct: params.captchaLibDirect } : {}),
+      ...(params.pacing ? { pacing: params.pacing } : {}),
     },
     timeoutMs + 60_000,
   );

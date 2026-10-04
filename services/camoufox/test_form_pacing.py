@@ -59,5 +59,24 @@ class LabPacingTests(unittest.TestCase):
             self.assertIsNone(app._pacing(req))
 
 
+class ProfileTests(unittest.TestCase):
+    def test_lab_fast_is_about_half_the_lab_cadence(self):
+        lab = [form_flow._key_gap_ms("lab") for _ in range(400)]
+        fast = [form_flow._key_gap_ms("lab_fast") for _ in range(400)]
+        self.assertLess(sum(fast) / len(fast), 0.65 * sum(lab) / len(lab))
+
+    def test_request_pacing_overrides_the_environment(self):
+        with patch.dict(os.environ, {"FORM_PACING": "lab"}):
+            self.assertEqual(app._pacing(SimpleNamespace(pacing="lab_fast")), "lab_fast")
+            self.assertIsNone(app._pacing(SimpleNamespace(pacing="default")))
+            self.assertEqual(app._pacing(SimpleNamespace(pacing=None)), "lab")
+
+    def test_pauses_follow_the_profile(self):
+        for _ in range(50):
+            self.assertLessEqual(form_flow._pause("lab_fast", "field", (1, 2)), 600)
+            self.assertGreaterEqual(form_flow._pause("lab", "submit", (1, 2)), 1000)
+            self.assertLessEqual(form_flow._pause(None, "field", (120, 420)), 420)
+
+
 if __name__ == "__main__":
     unittest.main()

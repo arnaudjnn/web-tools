@@ -1047,6 +1047,7 @@ class FormSubmitRequest(BaseModel):
     retry_on_captcha_rejection: int = Field(3, ge=0, le=form_retry.MAX_RETRIES, description="fresh attempts (new context, new exit) after an explicit step-0 CAPTCHA refusal or any provably zero-POST failure (form_retry.py); 0 = single attempt")
     captcha_rejection_text: str | None = Field(None, max_length=300, description="regex every error node of the re-rendered form must match to count as a CAPTCHA refusal; default form_retry.DEFAULT_CAPTCHA_REJECTION")
     fingerprint: dict | None = Field(None, description="measured fingerprint knobs for this form browser and its score-gate probes (os, locale, screen, window, fonts, block_webgl, webgl_config, humanize, fingerprint_preset, config, firefox_user_prefs — fingerprint.py); None = unchanged. A named profile uses it on its FIRST draw only")
+    pacing: str | None = Field(None, pattern="^(default|lab|lab_fast)$", description="input cadence: lab (the lab runner's typing and pauses), lab_fast (about half the time), default; None = FORM_PACING")
     captcha_lib_direct: bool | None = Field(None, description="fetch reCAPTCHA's static release files (www.gstatic.com/recaptcha/releases/…) direct instead of through the exit, falling back to the exit on failure (captcha_lib.py); None = FORM_CAPTCHA_LIB_DIRECT. Also applies to the score gate's probes")
 
 
@@ -1180,8 +1181,9 @@ def _pacing(req):
     types one key at a time with human gaps and the lab runner's pauses
     (Camoufox's humanize keeps drawing the pointer paths); unset = the
     default cadence."""
-    value = os.environ.get("FORM_PACING") or None
-    return value if value in ("lab",) else None
+    value = getattr(req, "pacing", None) or os.environ.get("FORM_PACING") or None
+    import form_flow
+    return value if value in form_flow.PACING_PROFILES else None
 
 
 def _form_live(req):

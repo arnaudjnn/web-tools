@@ -494,18 +494,40 @@ def _click_target(box):
 # one keystroke per call with 60-190 ms between keys plus an occasional
 # 200-500 ms hesitation, the runner's pauses between fields, checkboxes and
 # before submit, and an off-centre aim. Pointer paths stay humanize's.
-PACINGS = ("default", "lab")
+# Per profile (ms ranges): key gap, hesitation chance and extra, pause after
+# a typed field, pause after a checkbox, dwell before submit. "lab_fast" is
+# the same shape at roughly half the time — the A/B arm that measures
+# whether typing time itself is what the scorer rewards.
+PACING_PROFILES = {
+    "lab": {"key": (60, 190), "hesitate": (0.08, 200, 500), "field": (400, 1200),
+            "check": (400, 1000), "submit": (1000, 2500)},
+    "lab_fast": {"key": (30, 90), "hesitate": (0.04, 150, 350), "field": (200, 600),
+                 "check": (200, 500), "submit": (700, 1500)},
+}
+PACINGS = ("default", *PACING_PROFILES)
+
+
+def _profile(pacing):
+    return PACING_PROFILES.get(pacing)
+
+
+def _pause(pacing, kind, default):
+    """A random pause (ms) from the pacing profile, else the default range."""
+    lo, hi = (_profile(pacing) or {}).get(kind, default)
+    return random.randint(lo, hi)
 
 
 def _lab(pacing):
-    return pacing == "lab"
+    return pacing in PACING_PROFILES
 
 
-def _key_gap_ms():
-    """The lab runner's inter-key gap: 60-190 ms, 8% of keys +200-500 ms."""
-    gap = random.uniform(60, 190)
-    if random.random() < 0.08:
-        gap += random.uniform(200, 500)
+def _key_gap_ms(pacing="lab"):
+    """The profile's inter-key gap plus an occasional hesitation."""
+    prof = _profile(pacing) or PACING_PROFILES["lab"]
+    gap = random.uniform(*prof["key"])
+    chance, lo, hi = prof["hesitate"]
+    if random.random() < chance:
+        gap += random.uniform(lo, hi)
     return int(gap)
 
 
@@ -521,7 +543,7 @@ def type_text(page, value, remaining, pacing=None):
         return
     for ch in value:
         page.keyboard.type(ch)
-        page.wait_for_timeout(min(_key_gap_ms(), remaining()))
+        page.wait_for_timeout(min(_key_gap_ms(pacing), remaining()))
 
 
 def _lab_click_target(box):
@@ -1270,7 +1292,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                                     pacing=pacing)
                         if _lab(pacing):
                             with at("field pause"):
-                                page.wait_for_timeout(min(random.randint(400, 1000), remaining()))
+                                page.wait_for_timeout(min(_pause(pacing, "check", (400, 1000)), remaining()))
                         try:
                             with at("field check"):
                                 if control.is_checked(timeout=remaining(1000)):
@@ -1311,8 +1333,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     with at("field type", len(value) * (0.8 if _lab(pacing) else 0.25) + 10.0):
                         type_text(page, value, remaining, pacing)
                     with at("field pause"):
-                        page.wait_for_timeout(min(random.randint(400, 1200) if _lab(pacing)
-                                                  else random.randint(120, 420), remaining()))
+                        page.wait_for_timeout(min(_pause(pacing, "field", (120, 420)), remaining()))
                     # Typed into the void is the silent killer (empty fields trip
                     # HTML5 validation, which blocks the submit with no POST and
                     # no error). Read back what landed and fail loud on a miss.
@@ -1424,8 +1445,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # it needs (observation only above; this service never mints). Dwell
         # first: a submit the instant the last field fills in is machine
         # timing, and the token must be minted after the interaction anyway.
-        page.wait_for_timeout(min(random.randint(1000, 2500) if _lab(pacing)
-                                  else random.randint(800, 2400), remaining()))
+        page.wait_for_timeout(min(_pause(pacing, "submit", (800, 2400)), remaining()))
         if refill_if_reloaded("preclick") and diagnostics["captcha_script_requests"]:
             # The reload brought a new reCAPTCHA client: usable again first.
             usable, signal = wait_captcha_usable()
