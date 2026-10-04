@@ -582,7 +582,7 @@ def human_click(page, control, remaining, pre_submit=True, live=None, pacing=Non
     with at("field geometry", 13.0):
         box = control.bounding_box(timeout=min(remaining(), 5000))
     if not box:
-        with at("field click", 13.0):
+        with (at("field click", 13.0) if mark_click else _unmarked("field click")):
             control.click(timeout=min(remaining(), 5000))
         return
     tx, ty = (_lab_click_target if lab else _click_target)(box)
@@ -712,7 +712,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              gate_text=None, step2=None, step2_submit=None, completion_markers=None,
              stop_after_posts=None, live=None, exit_rotatable=False,
              capture_submission_body=False, captcha_rejection_text=None,
-             expect_ip=None, captcha_lib_direct=None):
+             expect_ip=None, captcha_lib_direct=None, pacing=None):
     targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
     # What a re-rendered form's error nodes must ALL say for the answer to
     # count as a CAPTCHA refusal (form_retry.py) — recorded, never acted on here.
@@ -1271,7 +1271,11 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     # A human click toggles: ensure the checked state rather than
                     # assuming it, but keep the pointer real throughout.
                     for _ in range(3):
-                        human_click(page, control, remaining, pre_submit=pre_submit, live=live)
+                        human_click(page, control, remaining, pre_submit=pre_submit, live=live,
+                                    pacing=pacing)
+                        if _lab(pacing):
+                            with at("field pause"):
+                                page.wait_for_timeout(min(random.randint(400, 1000), remaining()))
                         try:
                             with at("field check"):
                                 if control.is_checked(timeout=remaining(1000)):
@@ -1285,7 +1289,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     with at("field select", 18.0):
                         control.select_option(field.get("value"), timeout=min(remaining(), 10000))
                 elif action == "type":
-                    human_click(page, control, remaining, pre_submit=pre_submit, live=live)
+                    human_click(page, control, remaining, pre_submit=pre_submit, live=live,
+                                pacing=pacing)
                     value = field.get("value") or ""
                     # The human click aims by geometry. When focus never landed
                     # (an overlay swallowed the click, the rect was stale), the
@@ -1307,10 +1312,12 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     # dispatch itself is animated in camoufox. The mark's
                     # threshold is the worst case + margin, so a slow type is
                     # never mistaken for a park.
-                    with at("field type", len(value) * 0.25 + 10.0):
-                        page.keyboard.type(value, delay=random.randint(45, 120))
+                    # "lab" pacing: up to ~0.7 s per key (gap + hesitation).
+                    with at("field type", len(value) * (0.8 if _lab(pacing) else 0.25) + 10.0):
+                        type_text(page, value, remaining, pacing)
                     with at("field pause"):
-                        page.wait_for_timeout(min(random.randint(120, 420), remaining()))
+                        page.wait_for_timeout(min(random.randint(400, 1200) if _lab(pacing)
+                                                  else random.randint(120, 420), remaining()))
                     # Typed into the void is the silent killer (empty fields trip
                     # HTML5 validation, which blocks the submit with no POST and
                     # no error). Read back what landed and fail loud on a miss.
@@ -1422,7 +1429,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # it needs (observation only above; this service never mints). Dwell
         # first: a submit the instant the last field fills in is machine
         # timing, and the token must be minted after the interaction anyway.
-        page.wait_for_timeout(min(random.randint(800, 2400), remaining()))
+        page.wait_for_timeout(min(random.randint(1000, 2500) if _lab(pacing)
+                                  else random.randint(800, 2400), remaining()))
         if refill_if_reloaded("preclick") and diagnostics["captcha_script_requests"]:
             # The reload brought a new reCAPTCHA client: usable again first.
             usable, signal = wait_captcha_usable()
@@ -1433,7 +1441,14 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         diagnostics["submit_click_attempted"] = True
         # The URL the form was submitted FROM: a refusal re-renders it here.
         submitted_from = page.url
-        page.locator(submit).click(timeout=remaining())
+        if _lab(pacing):
+            # Chromium has no humanize: reach the submit along a stepped
+            # pointer path like every field. The click itself is unmarked —
+            # once it fires the outcome is no longer provably pre-POST.
+            human_click(page, page.locator(submit).first, remaining, live=live,
+                        pacing=pacing, mark_click=False)
+        else:
+            page.locator(submit).click(timeout=remaining())
         phase = "outcome"
         live.enter("outcome")
         if not wizard:

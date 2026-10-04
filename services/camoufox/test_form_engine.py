@@ -9,7 +9,8 @@ import os
 import time
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 from test_form_headed import RECORDED, app  # noqa: F401  (installs the stubs, imports app)
 
@@ -171,3 +172,46 @@ class MainWorldTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LabPacingTests(unittest.TestCase):
+    """engine=chromium types and moves at the lab runner's cadence (18/20 on
+    Atoka); the submit click is never marked pre-POST."""
+
+    def test_type_text_lab_is_one_key_per_call_with_gaps(self):
+        page = Mock()
+        form_flow.type_text(page, "abc", lambda *a: 10_000, "lab")
+        self.assertEqual([c.args[0] for c in page.keyboard.type.call_args_list], ["a", "b", "c"])
+        self.assertEqual(page.wait_for_timeout.call_count, 3)
+        for c in page.wait_for_timeout.call_args_list:
+            self.assertGreaterEqual(c.args[0], 60)
+
+    def test_type_text_default_keeps_camoufox_cadence(self):
+        page = Mock()
+        form_flow.type_text(page, "abc", lambda *a: 10_000, None)
+        page.keyboard.type.assert_called_once()
+        self.assertEqual(page.keyboard.type.call_args.args[0], "abc")
+
+    def test_lab_click_steps_the_pointer_path(self):
+        page, control = Mock(), Mock()
+        control.bounding_box.return_value = {"x": 10, "y": 10, "width": 100, "height": 20}
+        form_flow.human_click(page, control, lambda *a: 10_000, pacing="lab")
+        self.assertGreaterEqual(page.mouse.move.call_args.kwargs.get("steps", 1), 12)
+
+    def test_unmarked_submit_click_never_carries_a_pre_submit_mark(self):
+        page, control = Mock(), Mock()
+        control.bounding_box.return_value = None
+        live = form_flow.FormLive()
+        seen = []
+        original = live.mark
+        live.mark = lambda name, *a: (seen.append(name), original(name, *a))
+        form_flow.human_click(page, control, lambda *a: 10_000, live=live, pacing="lab",
+                              mark_click=False)
+        self.assertNotIn("field click", seen)
+        control.click.assert_called_once()
+
+    def test_pacing_follows_the_engine(self):
+        req = SimpleNamespace(engine="chromium")
+        with patch.dict(os.environ, {"FORM_CHROMIUM_PACING": "lab"}):
+            self.assertEqual(app._pacing(req), "lab")
+        self.assertIsNone(app._pacing(SimpleNamespace(engine="camoufox")))

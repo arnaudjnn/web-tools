@@ -1181,6 +1181,15 @@ async def _form_attempt(req, deadline, session, *, retry=False, retries=0, attem
         raise
 
 
+def _pacing(req):
+    """Input pacing for the form flow: Chromium has no humanize, so it types
+    and moves at the lab runner's cadence (18/20 accepted on Atoka) unless
+    FORM_CHROMIUM_PACING says otherwise; Camoufox keeps its own."""
+    if _engine(req) != "chromium":
+        return None
+    return os.environ.get("FORM_CHROMIUM_PACING", "lab") or None
+
+
 def _engine(req) -> str:
     return chromium_engine.resolve_engine(getattr(req, "engine", None))
 
@@ -1308,6 +1317,7 @@ async def _form_run(req, deadline, session, live, rotate, expect_ip):
             completion_markers=req.completion_markers, stop_after_posts=req.stop_after_posts,
             captcha_rejection_text=req.captcha_rejection_text,
             captcha_lib_direct=req.captcha_lib_direct,
+            pacing=_pacing(req),
             live=live), url=req.url, deadline=deadline, live=live)
     except FormRetryable as parked:
         # Parked on the one unbounded pre-POST call (the marker says where):
