@@ -307,16 +307,8 @@ async def _run(job, url, deadline, live):
         return {"error": "probe_unavailable", "failure_class": type(error).__name__, "diagnostics": {}}
 
 
-def _factory(session, headed, profile, engine=None, **fp_kw):
-    """The forms' own browser factory; `engine` only when not the default
-    (a gate run for engine=chromium probes the browser the form will use)."""
-    if engine:
-        return partial(_deps["browser_factory"], session, False, headed, profile, engine=engine, **fp_kw)
-    return partial(_deps["browser_factory"], session, False, headed, profile, **fp_kw)
-
-
 async def run_probe(*, oracle_url, session, profile, headed, wait_ms, field_count, action, timeout_ms,
-                    rotatable=False, rotated=None, captcha_lib_direct=None, fingerprint=None, engine=None):
+                    rotatable=False, rotated=None, captcha_lib_direct=None, fingerprint=None):
     page_url, verify_url = oracle_urls(oracle_url, action)
     deadline = time.monotonic() + timeout_ms / 1000
     params = probe_params(page_url, verify_url, field_count, wait_ms)
@@ -324,13 +316,11 @@ async def run_probe(*, oracle_url, session, profile, headed, wait_ms, field_coun
         # Per-request override of FORM_CAPTCHA_LIB_DIRECT: one deployment
         # can A/B both arms (score_bench lib-direct / lib-proxy).
         params["captcha_lib_direct"] = bool(captcha_lib_direct)
-    # The form's fingerprint knobs (fingerprint.py) and engine, so the gate
-    # scores the browser the form will be; absent = the default launch.
+    # The form's fingerprint knobs (fingerprint.py), so the gate scores the
+    # browser the form will be; absent = the default launch, called as before.
     fp_kw = {"fingerprint": fingerprint} if fingerprint else {}
-    factory = _factory(session, headed, profile, engine, **fp_kw)
+    factory = partial(_deps["browser_factory"], session, False, headed, profile, **fp_kw)
     live = _live(profile, headed, "score")
-    if engine:
-        live.note(engine=engine)
 
     def rotate():
         # The forms' own exit rotation; `rotated` tells the summary which
@@ -338,16 +328,16 @@ async def run_probe(*, oracle_url, session, profile, headed, wait_ms, field_coun
         token = proxy_session.new_token()
         if rotated is not None:
             rotated["session"] = token
-        return _factory(token, headed, profile, engine, **fp_kw)
+        return partial(_deps["browser_factory"], token, False, headed, profile, **fp_kw)
 
     job = partial(_deps["run_isolated"], factory, deadline=deadline, live=live,
                   rotate_factory=rotate if rotatable else None, **params)
     return await _run(job, page_url, deadline, live)
 
 
-async def run_egress(session, timeout_ms=30000, engine=None):
+async def run_egress(session, timeout_ms=30000):
     deadline = time.monotonic() + timeout_ms / 1000
-    factory = _factory(session, False, None, engine)
+    factory = partial(_deps["browser_factory"], session, False, False, None)
     live = _live(None, False, "egress")
     job = partial(_deps["run_isolated"], factory, deadline=deadline, runner=egress_flow,
                   live=live, url=EGRESS_URL)
@@ -475,7 +465,7 @@ LOOKAHEAD = 1
 
 async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries, end,
                            reserve_s=0.0, sessions=(), captcha_lib_direct=None, target_url=None, rng=None,
-                           fingerprint=None, engine=None):
+                           fingerprint=None):
     """Probe candidate exits on OUR oracle; stop at the first scoring >= threshold.
 
     Shared by /form-exit-select and the form score gate. Each candidate gets
@@ -541,8 +531,7 @@ async def probe_candidates(*, oracle_url, profile, headed, threshold, max_tries,
         data = await run_probe(oracle_url=oracle_url, session=session, profile=profile,
                                headed=headed, wait_ms=4000, field_count=2, action=None,
                                timeout_ms=max(10_000, min(120_000, left_ms - 5_000)),
-                               captcha_lib_direct=captcha_lib_direct, fingerprint=fingerprint,
-                               **({"engine": engine} if engine else {}))
+                               captcha_lib_direct=captcha_lib_direct, fingerprint=fingerprint)
         summary = summarize_probe(data, session=session, profile=profile, headed=headed,
                                   threshold=threshold, started=started)
         _record(summary, threshold, True)
@@ -598,12 +587,12 @@ def gate_fits(timeout_ms, wizard):
 
 
 async def run_gate(*, oracle_url, profile, headed, threshold, tries, deadline, reserve_s,
-                   sessions=(), captcha_lib_direct=None, target_url=None, fingerprint=None, engine=None):
+                   sessions=(), captcha_lib_direct=None, target_url=None, fingerprint=None):
     outcome = await probe_candidates(oracle_url=oracle_url, profile=profile, headed=headed,
                                      threshold=threshold, max_tries=tries, end=deadline,
                                      reserve_s=reserve_s, sessions=sessions,
                                      captcha_lib_direct=captcha_lib_direct, target_url=target_url,
-                                     fingerprint=fingerprint, **({"engine": engine} if engine else {}))
+                                     fingerprint=fingerprint)
     log.info("score gate: passed=%s score=%s asn=%s after %d tries (profile=%s headed=%s)",
              outcome["passed"], outcome["score"], (outcome["egress"] or {}).get("asn"),
              len(outcome["tries"]), profile, headed)

@@ -183,12 +183,6 @@ const FormField = z.object({
   action: z.enum(['type', 'check', 'select']).optional().describe('Default: type'),
 });
 
-const FormEngine = z
-  .enum(['camoufox', 'chromium'])
-  .describe(
-    "Form browser. camoufox (default): stealth Firefox. chromium: Patchright Chromium, headed on the same Italian exit; Atoka accepted it where the oracle predicted refusal, so its score gate defaults off; no profile",
-  );
-
 const ProfileName = z
   .string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
@@ -285,7 +279,6 @@ export const WebFormSubmitInput = z.object({
     .max(300)
     .optional()
     .describe("Regex (case-insensitive) every error node of the re-rendered form must match (default: 'error verifying recaptcha|captcha (?:non |in)?valid|recaptcha')"),
-  engine: FormEngine.optional(),
   captcha_lib_direct: z
     .boolean()
     .optional()
@@ -303,7 +296,6 @@ export const WebFormInspectInput = z.object({
   exit_session: z.string().optional().describe('Pin the exit IP; reuse the token in web_form_submit to submit from the same IP'),
   profile: ProfileName.optional().describe('Named persistent profile; the visit warms it for a later submit'),
   headed: z.boolean().optional().describe('Headed browser (as web_form_submit)'),
-  engine: FormEngine.optional(),
 });
 
 export const WebEvalInput = z.object({

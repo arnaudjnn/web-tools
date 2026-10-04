@@ -263,7 +263,7 @@ anything, and it blocks every mutating request (any origin).
 | `wait_until`, `wait_ms`    | (optional)         | Navigation condition and settle after load (default 4000 ms) |
 | `timeout_ms`               | number (optional)  | Whole-run deadline (default: 60000) |
 | `fresh_ip`, `exit_session` | (optional)         | Exit IP; reuse the `exit_session` token to submit from the same IP |
-| `profile`, `headed`, `engine` | (optional)      | As `web_form_submit` |
+| `profile`, `headed`        | (optional)         | As `web_form_submit` |
 
 It returns `{ ok, url, status, forms, captcha, cookie_banners, wizard, diagnostics }`.
 Each form has `action`, `method`, `fields`, `submit_candidates`,
@@ -305,7 +305,6 @@ and its own integration mints the token. The full contract is in
 | `exit_session`          | string (optional)   | Pin the exit: the same token lands on the same IP, so an exit that passed can be reused |
 | `headed`                | boolean (optional)  | Headed browser under Xvfb for score-gated forms (reCAPTCHA v3 scores headless fleets at 0) |
 | `profile`               | string (optional)   | Named persistent profile: cookies and fingerprint reused across submissions (per replica) |
-| `engine`                | `camoufox` \| `chromium` (optional) | Form browser (default: the sidecar's `FORM_ENGINE`, `camoufox`). `chromium` is Patchright Chromium on the same Italian exit, run headed. Its score gate defaults off because the oracle mispredicts it. It takes no `profile`. See FORMS.md |
 | `gate_text`             | string (optional)   | Wizard: regex on a gate button's text, clicked **once** after step 0 |
 | `step2`, `step2_submit` | (optional)          | Wizard: second-step fields and submit (default `form button`), used only if that step renders |
 | `completion_markers`    | string[] (optional) | Wizard: body-text regexes that count as completion when the URL never changes |

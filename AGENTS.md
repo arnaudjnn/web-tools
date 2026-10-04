@@ -157,23 +157,6 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   observation fields `captcha_field` / `require_captcha_token`. Text is typed
   keystroke-by-keystroke — reCAPTCHA v3 scores behaviour — so never
   reintroduce `.fill(`: `test_form_flow.py` greps for it.
-- **Two form engines, one form path** (`chromium_engine.py`, FORMS.md
-  "Engines"). `engine: "chromium"` launches Patchright Chromium headed on the
-  same Xvfb and sticky exit. Everything after the launch is the same
-  `run_form`. Lab, 2026-10-03: Atoka accepted it 18/20, against production
-  Camoufox's 11/30, and 6/7 at oracle ≤0.7. The gate therefore defaults
-  **off** for it, and `profile` is a 400. Patchright evaluates in an
-  isolated world, so page globals are read only through
-  `form_flow.main_world_eval`; never add a raw `"mw:"` evaluate. The default
-  is `FORM_ENGINE` (`camoufox`) until a production batch confirms.
-  `patchright` is pinned to Scrapling's resolved version (1.63.0). It adds
-  ~237 MB (uncompressed amd64) to the image: the Chromium build only, with no
-  extra apt packages.
-- **A consent click can reload the page.** iubenda does on Atoka. Typed
-  values die with the document, and a submit on an emptied form is a
-  silent no-POST. `run_form` waits for a post-dismiss navigation
-  (`DISMISS_RELOAD_WAIT_S`) and refills once if the document was replaced
-  after typing began (`dismiss_reload`, `refilled_after_reload`).
 - **One `mouse.move` per click; never a hand-stepped approach.** Forms launch
   with `humanize=True`, which already animates every move; stepping it was
   double humanization and 6–18× the dispatches into Camoufox's input-chain
@@ -290,10 +273,6 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   browser-free Camoufox form tests (needs `coverage`, plus `fastapi`/`httpx`, or
   `fastapi`/`pydantic`/`playwright` for Camoufox). It reports only and is not gated.
   `ci.yml` runs all of this on every push/PR; `forms.yml` stays separate.
-  The browser form suite takes `FORM_BROWSER_TEST`: `chromium` means
-  Patchright (the `engine: "chromium"` launch, `FORM_BROWSER_HEADED=1` for
-  headed), `playwright` means plain Playwright Chromium, and `camoufox`
-  means the image's Camoufox.
   The live API is still the oracle: POST `/api/v0/{tool}` with the Bearer key and
   assert `mode`/`status`/`renderer`, never liveness alone.
 - SIGTERM drains: `/health` turns 503, in-flight calls finish, exit after at most

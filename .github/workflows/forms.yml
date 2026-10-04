@@ -23,13 +23,6 @@ jobs:
               web-tools-camoufox python -m unittest -v test_form_browser && exit 0
           done
           exit 1
-      # engine: "chromium" as production runs it: the image's Patchright
-      # Chromium, HEADED under the image's own Xvfb.
-      - run: |
-          timeout 600 docker run --rm -e FORM_BROWSER_TEST=chromium -e FORM_BROWSER_HEADED=1 \
-            -v "$PWD/services/camoufox/test_form_browser.py:/app/test_form_browser.py:ro" \
-            --entrypoint bash web-tools-camoufox -c \
-            'Xvfb :99 -screen 0 1440x900x24 -nolisten tcp & sleep 2; DISPLAY=:99 python -m unittest -v test_form_browser'
   forms:
     runs-on: ubuntu-latest
     steps:
@@ -37,12 +30,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      # playwright: the generic-engine fixtures; patchright (pinned as in
-      # services/camoufox/requirements.txt): the engine: "chromium" launch.
-      - run: python -m pip install playwright==1.58.0 patchright==1.63.0
+      - run: python -m pip install playwright==1.58.0
       - run: python -m playwright install --with-deps chromium
-      - run: python -m patchright install chromium
-      - run: FORM_BROWSER_TEST=playwright python -m unittest discover -s services/camoufox -p 'test_form*.py' -v
       - run: FORM_BROWSER_TEST=chromium python -m unittest discover -s services/camoufox -p 'test_form*.py' -v
       - uses: pnpm/action-setup@v4
         with:

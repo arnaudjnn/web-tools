@@ -14,9 +14,3 @@ camoufox[geoip]==0.5.6
 fastapi==0.141.1
 uvicorn[standard]==0.52.1
 pydantic==2.13.4
-# engine: "chromium" (chromium_engine.py): Patchright Chromium for forms.
-# Pinned to EXACTLY the patchright that services/scrapling resolves next to
-# scrapling[fetchers]==0.4.14 (1.63.0 per its image build on 2026-10-03). Both
-# images then run one Chromium build, so a lab result from either image holds
-# for the other. Bump both together.
-patchright==1.63.0

@@ -80,12 +80,6 @@ def browser_engine():
         from camoufox.sync_api import Camoufox
         with Camoufox(headless=True, main_world_eval=True) as browser:
             yield browser
-    elif os.environ.get("FORM_BROWSER_TEST") == "chromium":
-        # The production engine=chromium launch (Patchright, isolated-world
-        # evaluation); FORM_BROWSER_HEADED=1 runs it headed, as forms do.
-        from chromium_engine import ChromiumForm
-        with ChromiumForm(headless=os.environ.get("FORM_BROWSER_HEADED") != "1", persistent=False) as browser:
-            yield browser
     else:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:

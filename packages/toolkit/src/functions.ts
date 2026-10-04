@@ -10,7 +10,6 @@ import {
   camoufoxScreenshot,
   camoufoxSpaFetch,
   camoufoxStealth,
-  type FormEngine,
 } from './camoufox.js';
 import { Config } from './config.js';
 import { web_agent } from './agent.js';
@@ -404,10 +403,6 @@ function formFailure(err: unknown): Record<string, unknown> {
   };
 }
 
-function formEngine(value: unknown): FormEngine | undefined {
-  return value === 'camoufox' || value === 'chromium' ? value : undefined;
-}
-
 function formResult(tool: 'web_form_submit' | 'web_form_inspect', body: Record<string, unknown>, isError: boolean): ToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(body) }], isError };
 }
@@ -467,7 +462,6 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       retryOnCaptchaRejection: typeof params.retry_on_captcha_rejection === 'number' ? params.retry_on_captcha_rejection : undefined,
       captchaRejectionText: typeof params.captcha_rejection_text === 'string' ? params.captcha_rejection_text : undefined,
       captchaLibDirect: typeof params.captcha_lib_direct === 'boolean' ? params.captcha_lib_direct : undefined,
-      engine: formEngine(params.engine),
     });
     // An answered run is never auto-replayable, whatever its outcome: the
     // only sanctioned replay is the 503 below.
@@ -503,7 +497,6 @@ export async function web_form_inspect(params: Record<string, unknown>): Promise
       exitSession: params.exit_session as string | undefined,
       headed: params.headed === true,
       profile: params.profile as string | undefined,
-      engine: formEngine(params.engine),
     });
     return formResult('web_form_inspect', r, false);
   } catch (err) {

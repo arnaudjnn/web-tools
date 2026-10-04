@@ -601,7 +601,6 @@ def inspect_form(context, *, url, wait_until="domcontentloaded", wait_ms=4000, t
 
 def register(app, *, worker, form_browser, shared_session, camoufox=None):
     """Mount POST /form-inspect on the app, sharing the form worker's admission."""
-    import chromium_engine
     import proxy_session
     from fastapi import HTTPException
     from pydantic import BaseModel, Field
@@ -619,25 +618,20 @@ def register(app, *, worker, form_browser, shared_session, camoufox=None):
         headed: bool = Field(False, description="headed browser under xvfb")
         profile: Optional[str] = Field(None, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$",
                                        description="named persistent profile (a visit warms it)")
-        engine: Optional[str] = Field(None, description="camoufox | chromium (as /form-submit); None = FORM_ENGINE")
 
     @app.post("/form-inspect")
     async def form_inspect(req: FormInspectRequest):
         deadline = time.monotonic() + req.timeout_ms / 1000
         try:
             validate_form(req.url, None, None)
-            engine = chromium_engine.resolve_engine(req.engine)
-            if engine == "chromium" and req.profile:
-                raise ValueError("engine=chromium does not take a profile (profiles are Camoufox identities)")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         session = req.exit_session or (proxy_session.new_token() if req.fresh_ip else shared_session)
         # One per job, shared by the worker and the runner: one form-run line.
         live = FormLive(profile=req.profile, headed=req.headed, camoufox=camoufox)
-        live.note(engine=engine)
         try:
             data = await worker.run(partial(run_isolated_form,
-                partial(form_browser, session, False, req.headed, req.profile, engine=engine),
+                partial(form_browser, session, False, req.headed, req.profile),
                 deadline=deadline, runner=inspect_form, live=live, url=req.url,
                 wait_until=req.wait_until, wait_ms=req.wait_ms), url=req.url, deadline=deadline,
                 live=live)

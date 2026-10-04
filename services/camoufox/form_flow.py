@@ -489,15 +489,12 @@ def _click_target(box):
     return max(2.0, tx), max(2.0, ty)
 
 
-# Input pacing. "camoufox" (the default) relies on humanize=True: Camoufox
-# animates every dispatched move browser-side, so one mouse.move per click
-# and keyboard.type's own per-key delay. Chromium has no humanize: a bare
-# mouse.move is a one-event teleport. "lab" reproduces the lane-chromium
-# runner (scripts/lab/atoka_chromium.py, 18/20 accepted on Atoka) on that
-# engine: stepped pointer paths (12-30 events), a keystroke per call with
-# 60-190 ms between keys plus an occasional 200-500 ms hesitation, and the
-# runner's pauses between fields (~40 s for Atoka's six fields, not ~11 s).
-PACINGS = ("camoufox", "lab")
+# Input pacing. Default: keyboard.type's own per-key delay. "lab"
+# (FORM_PACING=lab) reproduces the lab runner that Atoka accepted 18/20:
+# one keystroke per call with 60-190 ms between keys plus an occasional
+# 200-500 ms hesitation, the runner's pauses between fields, checkboxes and
+# before submit, and an off-centre aim. Pointer paths stay humanize's.
+PACINGS = ("default", "lab")
 
 
 def _lab(pacing):
@@ -590,12 +587,10 @@ def human_click(page, control, remaining, pre_submit=True, live=None, pacing=Non
     # timeout of its own); one animated trajectory is bounded by humanize's
     # maxTime, so its mark sits at POINTER_MOVE_STUCK_S. Move, a short
     # human beat, then press — each its own mark, so a park names which.
-    # "lab" steps the path itself (Chromium has no humanize to draw one).
+    # One move either way: Camoufox's humanize draws the trajectory;
+    # stepping it here too was the #751 wedge surface.
     with at("pointer move", POINTER_MOVE_STUCK_S):
-        if lab:
-            page.mouse.move(tx, ty, steps=random.randint(12, 30))
-        else:
-            page.mouse.move(tx, ty)
+        page.mouse.move(tx, ty)
     with at("pointer dwell"):
         page.wait_for_timeout(min(random.randint(80, 250) if lab else random.randint(60, 180),
                                   remaining()))
@@ -1442,8 +1437,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # The URL the form was submitted FROM: a refusal re-renders it here.
         submitted_from = page.url
         if _lab(pacing):
-            # Chromium has no humanize: reach the submit along a stepped
-            # pointer path like every field. The click itself is unmarked —
+            # Reach the submit with the pointer like every field. The click
+            # itself is unmarked —
             # once it fires the outcome is no longer provably pre-POST.
             human_click(page, page.locator(submit).first, remaining, live=live,
                         pacing=pacing, mark_click=False)
