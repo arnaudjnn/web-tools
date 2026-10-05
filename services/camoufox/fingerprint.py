@@ -23,8 +23,8 @@ Camoufox launch kwargs (pure: no browser, unit-tested). Keys:
 - `humanize`: true/false or the max seconds of a cursor move.
 - `fingerprint_preset`: true — a real-device preset instead of a
   synthetic BrowserForge draw.
-- `viewport`: "fixed" (default: isolated form contexts are opened with a
-  1440x900 viewport) | "native" (no viewport override: Camoufox's own
+- `viewport`: "native" (default) | "fixed" (isolated form contexts opened
+  with a 1440x900 viewport). "native": no viewport override: Camoufox's own
   no_viewport default, so the page sees the spoofed window — what a
   persistent profile's context already gets). The fixed viewport overrides
   the drawn window: measured on cf156, outerHeight 985 on a 900-high screen,
@@ -78,9 +78,12 @@ FIXED_VIEWPORT = {"width": 1440, "height": 900}
 
 def context_options(spec) -> dict:
     """new_context() kwargs for an isolated form context (service workers are
-    the caller's). Default (no spec / "fixed"): the 1440x900 viewport forms
-    have always used; "native": none — Camoufox applies no_viewport itself."""
-    viewport = (spec or {}).get("viewport") or "fixed"
+    the caller's). Default (no spec / "native"): none — Camoufox applies
+    no_viewport itself; "fixed": the 1440x900 viewport forms used before."""
+    # Default "native": the fixed 1440x900 override showed pages a window
+    # larger than their own screen (1440x985 on a 1366x768 draw), which no
+    # real browser does and any script can read (lane-fingerprint, 2026-10-03).
+    viewport = (spec or {}).get("viewport") or "native"
     if viewport not in VIEWPORTS:
         raise ValueError("fingerprint.viewport must be one of %s" % ", ".join(VIEWPORTS))
     return {} if viewport == "native" else {"viewport": dict(FIXED_VIEWPORT)}
@@ -166,3 +169,18 @@ def launch_kwargs(spec, screen_factory=_screen) -> dict:
     if out.get("custom_fonts_only") and not out.get("fonts"):
         raise ValueError("fingerprint.custom_fonts_only needs fingerprint.fonts")
     return out
+
+
+def default_spec():
+    """The service-wide default spec (FORM_DEFAULT_FINGERPRINT, JSON) used when
+    a request names none — e.g. the exit's language pinned instead of geoip's
+    random CLDR draw (only 62% it-IT on an Italian exit). Invalid JSON or keys
+    fail loudly at the first launch rather than silently dropping the spec."""
+    import json
+    import os
+    raw = os.environ.get("FORM_DEFAULT_FINGERPRINT")
+    if not raw:
+        return None
+    spec = json.loads(raw)
+    launch_kwargs(spec, screen_factory=lambda **k: None)  # validate
+    return spec

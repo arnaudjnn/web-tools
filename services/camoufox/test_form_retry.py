@@ -504,3 +504,33 @@ class BrowserRetryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetryGateTests(unittest.TestCase):
+    """Attempt 1 ungated; a retry is gated at FORM_RETRY_GATE unless the caller chose."""
+
+    def req(self, **kw):
+        from types import SimpleNamespace
+        base = dict(url="https://form.test/f", score_gate=None, score_threshold=0.7)
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_only_retries_are_gated(self):
+        req = self.req()
+        self.assertIs(app._retry_request(req, 1), req)
+        retry = app._retry_request(req, 2)
+        self.assertTrue(retry.score_gate)
+        self.assertEqual(retry.score_threshold, 0.9)
+
+    def test_an_explicit_caller_choice_wins(self):
+        for choice in (True, False):
+            req = self.req(score_gate=choice)
+            self.assertIs(app._retry_request(req, 3), req)
+
+    def test_the_env_can_disable_or_raise_it(self):
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"FORM_RETRY_GATE": "0"}):
+            self.assertIsNone(app._retry_request(self.req(), 2).score_gate)
+        with patch.dict(os.environ, {"FORM_RETRY_GATE": "0.8"}):
+            self.assertEqual(app._retry_request(self.req(score_threshold=0.95), 2).score_threshold, 0.95)

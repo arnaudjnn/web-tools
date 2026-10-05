@@ -111,7 +111,7 @@ class ViewportTests(unittest.TestCase):
 
     def test_context_options(self):
         fixed = {"viewport": {"width": 1440, "height": 900}}
-        self.assertEqual(fingerprint.context_options(None), fixed)
+        self.assertEqual(fingerprint.context_options(None), {})  # native by default
         self.assertEqual(fingerprint.context_options({"viewport": "fixed"}), fixed)
         self.assertEqual(fingerprint.context_options({"viewport": "native"}), {})
         with self.assertRaises(ValueError):
@@ -121,10 +121,24 @@ class ViewportTests(unittest.TestCase):
 
     def test_form_browser_carries_context_options(self):
         default = app._form_browser("s-vp0", False, True)
-        self.assertEqual(default.form_context_options, {"viewport": {"width": 1440, "height": 900}})
+        self.assertEqual(default.form_context_options, {})  # native: the window fits the screen
+        fixed = app._form_browser("s-vpf", False, True, None, fingerprint={"viewport": "fixed"})
+        self.assertEqual(fixed.form_context_options, {"viewport": {"width": 1440, "height": 900}})
         native = app._form_browser("s-vp1", False, True, None, fingerprint={"viewport": "native"})
         self.assertEqual(native.form_context_options, {})
         self.assertNotIn("viewport", RECORDED[1])
+
+    def test_the_service_default_spec_applies_when_a_request_names_none(self):
+        import os
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"FORM_DEFAULT_FINGERPRINT": '{"locale": "it-IT"}'}):
+            app._form_browser("s-def", False, True)
+            self.assertEqual(RECORDED[-1].get("locale"), "it-IT")
+            app._form_browser("s-own", False, True, None, fingerprint={"locale": "fr-FR"})
+            self.assertEqual(RECORDED[-1].get("locale"), "fr-FR")
+        with patch.dict(os.environ, {"FORM_DEFAULT_FINGERPRINT": '{"bogus": 1}'}):
+            with self.assertRaises(ValueError):
+                app._form_browser("s-bad", False, True)
 
     def _worker_context_kwargs(self, options):
         from unittest.mock import Mock, patch

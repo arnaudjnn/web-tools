@@ -683,6 +683,8 @@ def _form_browser(session, main_world_eval=False, headed=False, profile=None, fi
     # `fingerprint` (request-scoped, default None = unchanged): measured
     # knobs layered over the defaults below — see fingerprint.py.
     base = {"geoip": True, "humanize": True}
+    if fingerprint is None:
+        fingerprint = fingerprint_mod.default_spec()
     base.update(fingerprint_mod.launch_kwargs(fingerprint))
     if not profile:
         manager = Camoufox(headless=headless, proxy=proxy, timeout=30000,
@@ -1121,7 +1123,8 @@ async def form_submit(req: FormSubmitRequest):
         # Attempt 1 runs on the resolved session; a retry on a NEW exit token
         # (fresh proxy session, new isolated context), gated again.
         try:
-            data, gate, used = await _form_attempt(req, deadline, session if n == 1 else proxy_session.new_token(),
+            data, gate, used = await _form_attempt(_retry_request(req, n), deadline,
+                                                   session if n == 1 else proxy_session.new_token(),
                                                    retry=n > 1, retries=retries,
                                                    attempt_n=n if retries else None)
         except form_retry.AttemptRefused as refused:
@@ -1222,6 +1225,30 @@ def _form_live(req):
     live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
     live.note(pacing=_pacing(req) or "default")
     return live
+
+
+def _retry_request(req, n):
+    """The request attempt `n` runs. A RETRY after a refusal is score-gated
+    at FORM_RETRY_GATE (default 0.9) when the caller left score_gate unset:
+    attempt 1 stays fast, and the retry — already known to need a better
+    exit — goes out only on one that scored high on our oracle (Atoka:
+    >=0.9 accepted 7/12, lower far less). FORM_RETRY_GATE=0 disables."""
+    if n <= 1 or req.score_gate is not None:
+        return req
+    try:
+        threshold = float(os.environ.get("FORM_RETRY_GATE", "0.9"))
+    except ValueError:
+        threshold = 0.0
+    if threshold <= 0:
+        return req
+    update = {"score_gate": True, "score_threshold": max(req.score_threshold, threshold)}
+    if hasattr(req, "model_copy"):
+        return req.model_copy(update=update)
+    import copy
+    clone = copy.copy(req)
+    for key, value in update.items():
+        setattr(clone, key, value)
+    return clone
 
 
 def _gate_default(req):
