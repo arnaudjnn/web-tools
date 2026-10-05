@@ -31,6 +31,8 @@ export const camoufoxForms = createSidecar({
   url: () => Config.camoufoxForms.url,
   error: (m, s, d) => new CamoufoxError(m, s, d),
   onTrip: (reason) => log(`[camoufox-forms] unreachable (${reason}); skipping it for 60s.`),
+  // Forms are serial per replica: spread them so N replicas run N forms.
+  spread: true,
 });
 
 const formsCall = <T>(path: string, body: Record<string, unknown>, clientTimeoutMs: number) =>

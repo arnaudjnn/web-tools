@@ -575,6 +575,25 @@ class WizardTests(unittest.TestCase):
         state.update(over)
         return state
 
+    def test_an_unanswered_post_ends_the_walk_early(self):
+        # 2026-10-05: a POST nothing answered held the replica 7 min to the
+        # deadline. Past POST_NO_ANSWER_S the walk ends as outcome_unknown.
+        def post_without_answer(**kwargs):
+            self.clock[0] += 5.0
+            self.guard()(self.route)  # the POST leaves; no response ever arrives
+        self.locator("#submit").click.side_effect = post_without_answer
+        self.page.mouse.click.side_effect = None  # no gate/step2 POSTs: only step0's
+        self.locator("button, a").is_visible.return_value = False      # no gate
+        self.locator("#id_1-company_name").is_visible.return_value = False  # no step2
+        params = dict(self.params, timeout_ms=600_000)
+        with patch.object(form_flow, "POST_NO_ANSWER_S", 10.0):
+            self.params = params
+            result = self.run_wizard([])
+        self.assertEqual(result["form_submissions"], 1)
+        self.assertEqual(result["error"], "outcome_unknown")
+        self.assertTrue(result["diagnostics"].get("post_unanswered"))
+        self.assertLess(self.clock[0] - 1_000.0, 120.0)  # nowhere near the 600 s deadline
+
     def test_wizard_completes_on_body_copy_after_three_posts(self):
         # Manual review: same URL, no form, the body copy is the ONLY signal.
         self.locator("button, a").is_visible.return_value = True

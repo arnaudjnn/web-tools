@@ -29,6 +29,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import secrets
@@ -133,6 +134,9 @@ def main_world_eval(page, js):
 # starts, let it load and settle. If it comes later than this, the
 # pre-click check in run_form refills the fields once.
 DISMISS_RELOAD_WAIT_S = 8.0
+# A form POST nothing answers within this ends the outcome walk early (as
+# outcome_unknown, never replayed) instead of holding the replica to the deadline.
+POST_NO_ANSWER_S = float(os.environ.get("FORM_POST_NO_ANSWER_S", "90"))
 DISMISS_RELOAD_POLL_MS = 250
 # The readiness gate's own bound. Every passing run met it within
 # milliseconds of the fields finishing; every failing one (7 on 2026-10-01)
@@ -730,6 +734,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
              stop_after_posts=None, live=None, exit_rotatable=False,
              capture_submission_body=False, captcha_rejection_text=None,
              expect_ip=None, captcha_lib_direct=None, pacing=None):
+    posted_at = {"t": None}  # monotonic time of the latest form POST sent
     targets = validate_form(url, submission_urls, success_url, gate_text, completion_markers)
     # What a re-rendered form's error nodes must ALL say for the answer to
     # count as a CAPTCHA refusal (form_retry.py) — recorded, never acted on here.
@@ -838,6 +843,7 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                     route.abort("blockedbyclient")
                     return
             result["form_submissions"] += 1
+            posted_at["t"] = time.monotonic()
             last_submission_at = now
         route.continue_()
 
@@ -1558,6 +1564,16 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
                 return result
             while True:
                 if time.monotonic() >= deadline:
+                    break
+                if (result["form_submissions"] and not result["status"] and posted_at["t"]
+                        and time.monotonic() - posted_at["t"] > POST_NO_ANSWER_S):
+                    # A POST left and nothing ever answered it (2026-10-05: the
+                    # retry's POST got no response and the walk held the
+                    # replica 7 min to the deadline). The outcome is unknown —
+                    # never replayed — but waiting longer cannot learn it.
+                    log.warning("form flow: no answer to the POST in %.0fs; ending the walk (outcome unknown)",
+                                POST_NO_ANSWER_S)
+                    diagnostics["post_unanswered"] = True
                     break
                 if diagnostics["captcha_guard_blocked"]:
                     # The token guard aborted the step-0 POST: no step can
