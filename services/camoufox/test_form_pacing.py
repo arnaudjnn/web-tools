@@ -56,7 +56,7 @@ class LabPacingTests(unittest.TestCase):
             self.assertIsNone(app._pacing(req))
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("FORM_PACING", None)
-            self.assertIsNone(app._pacing(req))
+            self.assertEqual(app._pacing(req), "auto")  # the default
 
 
 class ProfileTests(unittest.TestCase):
@@ -76,6 +76,26 @@ class ProfileTests(unittest.TestCase):
             self.assertLessEqual(form_flow._pause("lab_fast", "field", (1, 2)), 600)
             self.assertGreaterEqual(form_flow._pause("lab", "submit", (1, 2)), 1000)
             self.assertLessEqual(form_flow._pause(None, "field", (120, 420)), 420)
+
+
+class AutoPacingTests(unittest.TestCase):
+    def test_auto_is_lab_with_a_captcha_and_fast_without(self):
+        self.assertEqual(form_flow.resolve_auto("auto", True), "lab")
+        self.assertEqual(form_flow.resolve_auto("auto", False), "fast")
+        self.assertEqual(form_flow.resolve_auto("lab", False), "lab")
+        self.assertIsNone(form_flow.resolve_auto(None, True))
+
+    def test_fast_typing_is_one_quick_type_call(self):
+        page = Mock()
+        form_flow.type_text(page, "hello", lambda *a: 10_000, "fast")
+        page.keyboard.type.assert_called_once()
+        self.assertLessEqual(page.keyboard.type.call_args.kwargs["delay"], 30)
+
+    def test_auto_is_the_service_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FORM_PACING", None)
+            self.assertEqual(app._pacing(SimpleNamespace(pacing=None)), "auto")
+        self.assertIsNone(app._pacing(SimpleNamespace(pacing="default")))
 
 
 if __name__ == "__main__":

@@ -274,9 +274,9 @@ export const WebFormSubmitInput = z.object({
       'Fresh attempts (new context, new exit) after an explicit step-0 CAPTCHA refusal (one 2xx POST, same URL, every error node matching captcha_rejection_text) or any provably zero-POST failure. Never with a pinned exit_session/profile; each must fit timeout_ms. Default 3; 0 = single attempt. Result adds attempts[] and form_submissions is the total',
     ),
   pacing: z
-    .enum(['default', 'lab', 'lab_fast'])
+    .enum(['auto', 'fast', 'lab', 'lab_fast', 'default'])
     .optional()
-    .describe("Input cadence: lab (human typing rhythm and pauses, the measured default), lab_fast (about half the time), default (fast)"),
+    .describe("Input cadence. auto (default): human typing rhythm when the page loads a CAPTCHA (reCAPTCHA, hCaptcha, Turnstile...), fast when it loads none. fast / lab force one"),
   captcha_rejection_text: z
     .string()
     .min(1)

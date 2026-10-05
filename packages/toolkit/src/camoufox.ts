@@ -202,7 +202,7 @@ export function camoufoxFormSubmit(params: {
    *  omit = the sidecar's FORM_CAPTCHA_LIB_DIRECT (captcha_lib.py). */
   captchaLibDirect?: boolean;
   /** Input cadence: lab | lab_fast | default; omit = the sidecar's FORM_PACING. */
-  pacing?: 'default' | 'lab' | 'lab_fast';
+  pacing?: 'auto' | 'fast' | 'lab' | 'lab_fast' | 'default';
 }): Promise<CamoufoxFormSubmit> {
   const timeoutMs = params.timeoutMs ?? 300_000;
   return formsCall<CamoufoxFormSubmit>(

@@ -508,7 +508,25 @@ PACING_PROFILES = {
     "lab_fast": {"key": (30, 90), "hesitate": (0.04, 150, 350), "field": (200, 600),
                  "check": (200, 500), "submit": (700, 1500)},
 }
-PACINGS = ("default", *PACING_PROFILES)
+# "fast": for a form with NO CAPTCHA, where human pacing buys nothing — the
+# whole fill is a few seconds. Not a lab profile (keyboard.type's own delay).
+FAST = {"key": (12, 30), "field": (60, 180), "check": (80, 200), "submit": (250, 600),
+        "arrival": (150, 400)}
+PACINGS = ("default", "auto", "fast", *PACING_PROFILES)
+
+
+# Challenge providers besides reCAPTCHA whose scripts mean "this session can
+# be scored": hCaptcha, Cloudflare Turnstile, Arkose (FunCaptcha), Friendly.
+OTHER_CAPTCHA_HOSTS = ("hcaptcha.com", "challenges.cloudflare.com", "arkoselabs.com",
+                       "funcaptcha.com", "friendlycaptcha.com", "frcapi.com")
+
+
+def resolve_auto(pacing, captcha_seen):
+    """`auto` (the default): the measured human cadence where a CAPTCHA can
+    score the session, the fast one where nothing does."""
+    if pacing != "auto":
+        return pacing
+    return "lab" if captcha_seen else "fast"
 
 
 def _profile(pacing):
@@ -517,7 +535,8 @@ def _profile(pacing):
 
 def _pause(pacing, kind, default):
     """A random pause (ms) from the pacing profile, else the default range."""
-    lo, hi = (_profile(pacing) or {}).get(kind, default)
+    prof = FAST if pacing == "fast" else (_profile(pacing) or {})
+    lo, hi = prof.get(kind, default)
     return random.randint(lo, hi)
 
 
@@ -542,6 +561,9 @@ def type_text(page, value, remaining, pacing=None):
     page.wait_for_timeout — never time.sleep, which would stall the
     context's request routes (sync playwright dispatches route handlers only
     while the thread is inside a driver call)."""
+    if pacing == "fast":
+        page.keyboard.type(value, delay=random.randint(*FAST["key"]))
+        return
     if not _lab(pacing):
         page.keyboard.type(value, delay=random.randint(45, 120))
         return
@@ -851,6 +873,14 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         parsed = urlsplit(request.url)
         return parsed.hostname in ("www.google.com", "www.recaptcha.net", "www.gstatic.com", "recaptcha.google.com") and "/recaptcha/" in parsed.path
 
+    def other_captcha_request(request):
+        """Any non-reCAPTCHA challenge provider: auto pacing treats it like one."""
+        try:
+            host = urlsplit(request.url).hostname or ""
+        except Exception:
+            return False
+        return any(host == h or host.endswith("." + h) for h in OTHER_CAPTCHA_HOSTS)
+
     lib_inflight = set()  # id() of recaptcha__*.js requests not yet finished/failed
 
     def is_lib(request):
@@ -862,6 +892,8 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
     def request_started(request):
         if captcha_request(request) and request.resource_type == "script":
             diagnostics["captcha_script_requests"] += 1
+        elif other_captcha_request(request):
+            diagnostics["captcha_other_requests"] = diagnostics.get("captcha_other_requests", 0) + 1
         if is_lib(request):
             lib_inflight.add(id(request))
 
@@ -1236,11 +1268,17 @@ def run_form(context, *, url, fields, submit, dismiss=None, success_url=None,
         # every logged arrival — still marked, so a park on it keeps the
         # same 503-retryable contract: nothing touched, nothing POSTed.
         live.enter("arrival")
-        page.wait_for_timeout(min(random.randint(700, 2200), remaining()))
+        # `auto` resolves here: the page and its scripts have loaded, so a
+        # CAPTCHA that could score this session has been requested by now.
+        pacing = resolve_auto(pacing, diagnostics["captcha_script_requests"] > 0
+                              or diagnostics.get("captcha_other_requests", 0) > 0)
+        diagnostics["pacing"] = pacing or "default"
+        live.note(pacing=diagnostics["pacing"])
+        page.wait_for_timeout(min(_pause(pacing, "arrival", (700, 2200)), remaining()))
         with live.at(PRE_SUBMIT_STEP):
             page.mouse.wheel(0, random.randint(200, 600))
         log.info("form flow: scrolled")
-        page.wait_for_timeout(min(random.randint(400, 1200), remaining()))
+        page.wait_for_timeout(min(_pause(pacing, "arrival", (400, 1200)), remaining()))
         log.info("form flow: dwell done; dismiss=%s", dismiss)
         # The banner can arrive AFTER this moment (slow third-party load) or
         # survive the first click (render race) — a banner left covering the

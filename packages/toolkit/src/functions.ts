@@ -460,7 +460,7 @@ export async function web_form_submit(params: Record<string, unknown>): Promise<
       // The gate probes OUR oracle; the sidecar only gates when it has one.
       oracleUrl: params.score_gate === false || params.inspect_only === true ? undefined : (Config.oracleUrl ?? undefined),
       retryOnCaptchaRejection: typeof params.retry_on_captcha_rejection === 'number' ? params.retry_on_captcha_rejection : undefined,
-      pacing: params.pacing === 'default' || params.pacing === 'lab' || params.pacing === 'lab_fast' ? params.pacing : undefined,
+      pacing: typeof params.pacing === 'string' && ['auto', 'fast', 'lab', 'lab_fast', 'default'].includes(params.pacing) ? (params.pacing as 'auto' | 'fast' | 'lab' | 'lab_fast' | 'default') : undefined,
       captchaRejectionText: typeof params.captcha_rejection_text === 'string' ? params.captcha_rejection_text : undefined,
       captchaLibDirect: typeof params.captcha_lib_direct === 'boolean' ? params.captcha_lib_direct : undefined,
     });
