@@ -101,7 +101,7 @@ Browser form execution uses Camoufox's [single-attempt form contract](services/c
 
 ## Tools
 
-The server exposes sixteen tools. One more, `web_agent`, is [coming](#coming-soon).
+The server exposes eighteen tools over MCP (a few REST-only diagnostics besides).
 
 ### `web_search`
 
@@ -286,9 +286,26 @@ duplicate POSTs. It never solves or mints a CAPTCHA: the page's own handler runs
 and its own integration mints the token. The full contract is in
 [`services/camoufox/FORMS.md`](services/camoufox/FORMS.md).
 
+**Defaults are tuned for agents; usually pass only `url`, `fields`, `submit`.**
+`pacing: auto` types fast on forms with no CAPTCHA (~20 s a call) and at a
+human rhythm where a CAPTCHA (reCAPTCHA, hCaptcha, Turnstile…) can score the
+session (~1 min). Refusals and failures that provably sent nothing are retried
+on a fresh exit (3 retries, the retries score-gated), and at most 2
+submissions per site run at once (`FORM_SITE_CONCURRENCY`); more queue. With
+`async: true` the call returns a `job_id` immediately — poll
+[`web_form_result`](#web_form_result).
+
+Measured on Atoka's reCAPTCHA v3 sign-up (2026-10-05, synthetic identities):
+every call succeeded end to end at ≤2 in flight (10/10, 6/6, 13/13, 12/12),
+~57 s each, one success every ~45 s per site. More parallel traffic to one
+reCAPTCHA v3 site lowers every token's score (4 in flight: 50% per attempt),
+so the per-site limit is a feature, not a bottleneck to remove.
+
 | Parameter               | Type                | Description |
 | ----------------------- | ------------------- | ----------- |
 | `url`                   | string (required)   | Page holding the form |
+| `async`                 | boolean (optional)  | Return `{ job_id, status }` at once and run in the background; poll `web_form_result` |
+| `pacing`                | string (optional)   | `auto` (default: human rhythm when a CAPTCHA loads, fast when none), `fast`, `lab` (force the human rhythm) |
 | `fields`                | object[] (required) | `{ selector, value?, action? }` in order; `action` is `type` (default), `check`, or `select` |
 | `submit`                | string (required)   | CSS selector of the submit control |
 | `dismiss`               | string[] (optional) | Selectors clicked first (cookie walls) |
@@ -300,19 +317,19 @@ and its own integration mints the token. The full contract is in
 | `inspect_only`          | boolean (optional)  | Navigate only: no fill, no click, same-origin mutating requests blocked |
 | `wait_until`, `wait_ms` | (optional)          | Navigation condition and settle after load (default 4000 ms) |
 | `settle_ms`             | number (optional)   | How long to wait for the outcome (default: 20000) |
-| `timeout_ms`            | number (optional)   | Whole-run deadline incl. the score gate and retries (default: 120000; a wizard needs ~240000; max 360000, or 540000 with `retry_on_captcha_rejection`) |
+| `timeout_ms`            | number (optional)   | Whole-run deadline incl. any retries (default: 300000; max 360000, or 540000 with retries) |
 | `fresh_ip`              | boolean (optional)  | New context and exit IP (default: true) |
 | `exit_session`          | string (optional)   | Pin the exit: the same token lands on the same IP, so an exit that passed can be reused |
-| `headed`                | boolean (optional)  | Headed browser under Xvfb for score-gated forms (reCAPTCHA v3 scores headless fleets at 0) |
+| `headed`                | boolean (optional)  | Headed browser under Xvfb (default: true; reCAPTCHA v3 scores headless at 0) |
 | `profile`               | string (optional)   | Named persistent profile: cookies and fingerprint reused across submissions (per replica) |
 | `gate_text`             | string (optional)   | Wizard: regex on a gate button's text, clicked **once** after step 0 |
 | `step2`, `step2_submit` | (optional)          | Wizard: second-step fields and submit (default `form button`), used only if that step renders |
 | `completion_markers`    | string[] (optional) | Wizard: body-text regexes that count as completion when the URL never changes |
 | `stop_after_posts`      | number (optional)   | Wizard warm-up: stop once this many POSTs (1-3) have been answered |
-| `score_gate`            | boolean (optional)  | Probe exits on our reCAPTCHA oracle first and submit from the first scoring ≥ `score_threshold` (default: on when `headed` and no `exit_session`) |
+| `score_gate`            | boolean (optional)  | Gate EVERY attempt on our reCAPTCHA oracle (≥ `score_threshold`). Default: attempt 1 ungated, retries gated at `FORM_RETRY_GATE` (0.9), falling back to a fresh exit when none qualifies; `false` disables gating |
 | `score_threshold`       | number (optional)   | Score gate threshold, 0-1 (default: 0.7) |
 | `score_gate_tries`      | number (optional)   | Exits the gate probes at most, 1-6 (default: 3) |
-| `retry_on_captcha_rejection` | number (optional) | 0-4 (default 0). Fresh attempts (new context, new exit, re-gated) **only** after an explicit step-0 CAPTCHA refusal: one 2xx POST, same URL, every error node matching `captcha_rejection_text`. Never with a pinned `exit_session`/`profile`; each retry must fit `timeout_ms` |
+| `retry_on_captcha_rejection` | number (optional) | 0-4 (default 3). Fresh attempts (new context, new exit) after an explicit step-0 CAPTCHA refusal (one 2xx POST, same URL, every error node matching `captcha_rejection_text`) **or** any failure that provably sent nothing. Never with a pinned `exit_session`/`profile`; each retry must fit `timeout_ms` |
 | `captcha_rejection_text` | string (optional)  | Case-insensitive regex the form's error nodes must all match (default `error verifying recaptcha\|captcha (?:non \|in)?valid\|recaptcha`) |
 
 Returns `{ contract_version: 2, ok, form_submissions, status, error, url, html, exit_session, diagnostics }`.
@@ -341,6 +358,19 @@ Through the Tools API every failure is structured JSON with `isError: true`:
 
 Answered runs carry `retryable: false`. Replay at most a couple of times,
 seconds apart. Do not wrap this tool in a generic HTTP retry policy.
+
+### `web_form_result`
+
+Poll an async `web_form_submit`.
+
+| Parameter | Type              | Description |
+| --------- | ----------------- | ----------- |
+| `job_id`  | string (required) | The `job_id` the async submit returned |
+
+Returns `{ job_id, status: "queued" | "running" | "done", site, created_at, finished_at?, result? }`;
+`result` is exactly what a synchronous `web_form_submit` returns, with the same
+retry rule. Jobs live in the Tools process for 1 h: an unknown job (expired, or
+the server restarted) is an **unknown outcome** — never a reason to resubmit.
 
 ### `web_eval`
 
