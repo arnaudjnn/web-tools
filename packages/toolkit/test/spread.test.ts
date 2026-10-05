@@ -1,16 +1,29 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+const resolve4 = vi.fn();
 const resolve6 = vi.fn();
-vi.mock('node:dns/promises', () => ({ resolve6: (...a: unknown[]) => resolve6(...a) }));
+vi.mock('node:dns/promises', () => ({
+  resolve4: (...a: unknown[]) => resolve4(...a),
+  resolve6: (...a: unknown[]) => resolve6(...a),
+}));
 
 const { pickReplica, resetSpread } = await import('../src/sidecar.js');
 
 afterEach(() => {
   resetSpread();
+  resolve4.mockReset();
   resolve6.mockReset();
+  resolve4.mockRejectedValue(Object.assign(new Error('nodata'), { code: 'ENODATA' }));
 });
 
 describe('pickReplica', () => {
+  it('prefers IPv4 replica addresses (the sidecars bind 0.0.0.0)', async () => {
+    resolve4.mockResolvedValue(['10.0.0.2', '10.0.0.1']);
+    const a = await pickReplica('http://camoufox.railway.internal:8000');
+    expect(a.url).toBe('http://10.0.0.1:8000/');
+    expect(resolve6).not.toHaveBeenCalled();
+  });
+
   it('spreads concurrent calls over every replica, least in flight first', async () => {
     resolve6.mockResolvedValue(['fd12::2', 'fd12::1']);
     const a = await pickReplica('http://camoufox.railway.internal:8000');

@@ -70,14 +70,21 @@ const inFlight = new Map<string, number>();
 async function replicaIps(host: string): Promise<string[]> {
   const hit = spreadCache.get(host);
   if (hit && Date.now() - hit.at < SPREAD_DNS_TTL_MS) return hit.ips;
-  try {
-    const { resolve6 } = await import('node:dns/promises');
-    const ips = (await resolve6(host)).sort();
-    spreadCache.set(host, { at: Date.now(), ips });
-    return ips;
-  } catch {
-    return [];
+  // IPv4 first: the sidecars bind 0.0.0.0, so their AAAA addresses refuse
+  // connections (2026-10-05: ECONNREFUSED on every spread call).
+  const dns = await import('node:dns/promises');
+  for (const resolve of [dns.resolve4, dns.resolve6]) {
+    try {
+      const ips = (await resolve(host)).sort();
+      if (ips.length) {
+        spreadCache.set(host, { at: Date.now(), ips });
+        return ips;
+      }
+    } catch {
+      // try the next family
+    }
   }
+  return [];
 }
 
 /** The URL to call and a release(); falls back to the base URL when the host
@@ -88,7 +95,7 @@ export async function pickReplica(base: string): Promise<{ url: string; release:
   if (ips.length < 2) return { url: base, release: () => {} };
   const ip = ips.reduce((best, cur) => ((inFlight.get(cur) ?? 0) < (inFlight.get(best) ?? 0) ? cur : best));
   inFlight.set(ip, (inFlight.get(ip) ?? 0) + 1);
-  parsed.hostname = `[${ip}]`;
+  parsed.hostname = ip.includes(':') ? `[${ip}]` : ip;
   let released = false;
   return {
     url: parsed.toString(),
