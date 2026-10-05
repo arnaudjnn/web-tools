@@ -184,3 +184,32 @@ def default_spec():
     spec = json.loads(raw)
     launch_kwargs(spec, screen_factory=lambda **k: None)  # validate
     return spec
+
+
+# FORM_FINGERPRINT_DIVERSIFY=1: each new form browser (and each pool profile,
+# once) draws an OS and screen, so parallel sessions are not one device four
+# times. Screens stay within the 1440x900 Xvfb display (a larger spoofed
+# window would be clipped by the real one). Explicit spec values always win.
+DIVERSE_OS = (("windows", 0.65), ("macos", 0.35))
+DIVERSE_SCREENS = ((1366, 768), (1440, 900), (1280, 800), (1280, 720), (1360, 768))
+
+
+def diversify(spec, rng=None):
+    import os
+    import random
+    if os.environ.get("FORM_FINGERPRINT_DIVERSIFY") != "1":
+        return spec
+    rng = rng or random
+    out = dict(spec or {})
+    if "os" not in out:
+        roll, acc = rng.random(), 0.0
+        for name, weight in DIVERSE_OS:
+            acc += weight
+            if roll < acc:
+                out["os"] = name
+                break
+        else:
+            out["os"] = DIVERSE_OS[-1][0]
+    if "screen" not in out:
+        out["screen"] = list(rng.choice(DIVERSE_SCREENS))
+    return out

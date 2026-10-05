@@ -89,6 +89,7 @@ from form_flow import FormLive, validate_form
 from form_worker import FormRetryable, FormWorker, not_started, run_isolated_form
 import fingerprint as fingerprint_mod
 import form_inspect
+import profile_pool
 import form_retry
 import launch_health
 import profile_store
@@ -685,6 +686,7 @@ def _form_browser(session, main_world_eval=False, headed=False, profile=None, fi
     base = {"geoip": True, "humanize": True}
     if fingerprint is None:
         fingerprint = fingerprint_mod.default_spec()
+    fingerprint = fingerprint_mod.diversify(fingerprint)
     base.update(fingerprint_mod.launch_kwargs(fingerprint))
     if not profile:
         manager = Camoufox(headless=headless, proxy=proxy, timeout=30000,
@@ -740,6 +742,21 @@ async def _role_gate(request, call_next):
             "role": ROLE, "retryable": False,
             "message": "this Camoufox runs CAMOUFOX_ROLE=forms: only /form-* and /healthz"}})
     return await call_next(request)
+
+
+@app.on_event("startup")
+async def _warm_profile_pool() -> None:
+    """Warm the form profile pool in the background (FORM_PROFILE_POOL)."""
+    if not profile_pool.enabled():
+        return
+
+    async def warm_one(name):
+        data = await score_probe.form_warm(score_probe.WarmRequest(
+            profile=name, target_url="https://www.google.it/", fresh_ip=True, sticky_exit=False))
+        return any(v.get("ok") for v in (data.get("visits") or []))
+
+    log.info("profile pool: warming %d profile(s) in the background", len(profile_pool.pending(_profile_dir)))
+    asyncio.create_task(profile_pool.warm_all(warm_one, _profile_dir))
 
 
 @app.on_event("startup")
@@ -1122,9 +1139,22 @@ async def form_submit(req: FormSubmitRequest):
 
     async def attempt(n):
         # Attempt 1 runs on the resolved session; a retry on a NEW exit token
-        # (fresh proxy session, new isolated context), gated again.
+        # (fresh proxy session, new isolated context), gated again. With a
+        # profile pool, each attempt borrows a different warmed profile.
+        attempt_req = _retry_request(req, n)
+        pooled = None
+        if profile_pool.enabled() and not req.profile and not req.exit_session:
+            pooled = profile_pool.acquire(_profile_dir)
+            if pooled:
+                attempt_req = _with_fields(attempt_req, profile=pooled, sticky_exit=False)
         try:
-            data, gate, used = await _form_attempt(_retry_request(req, n), deadline,
+            return await _attempt_on(attempt_req, n)
+        finally:
+            profile_pool.release(pooled)
+
+    async def _attempt_on(attempt_req, n):
+        try:
+            data, gate, used = await _form_attempt(attempt_req, deadline,
                                                    session if n == 1 else proxy_session.new_token(),
                                                    retry=n > 1, retries=retries,
                                                    attempt_n=n if retries else None)
@@ -1227,6 +1257,17 @@ def _form_live(req):
     live.note(pacing=_pacing(req) or "default",
               replica=(os.environ.get("RAILWAY_REPLICA_ID") or "")[:8] or None)
     return live
+
+
+def _with_fields(req, **update):
+    """A copy of the request with these fields replaced (pydantic or plain)."""
+    if hasattr(req, "model_copy"):
+        return req.model_copy(update=update)
+    import copy
+    clone = copy.copy(req)
+    for key, value in update.items():
+        setattr(clone, key, value)
+    return clone
 
 
 def _retry_request(req, n):
