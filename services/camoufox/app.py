@@ -824,6 +824,26 @@ _DEAD_BROWSER = re.compile(
 )
 
 
+# Render recoveries within RENDER_RECOVERY_WINDOW_S that mean the process is
+# no longer healthy. Each recovery used to LEAK the dead browser (its Firefox
+# and Playwright driver stayed up, owned by the retired thread), and on
+# 2026-10-04 they fired every few minutes until launches failed ("Failed to
+# launch the browser process"), pages crashed and /recycle timed out — taking
+# forms in the same process down with them. Past the threshold the process is
+# shed (exit 1, restart policy ALWAYS) instead of limping on.
+RENDER_RECOVERY_LIMIT = int(os.getenv("RENDER_RECOVERY_LIMIT", "4"))
+RENDER_RECOVERY_WINDOW_S = float(os.getenv("RENDER_RECOVERY_WINDOW_S", "600"))
+_render_recoveries: list[float] = []
+
+
+def _note_render_recovery() -> bool:
+    """Record one recovery; True when the window holds too many (shed)."""
+    now = time.monotonic()
+    _render_recoveries[:] = [t for t in _render_recoveries if now - t < RENDER_RECOVERY_WINDOW_S]
+    _render_recoveries.append(now)
+    return RENDER_RECOVERY_LIMIT > 0 and len(_render_recoveries) >= RENDER_RECOVERY_LIMIT
+
+
 async def _run_render(fn, *args):
     """Run a render-browser job, recovering ONCE from a browser that has died."""
     global _render_cm, _render_browser, _render_thread
@@ -834,9 +854,20 @@ async def _run_render(fn, *args):
         if not _DEAD_BROWSER.search(str(e)):
             raise
         log.warning("render browser is dead (%s) — fresh thread, retrying once", str(e)[:120])
+        # Close the dead browser on the thread that owns it (bounded, like
+        # /recycle) BEFORE swapping threads: dropping the handle leaked its
+        # Firefox + driver every time.
+        dead_cm, old_executor = _render_cm, _render_executor
         _render_cm = _render_browser = None
         _render_thread = None
+        if dead_cm is not None:
+            await _close_or_abandon(old_executor, lambda: _close_cm(dead_cm, "dead render browser"),
+                                    "dead render browser")
         _reset_render_executor()
+        if _note_render_recovery():
+            log.warning("render browser died %d times in %.0fs — shedding the process for a clean restart",
+                        len(_render_recoveries), RENDER_RECOVERY_WINDOW_S)
+            loop.call_later(3.0, os._exit, 1)
         return await loop.run_in_executor(_render_executor, fn, *args)
 
 
