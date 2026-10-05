@@ -220,7 +220,7 @@ class FormTests(unittest.TestCase):
     def _form_handler(tree):
         # The endpoint plus the one-attempt runner it loops over
         # (retry_on_captcha_rejection): together they are the form path.
-        names = ("form_submit", "_form_attempt", "_form_attempt_run", "_form_run")
+        names = ("form_submit", "_form_attempt", "_form_attempt_run", "_form_run", "_form_run_unlocked")
         return "\n".join(ast.unparse(node) for node in tree.body
                          if isinstance(node, ast.AsyncFunctionDef) and node.name in names)
 

@@ -511,7 +511,8 @@ class RetryGateTests(unittest.TestCase):
 
     def req(self, **kw):
         from types import SimpleNamespace
-        base = dict(url="https://form.test/f", score_gate=None, score_threshold=0.7)
+        base = dict(url="https://form.test/f", score_gate=None, score_threshold=0.7,
+                    oracle_url="https://tools.test/oracle/recaptcha")
         base.update(kw)
         return SimpleNamespace(**base)
 
@@ -521,6 +522,13 @@ class RetryGateTests(unittest.TestCase):
         retry = app._retry_request(req, 2)
         self.assertTrue(retry.score_gate)
         self.assertEqual(retry.score_threshold, 0.9)
+
+    def test_no_oracle_means_a_plain_retry(self):
+        req = self.req(oracle_url=None)
+        self.assertIs(app._retry_request(req, 2), req)
+
+    def test_a_retry_gate_is_soft(self):
+        self.assertTrue(app._retry_request(self.req(), 2).score_gate_soft)
 
     def test_an_explicit_caller_choice_wins(self):
         for choice in (True, False):

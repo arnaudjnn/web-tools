@@ -1077,6 +1077,7 @@ class FormSubmitRequest(BaseModel):
     score_threshold: float = Field(0.7, ge=0, le=1)
     score_gate_tries: int = Field(3, ge=1, le=6)
     oracle_url: str | None = Field(None, max_length=500, description="the score oracle the gate probes (Tools passes its own)")
+    score_gate_soft: bool = Field(False, description="internal: a retry's gate falls back to an ungated fresh exit instead of 503 no_scoring_exit")
     retry_on_captcha_rejection: int = Field(3, ge=0, le=form_retry.MAX_RETRIES, description="fresh attempts (new context, new exit) after an explicit step-0 CAPTCHA refusal or any provably zero-POST failure (form_retry.py); 0 = single attempt")
     captcha_rejection_text: str | None = Field(None, max_length=300, description="regex every error node of the re-rendered form must match to count as a CAPTCHA refusal; default form_retry.DEFAULT_CAPTCHA_REJECTION")
     fingerprint: dict | None = Field(None, description="measured fingerprint knobs for this form browser and its score-gate probes (os, locale, screen, window, fonts, block_webgl, webgl_config, humanize, fingerprint_preset, config, firefox_user_prefs — fingerprint.py); None = unchanged. A named profile uses it on its FIRST draw only")
@@ -1223,7 +1224,8 @@ def _pacing(req):
 def _form_live(req):
     """One FormLive per job; the form-run line names the pacing."""
     live = FormLive(profile=req.profile, headed=req.headed, camoufox=_CAMOUFOX_VERSION)
-    live.note(pacing=_pacing(req) or "default")
+    live.note(pacing=_pacing(req) or "default",
+              replica=(os.environ.get("RAILWAY_REPLICA_ID") or "")[:8] or None)
     return live
 
 
@@ -1241,7 +1243,10 @@ def _retry_request(req, n):
         threshold = 0.0
     if threshold <= 0:
         return req
-    update = {"score_gate": True, "score_threshold": max(req.score_threshold, threshold)}
+    if not getattr(req, "oracle_url", None):
+        return req  # nothing to gate against: a plain retry, never a 400
+    update = {"score_gate": True, "score_threshold": max(req.score_threshold, threshold),
+              "score_gate_soft": True}
     if hasattr(req, "model_copy"):
         return req.model_copy(update=update)
     import copy
@@ -1346,6 +1351,25 @@ def _exit_mismatch_503(mismatches, gate):
 async def _form_run(req, deadline, session, live, rotate, expect_ip):
     """One form browser on `session` (the worker job); HTTPExceptions for a
     park (503) and an unknown outcome (502)."""
+    if req.profile:
+        # A named profile is one on-disk browser identity: with
+        # FORM_CONCURRENCY > 1 two jobs must never open it at once.
+        async with _profile_lock(req.profile):
+            return await _form_run_unlocked(req, deadline, session, live, rotate, expect_ip)
+    return await _form_run_unlocked(req, deadline, session, live, rotate, expect_ip)
+
+
+_PROFILE_LOCKS: dict = {}
+
+
+def _profile_lock(name):
+    lock = _PROFILE_LOCKS.get(name)
+    if lock is None:
+        lock = _PROFILE_LOCKS[name] = asyncio.Lock()
+    return lock
+
+
+async def _form_run_unlocked(req, deadline, session, live, rotate, expect_ip):
     try:
         # Neither /recycle nor read-job recovery owns this browser. Never retry.
         return await _form_worker.run(partial(run_isolated_form,
@@ -1421,6 +1445,13 @@ async def _score_gate(req, session, deadline, live, recheck=False):
         target_url=req.url, fingerprint=getattr(req, "fingerprint", None))
     record = score_probe.gate_record(outcome)
     live.note(score_gate=record)
+    if not outcome["passed"] and getattr(req, "score_gate_soft", False):
+        # A retry's gate is a preference, not a wall: when no exit qualifies,
+        # run the retry on a fresh exit anyway instead of spending the attempt
+        # (2026-10-05: two retries ended no_scoring_exit and the call failed).
+        log.info("score gate (soft): no exit >= %.2f; retrying ungated on a fresh exit", req.score_threshold)
+        record["soft_fallback"] = True
+        return {"session": proxy_session.new_token(), "record": record}
     if not outcome["passed"]:
         live.emit(not_started(req.url, "no_scoring_exit"))
         raise HTTPException(status_code=503, detail={

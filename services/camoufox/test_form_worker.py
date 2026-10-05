@@ -347,3 +347,35 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConcurrencyTests(unittest.TestCase):
+    """FORM_CONCURRENCY jobs run at once per process (default 1)."""
+
+    def run_two(self, concurrency):
+        import threading
+        worker = FormWorker(concurrency=concurrency)
+        active, peak, lock = [0], [0], threading.Lock()
+
+        def job():
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(0.3)
+            with lock:
+                active[0] -= 1
+            return {"ok": True}
+
+        async def go():
+            deadline = time.monotonic() + 10
+            return await asyncio.gather(*(worker.run(job, url="https://form.test", deadline=deadline)
+                                          for _ in range(2)))
+        results = asyncio.run(go())
+        self.assertTrue(all(r["ok"] for r in results))
+        return peak[0]
+
+    def test_default_is_serial(self):
+        self.assertEqual(self.run_two(1), 1)
+
+    def test_two_run_together(self):
+        self.assertEqual(self.run_two(2), 2)

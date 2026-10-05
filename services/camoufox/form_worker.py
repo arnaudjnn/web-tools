@@ -235,8 +235,26 @@ def _run_isolated(browser_factory, deadline, live, runner, params):
 
 
 class FormWorker:
-    def __init__(self):
-        self._admission = asyncio.Lock()
+    def __init__(self, concurrency=None):
+        # FORM_CONCURRENCY forms run at once per process (default 1, the old
+        # serial admission). Each job still gets its own thread and browser;
+        # a wedge shed (os._exit) takes every in-flight job with it, which
+        # callers already read as an unknown outcome.
+        if concurrency is None:
+            try:
+                concurrency = int(os.getenv("FORM_CONCURRENCY", "1"))
+            except ValueError:
+                concurrency = 1
+        self.concurrency = max(1, concurrency)
+        # Created on first use, inside the running loop (a primitive made
+        # outside it binds to the wrong loop on older Pythons).
+        self._sem = None
+
+    @property
+    def _admission(self):
+        if self._sem is None:
+            self._sem = asyncio.Semaphore(self.concurrency)
+        return self._sem
 
     async def run(self, job, *, url, deadline, live=None):
         """Run `job` on a fresh thread; `live` is the job's FormLive.
