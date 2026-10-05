@@ -283,3 +283,23 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
 - `.claude/skills/tools-health` diagnoses/heals the stack (`health.py`,
   `heal.py`); `references/signatures.md` maps every observed failure signature to
   its confirmed cause and fix. Read it before interpreting a probe.
+
+## Forms: measured defaults (2026-10-05)
+
+- `web_form_submit` defaults: headed, no score gate (`score_gate: true` to
+  opt in), `retry_on_captcha_rejection: 3` (refusals AND any zero-POST
+  failure, on a fresh exit), `timeout_ms: 300000`, `FORM_PACING=lab` on
+  Camoufox. Measured on Atoka: 35/35 calls end to end, ~57 s per call.
+  `pacing: "lab_fast"` types faster but is refused more (63% vs 76% per
+  attempt) — slower per call overall; not a default.
+- Camoufox runs **2 replicas** (`railway scale --service Camoufox eu-west=2`);
+  form profiles are ephemeral (`FORM_PROFILE_DIR=/tmp/form-profiles`, the
+  `camoufox-volume` is detached, kept). Forms are serial per replica, and
+  Tools spreads form calls over the replicas' IPv4 addresses
+  (`pickReplica` in sidecar.ts) — plain fetch reuses one connection and put
+  every call on the first replica. 4 parallel calls: ~175 s, not ~240 s.
+- A POST nothing answers ends the walk after `FORM_POST_NO_ANSWER_S` (90 s)
+  as `outcome_unknown`. Repeated render-browser deaths (4 in 10 min) shed
+  the process instead of leaking browsers until the replica freezes.
+- Benches from a laptop must run under `caffeinate`: a sleeping Mac drops the
+  open request silently and looks exactly like a hung sidecar.
