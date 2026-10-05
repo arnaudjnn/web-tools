@@ -188,8 +188,16 @@ const ProfileName = z
   .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/)
   .max(64);
 
+export const WebFormResultInput = z.object({
+  job_id: z.string().min(1).describe('The job_id an async web_form_submit returned'),
+});
+
 export const WebFormSubmitInput = z.object({
   url: z.string().url().describe('URL of the page holding the form'),
+  async: z
+    .boolean()
+    .optional()
+    .describe('Return {job_id} at once and run the submission in the background; poll web_form_result. Use it to queue many forms'),
   fields: z.array(FormField).describe('Controls to fill, in order. Never include honeypot_candidates'),
   submit: z.string().describe('CSS selector of the submit control, clicked exactly once'),
   dismiss: z.array(z.string()).optional().describe('Cookie-banner selectors clicked before filling'),

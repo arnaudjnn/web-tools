@@ -15,6 +15,7 @@ export const TOOL_NAMES = [
   'web_archive',
   'web_bytes',
   'web_form_submit',
+  'web_form_result',
   'web_form_inspect',
   'web_eval',
   'web_spa_fetch',

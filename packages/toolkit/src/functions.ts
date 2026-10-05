@@ -14,6 +14,7 @@ import {
 import { Config } from './config.js';
 import { web_agent } from './agent.js';
 import { errMsg, log } from './log.js';
+import { getJob, startJob, withSiteLimit } from './form_jobs.js';
 import { renderMarkdown } from './markdown.js';
 import { forcedWaitMs, pickBackend, type Backend } from './routing.js';
 import type {
@@ -415,7 +416,48 @@ function formResult(tool: 'web_form_submit' | 'web_form_inspect', body: Record<s
  * host's own IP — and for the POST itself, which needs a warmed session on
  * Akamai-gated origins.
  */
+/**
+ * web_form_submit: at most FORM_SITE_CONCURRENCY submissions per site run at
+ * once (form_jobs.ts); `async: true` returns a job id at once
+ * (web_form_result polls it) instead of holding the call open ~10-60 s.
+ */
 export async function web_form_submit(params: Record<string, unknown>): Promise<ToolResult> {
+  const url = typeof params.url === 'string' ? params.url : '';
+  if (params.async === true && url) {
+    const { async: _async, ...rest } = params;
+    const job = startJob(url, () => runFormSubmit(rest));
+    return { content: [{ type: 'text', text: JSON.stringify(job) }], isError: false };
+  }
+  return url ? withSiteLimit(url, () => runFormSubmit(params)) : runFormSubmit(params);
+}
+
+/** Poll an async web_form_submit job: {job_id, status, result?}. */
+export async function web_form_result(params: Record<string, unknown>): Promise<ToolResult> {
+  const id = typeof params.job_id === 'string' ? params.job_id : '';
+  const job = id ? getJob(id) : undefined;
+  if (!job) {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ job_id: id, status: 'unknown', error: 'no such job (expired after 1 h, or the server restarted: the outcome is unknown)' }) }],
+      isError: true,
+    };
+  }
+  const { result, ...meta } = job;
+  let body: unknown = undefined;
+  if (result) {
+    const text = result.content?.[0] && 'text' in result.content[0] ? (result.content[0] as { text: string }).text : '';
+    try {
+      body = JSON.parse(text.slice(Math.max(0, text.indexOf('{'))));
+    } catch {
+      body = text;
+    }
+  }
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ ...meta, ...(result ? { result: body } : {}) }) }],
+    isError: Boolean(result?.isError),
+  };
+}
+
+async function runFormSubmit(params: Record<string, unknown>): Promise<ToolResult> {
   const url = params.url as string | undefined;
   const submit = params.submit as string | undefined;
   const fields = params.fields as Array<Record<string, unknown>> | undefined;
@@ -621,6 +663,7 @@ const impls: Record<ToolName, (params: any) => Promise<ToolResult>> = {
   web_bytes,
   web_eval,
   web_form_submit,
+  web_form_result,
   web_form_inspect,
   web_spa_fetch,
   web_recycle,

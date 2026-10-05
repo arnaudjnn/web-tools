@@ -16,6 +16,7 @@ import {
   WebUsageStatsInput,
   WebFormSubmitInput,
   WebFormInspectInput,
+  WebFormResultInput,
   WebAgentInput,
   WebStealthDiagnosticInput,
 } from './schemas.js';
@@ -166,6 +167,20 @@ export const tools: ToolDefinition[] = [
       destructiveHint: false,
       idempotentHint: true,
       openWorldHint: true,
+    },
+  },
+  {
+    name: 'web_form_result',
+    description:
+      'Poll an async web_form_submit: {job_id, status: queued|running|done, result}. ' +
+      'result is the same body a synchronous web_form_submit returns. Jobs are kept 1 h; ' +
+      'an unknown job is an unknown outcome (never a reason to resubmit).',
+    parameters: WebFormResultInput,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
   },
   {
