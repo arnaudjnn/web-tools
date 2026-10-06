@@ -303,3 +303,29 @@ The Italian-residential browser: `/render`, `/eval`, `/screenshot`, `/spa-fetch`
   the process instead of leaking browsers until the replica freezes.
 - Benches from a laptop must run under `caffeinate`: a sleeping Mac drops the
   open request silently and looks exactly like a hung sidecar.
+
+## Forms throughput on one reCAPTCHA v3 site (Atoka, 2026-10-05)
+
+Production: Camoufox **5 replicas**, `FORM_CONCURRENCY=1`, `FORM_PROFILE_POOL=4`,
+`FORM_FINGERPRINT_DIVERSIFY=1`, `FORM_RETRY_GATE=0`, Tools
+`FORM_SITE_CONCURRENCY=5`. Measured (40 calls, 5 in flight): 39/40 ok, 66% per
+attempt, **one success every 21.3 s**.
+
+| setup | per attempt | s / success |
+|---|---|---|
+| 2 replicas, blank profiles | 83% (2 in flight) | 46 |
+| 4 replicas, blank profiles | 50% | 82 |
+| 4 replicas, warmed pool + diversity | 68% | 34 |
+| 5 replicas, pool, ungated retries | 66% | **21.3** |
+| 6 replicas, same | 47% | 27.5 |
+| 2 forms per container (CPU shared) | 30% | — |
+
+- Acceptance falls past ~5 parallel sessions on one site (Google scores the
+  site's traffic) and when browsers share a container. Do not add replicas or
+  `FORM_CONCURRENCY` to speed up a single reCAPTCHA site.
+- Warmed profiles + per-session fingerprints were the lever (50% -> 68% at 4
+  in flight). Retry score-gating cost more queue time than it saved once
+  profiles were warm.
+- `FORM_SITE_CONCURRENCY` in Tools caps per-site parallelism: it must be >=
+  the parallelism you mean to test, or the test silently measures the cap.
+
