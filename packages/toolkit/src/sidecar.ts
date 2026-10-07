@@ -13,7 +13,7 @@
 // have happened, so retrying belongs to callers that know their request is
 // idempotent — and none of the current ones need it.
 
-import './http.js';
+import { sidecarDispatcher } from './http.js';
 
 export class SidecarError extends Error {
   constructor(
@@ -157,7 +157,8 @@ export function createSidecar(opts: {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(clientTimeoutMs),
-        });
+          dispatcher: sidecarDispatcher,
+        } as RequestInit);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         const cause = (err as { cause?: { code?: string } }).cause?.code;

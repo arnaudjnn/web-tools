@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { camoufoxFormInspect, camoufoxFormSubmit, camoufoxRender } from '../src/camoufox.js';
 import { scraplingFetch } from '../src/scrapling.js';
+import { sidecarDispatcher } from '../src/http.js';
 import { BREAKER_COOLDOWN_MS, createSidecar, isUnreachable, SidecarError } from '../src/sidecar.js';
 import { fakeSidecars, refused } from './sidecars.js';
 
@@ -43,6 +44,8 @@ describe('createSidecar post', () => {
     const [url, init] = f.mock.calls[0]!;
     expect(String(url)).toBe('http://side.test:1/x');
     expect(init).toMatchObject({ method: 'POST', body: '{"a":1}', headers: { 'Content-Type': 'application/json' } });
+    // Never a pooled socket: a closed keep-alive killed forms (UND_ERR_SOCKET).
+    expect((init as { dispatcher?: unknown }).dispatcher).toBe(sidecarDispatcher);
     expect(init!.signal).toBeInstanceOf(AbortSignal);
   });
 

@@ -30,7 +30,8 @@ lives here is the map, the benchmark that shaped the architecture, and the traps
   (residential either way; never from the Tools process).
 - `sidecar.ts` is the one HTTP client for both sidecars, with a circuit breaker
   that trips **only** on unreachable (ENOTFOUND/ECONNREFUSED/…), 60 s, never on a
-  timeout or HTTP error. No retries anywhere (forms: a lost response may hide a
+  timeout or HTTP error. It never reuses a socket (`sidecarDispatcher`, keep-alive off): a pooled
+  socket a restarted replica had closed failed forms as `UND_ERR_SOCKET`. No retries anywhere (forms: a lost response may hide a
   submission). Client aborts: Scrapling timeout+25 s, Camoufox +30 s, forms +60 s.
 - One result shape: every tool returns an MCP `ToolResult`; `functionMap` wraps
   each in `instrument()` (counts calls/bytes/errors for **all 17** tools (incl. `web_form_inspect`, `web_agent`), turns a

@@ -10,3 +10,15 @@ import { Agent, setGlobalDispatcher } from 'undici';
 const TEN_MINUTES_MS = 600_000;
 
 setGlobalDispatcher(new Agent({ headersTimeout: TEN_MINUTES_MS, bodyTimeout: TEN_MINUTES_MS }));
+
+// Sidecar calls never reuse a socket (pipelining 0 = no keep-alive). uvicorn
+// drops idle connections after 5 s and replicas restart on their own (a parked
+// form exits the process), so a pooled socket could already be closed: the
+// call then died as UND_ERR_SOCKET, and a form cannot be replayed on that
+// (2026-10-07: every first form call after a pause). A fresh connection on the
+// private network costs ~1 ms; a form takes 20-60 s.
+export const sidecarDispatcher = new Agent({
+  pipelining: 0,
+  headersTimeout: TEN_MINUTES_MS,
+  bodyTimeout: TEN_MINUTES_MS,
+});
