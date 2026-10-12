@@ -71,6 +71,12 @@ engines:
     shortcut: g
     use_mobile_ui: false
     disabled: false
+    # The image's defaults mark google `inactive: true` (2026.9.30), and an
+    # inactive engine is never registered: `engines=google` then names nothing,
+    # and SearXNG silently answers from its default engines instead (Bing, which
+    # ignores `site:`). Every "google" search ran on Bing from the 2026-10-02 pin
+    # until this line, and LinkedIn people search collapsed with it.
+    inactive: false
 
   - name: brave
     engine: brave

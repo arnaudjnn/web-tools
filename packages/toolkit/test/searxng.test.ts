@@ -121,4 +121,26 @@ describe('searchSearXNG', () => {
       await expect(searchSearXNG('x', { engines: 'brave,duckduckgo' })).rejects.toThrow('searxng: every engine failed');
     });
   });
+
+  describe('answers from engines that were not asked', () => {
+    it('drops rows from other engines', async () => {
+      stub({ body: { results: [
+        { url: 'https://g/', title: 'G', content: '', engines: ['google'] },
+        { url: 'https://b/', title: 'B', content: '', engines: ['bing'] },
+      ] } });
+      expect((await searchSearXNG('x', { engines: 'google' })).map((r) => r.url)).toEqual(['https://g/']);
+    });
+
+    it('is an error when only other engines answered (the asked one is not active)', async () => {
+      stub({ body: { results: [{ url: 'https://b/', title: 'B', content: '', engines: ['bing'] }] } });
+      await expect(searchSearXNG('x', { engines: 'google' })).rejects.toThrow(
+        'searxng: google did not answer; results came from bing instead',
+      );
+    });
+
+    it('keeps rows without engine metadata when no engine was asked', async () => {
+      stub({ body: { results: [{ url: 'https://b/', title: 'B', content: '', engines: ['bing'] }] } });
+      expect(await searchSearXNG('x')).toHaveLength(1);
+    });
+  });
 });

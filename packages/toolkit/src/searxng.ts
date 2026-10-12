@@ -2,7 +2,7 @@ import { Config } from './config.js';
 import { log } from './log.js';
 import type { SearchResult } from './types.js';
 
-type SearXNGResult = { url: string; title: string; content: string };
+type SearXNGResult = { url: string; title: string; content: string; engine?: string; engines?: string[] };
 
 type SearXNGResponse = {
   results: SearXNGResult[];
@@ -40,7 +40,28 @@ async function fetchSearXNG(query: string, engines: string | undefined): Promise
   }
 
   const body = (await response.json()) as SearXNGResponse;
-  const valid = (body.results ?? []).filter((r) => r.title && r.url);
+  let valid = (body.results ?? []).filter((r) => r.title && r.url);
+  // SearXNG treats an engine name it has not registered (disabled, or marked
+  // inactive by the image defaults) as no choice at all and answers from its
+  // default engines. That is how every engines=google search returned Bing
+  // rows from 2026-10-02 to 2026-10-12. Keep only the engines asked for, and
+  // say so when none of them answered.
+  if (chosen) {
+    const asked = new Set(chosen.split(',').map((e) => e.trim()).filter(Boolean));
+    const enginesOf = (r: SearXNGResult) => r.engines ?? (r.engine ? [r.engine] : []);
+    // A row with no engine metadata cannot be told apart, so it is kept.
+    const fromAsked = (r: SearXNGResult) => enginesOf(r).length === 0 || enginesOf(r).some((e) => asked.has(e));
+    const others = valid.filter((r) => !fromAsked(r));
+    if (others.length > 0) {
+      const answeredBy = [...new Set(others.flatMap(enginesOf))];
+      valid = valid.filter(fromAsked);
+      if (valid.length === 0) {
+        throw new SearXNGError(
+          `searxng: ${chosen} did not answer; results came from ${answeredBy.join(', ')} instead (engine not active?)`,
+        );
+      }
+    }
+  }
   const down = body.unresponsive_engines ?? [];
   log(`SearXNG: ${valid.length} results${down.length ? `, unresponsive: ${JSON.stringify(down)}` : ''}`);
   if (valid.length === 0 && down.length > 0) {
