@@ -161,7 +161,7 @@ function fetchPage(url: string, opts: PageOpts = {}): Promise<FetchedPage> {
 // turns a throw into an isError result, so error handling lives in one place.
 
 export async function web_search(params: z.infer<typeof WebSearchInput>): Promise<ToolResult> {
-  return data(await searchSearXNG(params.query, { limit: params.limit ?? 10, engines: params.engines }));
+  return data(await searchSearXNG(params.query, { limit: params.limit ?? 10, engines: params.engines, page: params.page }));
 }
 
 export async function web_fetch(params: z.infer<typeof WebFetchInput>): Promise<ToolResult> {

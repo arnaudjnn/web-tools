@@ -1,6 +1,7 @@
 import { Config } from './config.js';
 import { log } from './log.js';
 import type { SearchResult } from './types.js';
+import { fetchYahoo } from './yahoo.js';
 
 type SearXNGResult = { url: string; title: string; content: string; engine?: string; engines?: string[] };
 
@@ -19,11 +20,12 @@ export class SearXNGError extends Error {}
  * "nothing on the web matches". Zero results with healthy engines is a real
  * answer and comes back as [].
  */
-async function fetchSearXNG(query: string, engines: string | undefined): Promise<SearXNGResult[]> {
+async function fetchSearXNG(query: string, engines: string | undefined, page = 1): Promise<SearXNGResult[]> {
   const { url: baseUrl, engines: defaultEngines, categories } = Config.searxng;
   const params = new URLSearchParams({ q: query, format: 'json' });
   const chosen = engines || defaultEngines;
   if (chosen) params.set('engines', chosen);
+  if (page > 1) params.set('pageno', String(page));
   if (categories) params.set('categories', categories);
 
   let response: Response;
@@ -82,8 +84,16 @@ async function fetchSearXNG(query: string, engines: string | undefined): Promise
  * Apart, a blocked or slow engine costs only its own rows. It is an error
  * only when every engine fails.
  */
-async function fetchEachEngine(query: string, engines: string[]): Promise<SearXNGResult[]> {
-  const settled = await Promise.allSettled(engines.map((engine) => fetchSearXNG(query, engine)));
+// Engines web-tools serves with its own code rather than through SearXNG.
+// `yahoo` is a stealth-browser fetch on the residential exit (see yahoo.ts).
+const OWN_ENGINES = new Set(['yahoo']);
+
+function fetchEngine(query: string, engine: string, page: number): Promise<SearXNGResult[]> {
+  return engine === 'yahoo' ? fetchYahoo(query, page) : fetchSearXNG(query, engine, page);
+}
+
+async function fetchEachEngine(query: string, engines: string[], page = 1): Promise<SearXNGResult[]> {
+  const settled = await Promise.allSettled(engines.map((engine) => fetchEngine(query, engine, page)));
   const lists = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []));
   if (lists.length === 0) {
     const reasons = settled.map((s, i) =>
@@ -100,11 +110,15 @@ async function fetchEachEngine(query: string, engines: string[]): Promise<SearXN
 
 export async function searchSearXNG(
   query: string,
-  options?: { limit?: number; engines?: string },
+  options?: { limit?: number; engines?: string; page?: number },
 ): Promise<SearchResult[]> {
   const limit = options?.limit ?? 10;
   const engines = (options?.engines ?? '').split(',').map((e) => e.trim()).filter(Boolean);
-  const raw = engines.length > 1 ? await fetchEachEngine(query, engines) : await fetchSearXNG(query, options?.engines);
+  const page = options?.page ?? 1;
+  const raw =
+    engines.length > 1 ? await fetchEachEngine(query, engines, page)
+    : engines.length === 1 && OWN_ENGINES.has(engines[0]!) ? await fetchEngine(query, engines[0]!, page)
+    : await fetchSearXNG(query, options?.engines, page);
 
   const seen = new Set<string>();
   const data: SearchResult[] = [];

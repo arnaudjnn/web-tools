@@ -22,8 +22,9 @@ export const WebSearchInput = z.object({
     .string()
     .optional()
     .describe(
-      'Comma-separated list of engines to use (e.g. "google", "google,brave"). Overrides the default engines.',
+      'Comma-separated list of engines to use (e.g. "yahoo", "yahoo,bing"). Overrides the default engines. "yahoo" is fetched by a stealth browser on a residential exit and honours site: (use it for site:linkedin.com/in); each listed engine is asked separately and merged.',
     ),
+  page: z.number().int().min(1).max(5).optional().describe('Results page (default 1)'),
 });
 
 export const WebFetchInput = z.object({
