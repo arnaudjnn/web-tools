@@ -21,12 +21,12 @@ describe('searchSearXNG', () => {
   it('queries /search as JSON with the caller engines, Accept json and a 25 s deadline', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     const f = stub({ body: { results: [] } });
-    await searchSearXNG('hello world', { engines: 'google,brave' });
+    await searchSearXNG('hello world', { engines: 'google' });
     const url = new URL(String(f.mock.calls[0]![0]));
     expect(url.origin + url.pathname).toBe('http://searxng.test:8080/search');
     expect(url.searchParams.get('q')).toBe('hello world');
     expect(url.searchParams.get('format')).toBe('json');
-    expect(url.searchParams.get('engines')).toBe('google,brave');
+    expect(url.searchParams.get('engines')).toBe('google');
     expect(f.mock.calls[0]![1]).toMatchObject({ headers: { Accept: 'application/json' } });
     // Must stay above SearXNG's own 15 s request timeout.
     expect(timeout).toHaveBeenCalledWith(25_000);
@@ -80,5 +80,45 @@ describe('searchSearXNG', () => {
     expect(ten[0]).toEqual({ url: 'https://r0/', title: 'R0', description: '' });
     stub({ body: { results } });
     expect(await searchSearXNG('x', { limit: 20 })).toHaveLength(12);
+  });
+
+  describe('several engines', () => {
+    // One request per engine, so a blocked engine cannot hide another's rows.
+    function perEngine(replies: Record<string, Reply>) {
+      const f = vi.fn(async (input: URL | string) => {
+        const reply = replies[new URL(String(input)).searchParams.get('engines')!]!;
+        if (reply instanceof Error) throw reply;
+        return new Response(JSON.stringify(reply.body), { status: reply.status ?? 200 });
+      });
+      vi.stubGlobal('fetch', f);
+      return f;
+    }
+    const row = (u: string) => ({ url: `https://${u}/`, title: u, content: '' });
+
+    it('asks each engine separately and merges round-robin in the given order', async () => {
+      const f = perEngine({
+        google: { body: { results: [row('g1'), row('g2')] } },
+        bing: { body: { results: [row('b1'), row('g1')] } },
+      });
+      const out = await searchSearXNG('x', { engines: 'google, bing' });
+      expect(f.mock.calls.map((c) => new URL(String(c[0])).searchParams.get('engines'))).toEqual(['google', 'bing']);
+      expect(out.map((r) => r.url)).toEqual(['https://g1/', 'https://b1/', 'https://g2/']);
+    });
+
+    it('keeps the healthy engines when one fails', async () => {
+      perEngine({
+        google: { body: { results: [row('g1')] } },
+        brave: { body: { results: [], unresponsive_engines: [['brave', 'too many requests']] } },
+      });
+      expect((await searchSearXNG('x', { engines: 'google,brave' })).map((r) => r.url)).toEqual(['https://g1/']);
+    });
+
+    it('is an error only when every engine fails', async () => {
+      perEngine({
+        brave: { body: { results: [], unresponsive_engines: [['brave', 'too many requests']] } },
+        duckduckgo: { status: 504, body: 'timeout' },
+      });
+      await expect(searchSearXNG('x', { engines: 'brave,duckduckgo' })).rejects.toThrow('searxng: every engine failed');
+    });
   });
 });

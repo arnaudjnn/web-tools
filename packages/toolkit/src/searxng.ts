@@ -51,12 +51,39 @@ async function fetchSearXNG(query: string, engines: string | undefined): Promise
   return valid;
 }
 
+/**
+ * Several engines are asked one request each, in parallel, and merged
+ * round-robin in the caller's order. Asked together in one SearXNG request,
+ * Google contributed nothing whenever another engine was listed: "google"
+ * alone returned the right LinkedIn profile in 1 s, "google,bing" returned
+ * only Bing's 7 off-topic rows, and "google,brave" or "google,duckduckgo"
+ * failed outright on Brave's 429 or DuckDuckGo's 15 s timeout (2026-10-12).
+ * Apart, a blocked or slow engine costs only its own rows. It is an error
+ * only when every engine fails.
+ */
+async function fetchEachEngine(query: string, engines: string[]): Promise<SearXNGResult[]> {
+  const settled = await Promise.allSettled(engines.map((engine) => fetchSearXNG(query, engine)));
+  const lists = settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value] : []));
+  if (lists.length === 0) {
+    const reasons = settled.map((s, i) =>
+      `${engines[i]}: ${s.status === 'rejected' && s.reason instanceof Error ? s.reason.message : String(s)}`,
+    );
+    throw new SearXNGError(`searxng: every engine failed (${reasons.join('; ')})`);
+  }
+  const merged: SearXNGResult[] = [];
+  for (let i = 0; lists.some((l) => i < l.length); i++) {
+    for (const list of lists) if (i < list.length) merged.push(list[i]!);
+  }
+  return merged;
+}
+
 export async function searchSearXNG(
   query: string,
   options?: { limit?: number; engines?: string },
 ): Promise<SearchResult[]> {
   const limit = options?.limit ?? 10;
-  const raw = await fetchSearXNG(query, options?.engines);
+  const engines = (options?.engines ?? '').split(',').map((e) => e.trim()).filter(Boolean);
+  const raw = engines.length > 1 ? await fetchEachEngine(query, engines) : await fetchSearXNG(query, options?.engines);
 
   const seen = new Set<string>();
   const data: SearchResult[] = [];
