@@ -87,9 +87,10 @@ export async function fetchYahoo(query: string, page = 1): Promise<YahooResult[]
   const res = await scraplingFetch({ url: yahooSearchUrl(query, page), mode: 'stealth', timeoutMs: 40_000, waitMs: 500 });
   if (res.status !== 200) throw new YahooError(`yahoo: HTTP ${res.status}`);
   const results = parseYahooSerp(res.html);
-  // A 200 with no result blocks and no "no results" notice is a changed page or
-  // an interstitial, not an empty answer.
-  if (results.length === 0 && !/did not match any|no results found|we did not find results/i.test(res.html)) {
+  // A real results page is titled "<query> - Yahoo Search Results", empty or
+  // not (an empty one shows only related searches). A 200 without that title
+  // is an interstitial or a changed page, not an empty answer.
+  if (results.length === 0 && !/<title>[^<]*Yahoo Search Results/i.test(res.html)) {
     throw new YahooError('yahoo: no result blocks on the page (layout changed or interstitial)');
   }
   return results;
